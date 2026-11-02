@@ -30,6 +30,10 @@ struct ProjectInput {
 
 pub fn from_json(json: &str) -> Result<Project, serde_json::Error> {
     let document: ProjectInput = serde_json::from_str(json)?;
+    document
+        .project
+        .validate()
+        .map_err(<serde_json::Error as serde::de::Error>::custom)?;
     Ok(document.project)
 }
 
@@ -90,5 +94,20 @@ mod tests {
         let json = to_json(&Project::new("Untitled")).unwrap();
         assert!(from_json(&json.replace("\"version\": 1", "\"version\": 2")).is_err());
         assert!(from_json(&json.replace("\"version\": 1,", "")).is_err());
+    }
+
+    #[test]
+    fn malformed_settings_and_tracks_are_rejected() {
+        let original: serde_json::Value =
+            serde_json::from_str(&to_json(&Project::new("Film")).unwrap()).unwrap();
+        for (field, value) in [
+            ("/settings/frame_rate/denominator", serde_json::json!(0)),
+            ("/settings/width", serde_json::json!(0)),
+            ("/tracks/1/id", serde_json::json!(0)),
+        ] {
+            let mut document = original.clone();
+            *document.pointer_mut(field).unwrap() = value;
+            assert!(from_json(&document.to_string()).is_err(), "{field}");
+        }
     }
 }

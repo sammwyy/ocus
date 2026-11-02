@@ -1,9 +1,11 @@
 use crate::media::Media;
-use crate::timeline::{Track, TrackKind};
+use crate::timeline::{ClipContent, Track, TrackKind};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 mod edit;
 pub mod format;
+pub mod store;
 
 pub use edit::{Command, Editor};
 
@@ -57,6 +59,73 @@ impl Project {
 
     pub(crate) fn replace_name(&mut self, name: String) -> String {
         std::mem::replace(&mut self.name, name)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty()
+            || self.settings.width == 0
+            || self.settings.height == 0
+            || self.settings.frame_rate.numerator == 0
+            || self.settings.frame_rate.denominator == 0
+        {
+            return Err("Invalid project name or video settings".into());
+        }
+        let mut media_ids = HashSet::new();
+        for media in &self.media {
+            if !media_ids.insert(media.id) || media.path.as_os_str().is_empty() {
+                return Err("Duplicate media ID or empty media path".into());
+            }
+        }
+        let mut track_ids = HashSet::new();
+        let mut clip_ids = HashSet::new();
+        for track in &self.tracks {
+            if !track_ids.insert(track.id) {
+                return Err("Duplicate track ID".into());
+            }
+            let mut end = 0;
+            for clip in &track.clips {
+                let next = clip
+                    .start_frame
+                    .checked_add(clip.duration_frames)
+                    .ok_or("Clip range overflows")?;
+                clip.source_start_frame
+                    .checked_add(clip.duration_frames)
+                    .ok_or("Clip source range overflows")?;
+                if clip.duration_frames == 0
+                    || clip.start_frame < end
+                    || !clip_ids.insert(clip.id)
+                    || !clip.volume.is_finite()
+                    || !(0.0..=2.0).contains(&clip.volume)
+                {
+                    return Err("Invalid or overlapping clip".into());
+                }
+                end = next;
+                match &clip.content {
+                    ClipContent::Title(title)
+                        if track.kind == TrackKind::Video
+                            && title.font_size.is_finite()
+                            && title.font_size > 0.0
+                            && title.x.is_finite()
+                            && title.y.is_finite()
+                            && (0.0..=1.0).contains(&title.x)
+                            && (0.0..=1.0).contains(&title.y) => {}
+                    ClipContent::Media { media_id }
+                        if self.media.iter().any(|media| {
+                            media.id == *media_id
+                                && matches!(
+                                    (track.kind, media.kind),
+                                    (
+                                        TrackKind::Video,
+                                        crate::media::MediaKind::Video
+                                            | crate::media::MediaKind::Image
+                                    ) | (TrackKind::Audio, crate::media::MediaKind::Audio)
+                                )
+                        }) => {}
+                    _ => return Err("Invalid title or incompatible media on track".into()),
+                }
+            }
+        }
+        Ok(())
     }
 }
 

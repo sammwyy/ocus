@@ -19,7 +19,7 @@ src/
   timeline.rs       tracks, clips, and title data
   ui/
     window.rs       integrated titlebar, editor layout, and clip controls
-    state.rs        transient selection, file paths, background jobs
+    state.rs        transient selection, native file dialogs, background jobs
 ```
 
 `main` calls `app::run_app`; the app creates the initial project and provides
@@ -27,6 +27,8 @@ it to `ui`. The UI reads saved state but does not edit it directly. Changes
 to the project should be commands handled beside the project model so they
 can be undone and redone. Selection, playhead, focus, scroll position, and
 panel sizes are transient editor state, not project-file data.
+File pickers and confirmation dialogs run from the UI event handler; once a
+file is selected, loading, saving, and media probing stay on background jobs.
 
 `project::format` owns schema version 1 and converts between JSON strings
 and the in-memory project. It rejects missing or unsupported versions and

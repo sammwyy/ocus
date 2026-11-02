@@ -73,6 +73,10 @@ distribution, native display development libraries may also be needed if the
 windowing dependencies report a missing system library at build time. These
 instructions have not been tested on Ubuntu/Debian in this repository.
 
+The native file pickers use the desktop's XDG portal backend on Linux. Ensure
+an appropriate portal implementation is running; `zenity` provides a fallback
+for file and confirmation dialogs on desktops without that backend.
+
 ## macOS
 
 Install Xcode Command Line Tools, Rust with rustup, and FFmpeg via Homebrew:

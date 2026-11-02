@@ -6,18 +6,24 @@ and exporting an MP4 in v0.1. **The end-to-end video workflow is not implemented
 yet.** Today the repository builds a CreamUI desktop shell with an integrated
 titlebar, four timeline tracks, a versioned JSON project representation, and
 undo/redo commands for renaming projects and inserting/removing clips. The
-**+ Title** control appends a three-second text clip to the first video track.
+**Add title** control appends a three-second text clip to the first video track.
 The compact workspace supports selecting and renaming titles, stepping through
 frames to inspect title text, splitting, moving, trimming, deleting and ripple
-deleting clips, and undo/redo. Enter a `.ocus` path and use **Save** or **Open**
-to persist/reload the project; saves are atomic and file operations run in the
-background. **Import file** probes an existing video, audio or image with
-FFmpeg on a worker thread. The media bin can insert a clip on a video or audio
-track using the probed duration (still images default to three seconds).
+deleting clips, and undo/redo. **Open project** and **Save as** use native
+file dialogs instead of requiring typed paths; **Save** reuses the chosen
+path. **New** asks before discarding unsaved changes. Saves are atomic and
+file operations run in the background. **Import media** accepts multiple
+files from the native picker and probes video, audio, and images with FFmpeg
+on a worker thread. The media bin can insert a clip on a video or audio track
+using the probed duration (still images default to three seconds).
 Videos with audio place aligned video and audio clips in a single undoable
 action. Audio clips have editable volume and mute values, but those values do
 not affect playback or export yet. Previously saved references without probe
 metadata can be re-imported.
+
+The workspace shows a time-scaled, paged timeline, a text-only monitor, and
+an inspector that scrolls through clip controls. On narrower windows the
+media library and inspector share a tabbed sidebar.
 
 This is not a completed v0.1 video editor. There is no frame compositor, audio
 playback, thumbnail generation, or MP4 export yet. The pinned CreamUI 0.3.0

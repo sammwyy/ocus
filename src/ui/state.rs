@@ -2,9 +2,16 @@ use crate::media::{Media, MediaProbe, probe};
 use crate::project::{Command, Editor, Project, store};
 use creamui::widgets::{ScrollController, TextController};
 use creamui::{AppHandle, Signal};
+use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Sidebar {
+    Media,
+    Inspector,
+}
 
 #[derive(Clone)]
 pub(crate) struct UiState {
@@ -12,15 +19,16 @@ pub(crate) struct UiState {
     pub revision: Signal<u64>,
     pub selected: Signal<Option<(u64, u64)>>,
     pub playhead: Signal<u64>,
-    pub project_path: TextController,
-    pub media_path: TextController,
+    pub project_path: Signal<Option<PathBuf>>,
     pub title_text: TextController,
     pub status: Signal<String>,
     pub dirty: Signal<bool>,
     pub busy: Signal<bool>,
     pub media_scroll: ScrollController,
-    pub confirm_close: Signal<bool>,
-    confirm_open: Signal<Option<String>>,
+    pub inspector_scroll: ScrollController,
+    pub timeline_scroll: ScrollController,
+    pub timeline_page: Signal<u64>,
+    pub sidebar: Signal<Sidebar>,
     app: Rc<RefCell<Option<AppHandle>>>,
 }
 
@@ -31,15 +39,16 @@ impl UiState {
             revision: Signal::new(0),
             selected: Signal::new(None),
             playhead: Signal::new(0),
-            project_path: TextController::default(),
-            media_path: TextController::default(),
+            project_path: Signal::new(None),
             title_text: TextController::default(),
             status: Signal::new("Ready · Project not saved".into()),
             dirty: Signal::new(false),
             busy: Signal::new(false),
             media_scroll: ScrollController::default(),
-            confirm_close: Signal::new(false),
-            confirm_open: Signal::new(None),
+            inspector_scroll: ScrollController::default(),
+            timeline_scroll: ScrollController::default(),
+            timeline_page: Signal::new(0),
+            sidebar: Signal::new(Sidebar::Media),
             app: Rc::new(RefCell::new(None)),
         }
     }
@@ -53,8 +62,6 @@ impl UiState {
         if changed {
             self.revision.update(|revision| *revision += 1);
             self.dirty.set(true);
-            self.confirm_close.set(false);
-            self.confirm_open.set(None);
             self.status.set("Unsaved changes".into());
         } else {
             self.status
@@ -67,7 +74,6 @@ impl UiState {
         if self.editor.borrow_mut().undo() {
             self.revision.update(|revision| *revision += 1);
             self.dirty.set(true);
-            self.confirm_close.set(false);
             self.status.set("Undid edit · Unsaved changes".into());
         }
     }
@@ -76,47 +82,88 @@ impl UiState {
         if self.editor.borrow_mut().redo() {
             self.revision.update(|revision| *revision += 1);
             self.dirty.set(true);
-            self.confirm_close.set(false);
             self.status.set("Redid edit · Unsaved changes".into());
         }
     }
 
-    pub fn load(&self) {
+    pub fn focus_frame(&self, frame: u64) {
+        let editor = self.editor.borrow();
+        let frame_rate = &editor.project().settings().frame_rate;
+        let page_frames =
+            (u64::from(frame_rate.numerator) * 10 / u64::from(frame_rate.denominator)).max(1);
+        drop(editor);
+        self.playhead.set(frame);
+        self.timeline_page.set(frame / page_frames);
+    }
+
+    pub fn confirm_discard(&self) -> bool {
+        !self.dirty.peek()
+            || MessageDialog::new()
+                .set_level(MessageLevel::Warning)
+                .set_title("Unsaved changes")
+                .set_description("Discard your unsaved changes?")
+                .set_buttons(MessageButtons::YesNo)
+                .show()
+                == MessageDialogResult::Yes
+    }
+
+    pub fn new_project(&self) {
+        if self.busy.peek() || !self.confirm_discard() {
+            return;
+        }
+        *self.editor.borrow_mut() = Editor::new(Project::new("Untitled"));
+        self.project_path.set(None);
+        self.selected.set(None);
+        self.playhead.set(0);
+        self.timeline_page.set(0);
+        self.sidebar.set(Sidebar::Media);
+        self.dirty.set(false);
+        self.revision.update(|revision| *revision += 1);
+        self.status.set("New project · Not saved".into());
+    }
+
+    pub fn open_dialog(&self) {
+        if self.busy.peek() {
+            return;
+        }
+        if let Some(path) = FileDialog::new()
+            .set_title("Open Ocus project")
+            .add_filter("Ocus project", &["ocus"])
+            .pick_file()
+            && self.confirm_discard()
+        {
+            self.load_path(path);
+        }
+    }
+
+    pub fn load_path(&self, path: PathBuf) {
         let Some(app) = self.app.borrow().clone() else {
             return;
         };
         if self.busy.peek() {
             return;
         }
-        let path_text = self.project_path.peek();
-        let path = PathBuf::from(&path_text);
-        if path.as_os_str().is_empty() {
-            self.status.set("Enter a project path to open".into());
-            return;
-        }
-        if self.dirty.peek() && self.confirm_open.peek().as_ref() != Some(&path_text) {
-            self.confirm_open.set(Some(path_text));
-            self.status
-                .set("Unsaved changes · Click Open again to discard them".into());
-            return;
-        }
-        self.confirm_open.set(None);
         self.busy.set(true);
         let revision = self.revision.peek();
         self.status.set("Opening project…".into());
         let state = self.clone();
         app.spawn_background(
-            move || store::load(&path),
+            {
+                let path = path.clone();
+                move || store::load(&path)
+            },
             move |result| {
                 state.busy.set(false);
                 match result {
                     Ok(project) if state.revision.peek() == revision => {
                         *state.editor.borrow_mut() = Editor::new(project);
+                        state.project_path.set(Some(path));
                         state.selected.set(None);
                         state.playhead.set(0);
+                        state.timeline_page.set(0);
                         state.revision.update(|revision| *revision += 1);
                         state.dirty.set(false);
-                        state.confirm_close.set(false);
+                        state.sidebar.set(Sidebar::Media);
                         state.status.set("Project opened".into());
                     }
                     Ok(_) => state
@@ -129,15 +176,78 @@ impl UiState {
     }
 
     pub fn save(&self) {
+        if let Some(path) = self.project_path.peek() {
+            self.save_to(path);
+        } else {
+            self.save_as_dialog();
+        }
+    }
+
+    pub fn save_as_dialog(&self) {
+        if self.busy.peek() {
+            return;
+        }
+        let current = self.project_path.peek();
+        let mut dialog = FileDialog::new()
+            .set_title("Save Ocus project")
+            .add_filter("Ocus project", &["ocus"])
+            .set_file_name(
+                current
+                    .as_ref()
+                    .and_then(|path| path.file_name())
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("Untitled.ocus"),
+            );
+        if let Some(directory) = current.as_ref().and_then(|path| path.parent()) {
+            dialog = dialog.set_directory(directory);
+        }
+        let Some(selected_path) = dialog.save_file() else {
+            return;
+        };
+        let path = match project_file(selected_path.clone()) {
+            Ok(path) => path,
+            Err(error) => {
+                self.status.set(error);
+                return;
+            }
+        };
+        if path != selected_path && self.project_path.peek().as_ref() != Some(&path) {
+            let Some(app) = self.app.borrow().clone() else {
+                return;
+            };
+            self.busy.set(true);
+            let state = self.clone();
+            app.spawn_background(
+                {
+                    let path = path.clone();
+                    move || path.exists()
+                },
+                move |exists| {
+                    state.busy.set(false);
+                    if exists
+                        && MessageDialog::new()
+                            .set_level(MessageLevel::Warning)
+                            .set_title("Replace project?")
+                            .set_description("A project with this name already exists. Replace it?")
+                            .set_buttons(MessageButtons::YesNo)
+                            .show()
+                            != MessageDialogResult::Yes
+                    {
+                        return;
+                    }
+                    state.save_to(path);
+                },
+            );
+            return;
+        }
+        self.save_to(path);
+    }
+
+    pub fn save_to(&self, path: PathBuf) {
         let Some(app) = self.app.borrow().clone() else {
             return;
         };
         if self.busy.peek() {
-            return;
-        }
-        let path = PathBuf::from(self.project_path.peek());
-        if path.as_os_str().is_empty() {
-            self.status.set("Enter a project path to save".into());
             return;
         }
         let project = self.editor.borrow().project().clone();
@@ -146,13 +256,16 @@ impl UiState {
         self.status.set("Saving project…".into());
         let state = self.clone();
         app.spawn_background(
-            move || store::save(&path, &project),
+            {
+                let path = path.clone();
+                move || store::save(&path, &project)
+            },
             move |result| {
                 state.busy.set(false);
                 state.status.set(match result {
                     Ok(()) if state.revision.peek() == revision => {
+                        state.project_path.set(Some(path));
                         state.dirty.set(false);
-                        state.confirm_close.set(false);
                         "Project saved".into()
                     }
                     Ok(()) => "Saved previous version · Unsaved changes".into(),
@@ -162,70 +275,95 @@ impl UiState {
         );
     }
 
-    pub fn import(&self) {
-        let Some(app) = self.app.borrow().clone() else {
-            return;
-        };
+    pub fn import_dialog(&self) {
         if self.busy.peek() {
             return;
         }
-        let path = PathBuf::from(self.media_path.peek());
-        if path.as_os_str().is_empty() {
-            self.status.set("Enter a media file path".into());
+        if let Some(paths) = FileDialog::new().set_title("Import media").pick_files() {
+            self.import_paths(paths);
+        }
+    }
+
+    pub fn import_paths(&self, paths: Vec<PathBuf>) {
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        if self.busy.peek() || paths.is_empty() {
             return;
         }
         self.busy.set(true);
-        self.status.set("Checking source…".into());
+        self.status.set(format!("Probing {} files…", paths.len()));
         let state = self.clone();
         app.spawn_background(
-            move || inspect_source(&path),
-            move |result| {
+            move || {
+                paths
+                    .into_iter()
+                    .map(|path| inspect_source(&path))
+                    .collect::<Vec<_>>()
+            },
+            move |results| {
                 state.busy.set(false);
-                match result {
-                    Ok((path, info)) => {
-                        let existing = state
-                            .editor
-                            .borrow()
-                            .project()
-                            .media()
-                            .iter()
-                            .find(|media| media.path == path)
-                            .cloned();
-                        let id = existing.as_ref().map(|media| media.id).or_else(|| {
-                            state
+                let total = results.len();
+                let mut imported = 0;
+                let mut errors = Vec::new();
+                for result in results {
+                    match result {
+                        Ok((path, info)) => {
+                            let existing = state
                                 .editor
                                 .borrow()
                                 .project()
                                 .media()
                                 .iter()
-                                .map(|media| media.id)
-                                .max()
-                                .unwrap_or(0)
-                                .checked_add(1)
-                        });
-                        if let Some(id) = id {
-                            let media = Media {
-                                id,
-                                path,
-                                kind: info.kind,
-                                duration_us: info.duration_us,
-                                has_audio: info.has_audio,
-                            };
-                            if existing.as_ref() == Some(&media) {
-                                state.status.set("Source already imported".into());
-                            } else if state.edit(if existing.is_some() {
-                                Command::ReprobeMedia(media)
+                                .find(|media| media.path == path)
+                                .cloned();
+                            let id = existing.as_ref().map(|media| media.id).or_else(|| {
+                                state
+                                    .editor
+                                    .borrow()
+                                    .project()
+                                    .media()
+                                    .iter()
+                                    .map(|media| media.id)
+                                    .max()
+                                    .unwrap_or(0)
+                                    .checked_add(1)
+                            });
+                            if let Some(id) = id {
+                                let media = Media {
+                                    id,
+                                    path,
+                                    kind: info.kind,
+                                    duration_us: info.duration_us,
+                                    has_audio: info.has_audio,
+                                };
+                                if existing.as_ref() == Some(&media) {
+                                    continue;
+                                } else if state.edit(if existing.is_some() {
+                                    Command::ReprobeMedia(media)
+                                } else {
+                                    Command::ImportMedia(media)
+                                }) {
+                                    imported += 1;
+                                } else {
+                                    errors.push("Source rejected by project validation".into());
+                                }
                             } else {
-                                Command::ImportMedia(media)
-                            }) {
-                                state.status.set("Media probed and imported".into());
+                                errors.push("Media ID limit reached".to_string());
                             }
-                        } else {
-                            state.status.set("Media ID limit reached".into());
                         }
+                        Err(error) => errors.push(error),
                     }
-                    Err(error) => state.status.set(error),
                 }
+                state.status.set(if errors.is_empty() {
+                    format!("{imported} of {total} files imported")
+                } else {
+                    format!(
+                        "{imported} of {total} imported · {} failed: {}",
+                        errors.len(),
+                        errors[0]
+                    )
+                });
             },
         );
     }
@@ -338,8 +476,27 @@ impl UiState {
         drop(editor);
         if self.edit(command) {
             self.selected.set(Some((track_id, clip_id)));
-            self.playhead.set(start_frame);
+            self.sidebar.set(Sidebar::Inspector);
+            self.focus_frame(start_frame);
         }
+    }
+}
+
+fn project_file(path: PathBuf) -> Result<PathBuf, String> {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        None => Ok(path.with_extension("ocus")),
+        Some(extension) if extension.eq_ignore_ascii_case("ocus") => {
+            if path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.to_ascii_lowercase().ends_with(".ocus"))
+            {
+                Ok(path.with_extension(""))
+            } else {
+                Ok(path)
+            }
+        }
+        _ => Err("Save the project with a .ocus extension".into()),
     }
 }
 
@@ -405,5 +562,36 @@ mod tests {
         state.undo();
         assert!(state.editor.borrow().project().tracks()[0].clips.is_empty());
         assert!(state.editor.borrow().project().tracks()[2].clips.is_empty());
+    }
+
+    #[test]
+    fn saving_projects_adds_the_extension_without_overwriting_another_format() {
+        assert_eq!(
+            project_file(PathBuf::from("cut")).unwrap(),
+            PathBuf::from("cut.ocus")
+        );
+        assert_eq!(
+            project_file(PathBuf::from("cut.OCUS")).unwrap(),
+            PathBuf::from("cut.OCUS")
+        );
+        assert_eq!(
+            project_file(PathBuf::from("cut.ocus.ocus")).unwrap(),
+            PathBuf::from("cut.ocus")
+        );
+        assert!(project_file(PathBuf::from("cut.mp4")).is_err());
+    }
+
+    #[test]
+    fn new_project_clears_previous_file_and_timeline_position() {
+        let state = UiState::new();
+        state.project_path.set(Some("previous.ocus".into()));
+        state.focus_frame(600);
+        state.sidebar.set(Sidebar::Inspector);
+        state.new_project();
+        assert_eq!(state.project_path.peek(), None);
+        assert_eq!(state.playhead.peek(), 0);
+        assert_eq!(state.timeline_page.peek(), 0);
+        assert!(state.sidebar.peek() == Sidebar::Media);
+        assert_eq!(state.editor.borrow().project().name(), "Untitled");
     }
 }

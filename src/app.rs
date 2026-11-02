@@ -19,15 +19,13 @@ pub fn run_app() {
                 BACKGROUND,
                 move |window| {
                     window.on_close_requested(move || {
-                        if close.dirty.peek() && !close.confirm_close.peek() {
-                            close.confirm_close.set(true);
+                        if close.busy.peek() {
                             close
                                 .status
-                                .set("Unsaved changes · Close again to discard them".into());
-                            false
-                        } else {
-                            true
+                                .set("Wait for the current operation before closing".into());
+                            return false;
                         }
+                        close.confirm_discard()
                     });
                 },
                 move |viewport| build(&state, viewport),

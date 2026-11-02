@@ -1729,6 +1729,7 @@ version = "0.1.0"
 dependencies = [
  "creamui",
  "ffmpeg-next",
+ "rfd",
  "serde",
  "serde_json",
 ]

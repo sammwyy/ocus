@@ -18,7 +18,7 @@ src/
   media.rs          referenced source paths and kinds
   timeline.rs       tracks, clips, and title data
   ui/
-    window.rs       window layout and empty editor regions
+    window.rs       integrated titlebar, editor layout, and title controls
 ```
 
 `main` calls `app::run_app`; the app creates the initial project and provides
@@ -32,8 +32,10 @@ and the in-memory project. It rejects missing or unsupported versions and
 round-trips media references and title clips. File open/save, migration,
 validation, and crash-safe atomic writes do not exist yet. `media.rs` defines
 source references, **not** a decoder; `timeline.rs` defines clip data, **not**
-editing interactions. Four empty tracks and rename undo/redo are foundations,
-not completed MVP workflows.
+editing interactions. The UI can append a default three-second title clip to
+the first video track and undo/redo it through project commands. Clip insertion
+rejects duplicate IDs, invalid ranges, overlaps, and incompatible references,
+but editing titles, saving projects, and previewing output are not implemented.
 
 ## Where new work belongs
 

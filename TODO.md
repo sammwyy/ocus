@@ -1,9 +1,8 @@
 # TODO — v0.1 MVP
 
 This checklist breaks down the [v0.1 milestone](ROADMAP.md#v01-mvp) into
-implementation work. The four empty tracks, JSON string conversion, and
-rename undo/redo in the current skeleton do not complete the corresponding
-editor workflows.
+implementation work. The four tracks, JSON string conversion, and initial
+clip commands do not complete the corresponding editor workflows.
 
 ## Project and editing foundation
 
@@ -11,8 +10,9 @@ editor workflows.
   references, and IDs when loading or editing a project.
 - [ ] Add project file open/save with atomic writes, external media paths,
   useful errors, and round-trip tests; retain explicit schema-version handling.
-- [ ] Add editor commands for importing media and inserting, splitting,
-  moving, trimming, and deleting clips; test undo and redo for every operation.
+- [ ] Extend the initial insert/remove clip commands with importing media,
+  splitting, moving, trimming, and ripple deletion; test undo and redo for
+  every operation.
 - [ ] Add ripple delete that shifts later clips correctly across affected
   tracks, with command/undo tests.
 - [ ] Make at least two video and two audio tracks usable for editing; the
@@ -37,8 +37,8 @@ editor workflows.
   playback and seeking to it.
 - [ ] Add per-clip volume and mute controls that affect both preview and
   export, with tests.
-- [ ] Add editable text clips with font, size, color, and position, rendered
-  consistently in preview and export.
+- [ ] Make default text clips editable (font, size, color, and position) and
+  render them consistently in preview and export.
 - [ ] Export the edited project to MP4 with H.264 video and AAC audio.
 - [ ] Add and test export presets for 1080p, 720p, and vertical 9:16.
 - [ ] Run export off the UI thread with progress, cancellation, and cleanup

@@ -57,5 +57,6 @@ clip commands do not complete the corresponding editor workflows.
 - [ ] Publish the CreamUI GPU viewport, split-pane, and related input APIs
   to crates.io, then upgrade Ocus's pinned `creamui = "=0.3.0"` dependency
   before using them. Do not add a sibling path dependency.
-- [ ] Install FFmpeg development headers and pkg-config metadata for the
-  system libav* libraries before integrating FFmpeg library bindings.
+- [ ] Integrate FFmpeg library bindings once the platform supplies matching
+  development headers and pkg-config metadata (installed on the Fedora
+  development machine); see [DEVELOPMENT.md](DEVELOPMENT.md).

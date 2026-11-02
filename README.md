@@ -17,12 +17,13 @@ but only records its path and extension: sources are **not** decoded or probed.
 This is not a completed v0.1 video editor. There is no frame compositor, audio
 playback, thumbnail generation, or MP4 export yet. The pinned CreamUI 0.3.0
 does not publish the GPU viewport API, and building FFmpeg bindings requires
-the FFmpeg development libraries (not installed in the current environment).
+FFmpeg development libraries (now available on the Fedora development machine).
 The UI intentionally does not offer fake play or export buttons.
 
 ## Run and check
 
-Install a Rust toolchain and run from the repository root:
+See [DEVELOPMENT.md](DEVELOPMENT.md) for per-OS installation and building
+instructions. With the prerequisites installed, run from the repository root:
 
 ```sh
 cargo run --locked

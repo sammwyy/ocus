@@ -18,7 +18,8 @@ src/
   media.rs          referenced source paths and kinds
   timeline.rs       tracks, clips, and title data
   ui/
-    window.rs       integrated titlebar, editor layout, and title controls
+    window.rs       integrated titlebar, editor layout, and clip controls
+    state.rs        transient selection, file paths, background jobs
 ```
 
 `main` calls `app::run_app`; the app creates the initial project and provides
@@ -29,13 +30,14 @@ panel sizes are transient editor state, not project-file data.
 
 `project::format` owns schema version 1 and converts between JSON strings
 and the in-memory project. It rejects missing or unsupported versions and
-round-trips media references and title clips. File open/save, migration,
-validation, and crash-safe atomic writes do not exist yet. `media.rs` defines
-source references, **not** a decoder; `timeline.rs` defines clip data, **not**
-editing interactions. The UI can append a default three-second title clip to
-the first video track and undo/redo it through project commands. Clip insertion
-rejects duplicate IDs, invalid ranges, overlaps, and incompatible references,
-but editing titles, saving projects, and previewing output are not implemented.
+round-trips media references and title clips. Project load validates settings,
+IDs, clip ranges and reference existence. `project::store` loads and saves on
+background jobs, with same-directory temporary files, sync, and rename for
+atomic writes. Imported media paths are absolute. Format migration and codec
+probing do not exist. `media.rs` defines source references, **not** a decoder.
+The UI supports frame stepping and title text display, not rendered video;
+title edits, split/move/trim/delete, and ripple delete use project commands.
+Audio, frame compositor, thumbnails and MP4 export remain unimplemented.
 
 ## Where new work belongs
 

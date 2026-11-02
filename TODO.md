@@ -6,15 +6,14 @@ clip commands do not complete the corresponding editor workflows.
 
 ## Project and editing foundation
 
-- [ ] Validate project settings, clip ranges, track compatibility, media
-  references, and IDs when loading or editing a project.
-- [ ] Add project file open/save with atomic writes, external media paths,
+- [ ] Extend existing settings/ID/range/compatibility checks with source
+  duration validation, linked AV clips, and media path migration/repair.
+- [x] Add project file open/save with atomic writes, external media paths,
   useful errors, and round-trip tests; retain explicit schema-version handling.
-- [ ] Extend the initial insert/remove clip commands with importing media,
-  splitting, moving, trimming, and ripple deletion; test undo and redo for
-  every operation.
-- [ ] Add ripple delete that shifts later clips correctly across affected
-  tracks, with command/undo tests.
+- [ ] Extend existing insert/split/move/trim/delete and reference-import
+  commands with probed media durations and proper drag/drop gestures.
+- [ ] Extend ripple delete across overlapping clips that span the removed range;
+  existing implementation rejects these instead of silently dropping footage.
 - [ ] Make at least two video and two audio tracks usable for editing; the
   initial empty tracks alone are not sufficient.
 
@@ -37,8 +36,8 @@ clip commands do not complete the corresponding editor workflows.
   playback and seeking to it.
 - [ ] Add per-clip volume and mute controls that affect both preview and
   export, with tests.
-- [ ] Make default text clips editable (font, size, color, and position) and
-  render them consistently in preview and export.
+- [ ] Extend editable title text with font, size, color, and position controls;
+  render titles consistently in the video preview and export.
 - [ ] Export the edited project to MP4 with H.264 video and AAC audio.
 - [ ] Add and test export presets for 1080p, 720p, and vertical 9:16.
 - [ ] Run export off the UI thread with progress, cancellation, and cleanup
@@ -58,3 +57,5 @@ clip commands do not complete the corresponding editor workflows.
 - [ ] Publish the CreamUI GPU viewport, split-pane, and related input APIs
   to crates.io, then upgrade Ocus's pinned `creamui = "=0.3.0"` dependency
   before using them. Do not add a sibling path dependency.
+- [ ] Install FFmpeg development headers and pkg-config metadata for the
+  system libav* libraries before integrating FFmpeg library bindings.

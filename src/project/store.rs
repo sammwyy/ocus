@@ -83,6 +83,8 @@ pub fn save(path: &Path, project: &Project) -> io::Result<()> {
         file.sync_all()?;
         drop(file);
         fs::rename(&temporary, path)?;
+        #[cfg(unix)]
+        fs::File::open(parent)?.sync_all()?;
         Ok(())
     })();
     if result.is_err() {

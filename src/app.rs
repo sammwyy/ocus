@@ -1,26 +1,37 @@
-use crate::project::{Editor, Project};
-use crate::ui::{BACKGROUND, build};
-use creamui::{Signal, Theme, WindowOptions, run};
-use std::cell::RefCell;
-use std::rc::Rc;
+use crate::ui::{BACKGROUND, UiState, build};
+use creamui::{AppBuilder, Theme, WindowOptions};
 
 pub fn run_app() {
-    let editor = Rc::new(RefCell::new(Editor::new(Project::new("Untitled"))));
-    let revision = Signal::new(0_u64);
-    run(
-        WindowOptions {
-            title: "Ocus".into(),
-            width: 1440,
-            height: 900,
-            decorations: true,
-            theme: Theme::dark(),
-            ..Default::default()
-        },
-        BACKGROUND,
-        |_| {},
-        move |viewport| {
-            revision.get();
-            build(&editor, &revision, viewport)
-        },
-    );
+    let state = UiState::new();
+    AppBuilder::new()
+        .on_started(move |app| {
+            state.connect(app.clone());
+            let close = state.clone();
+            app.append_window(
+                WindowOptions {
+                    title: "Ocus".into(),
+                    width: 1280,
+                    height: 760,
+                    decorations: true,
+                    theme: Theme::dark(),
+                    ..Default::default()
+                },
+                BACKGROUND,
+                move |window| {
+                    window.on_close_requested(move || {
+                        if close.dirty.peek() && !close.confirm_close.peek() {
+                            close.confirm_close.set(true);
+                            close
+                                .status
+                                .set("Unsaved changes · Close again to discard them".into());
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                },
+                move |viewport| build(&state, viewport),
+            );
+        })
+        .run();
 }

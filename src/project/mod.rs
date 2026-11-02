@@ -1,4 +1,4 @@
-use crate::media::Media;
+use crate::media::{Media, MediaKind};
 use crate::timeline::{ClipContent, Track, TrackKind};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -72,8 +72,11 @@ impl Project {
         }
         let mut media_ids = HashSet::new();
         for media in &self.media {
-            if !media_ids.insert(media.id) || media.path.as_os_str().is_empty() {
-                return Err("Duplicate media ID or empty media path".into());
+            if !media_ids.insert(media.id)
+                || media.path.as_os_str().is_empty()
+                || media.duration_us == Some(0)
+            {
+                return Err("Duplicate media ID or invalid media metadata".into());
             }
         }
         let mut track_ids = HashSet::new();
@@ -111,21 +114,38 @@ impl Project {
                             && (0.0..=1.0).contains(&title.y) => {}
                     ClipContent::Media { media_id }
                         if self.media.iter().any(|media| {
-                            media.id == *media_id
-                                && matches!(
-                                    (track.kind, media.kind),
-                                    (
-                                        TrackKind::Video,
-                                        crate::media::MediaKind::Video
-                                            | crate::media::MediaKind::Image
-                                    ) | (TrackKind::Audio, crate::media::MediaKind::Audio)
-                                )
+                            media.id == *media_id && self.media_clip_fits(media, track.kind, clip)
                         }) => {}
                     _ => return Err("Invalid title or incompatible media on track".into()),
                 }
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn media_clip_fits(
+        &self,
+        media: &Media,
+        kind: TrackKind,
+        clip: &crate::timeline::Clip,
+    ) -> bool {
+        if !matches!(
+            (kind, media.kind),
+            (TrackKind::Video, MediaKind::Video | MediaKind::Image)
+                | (TrackKind::Audio, MediaKind::Audio)
+        ) && !(kind == TrackKind::Audio && media.kind == MediaKind::Video && media.has_audio)
+        {
+            return false;
+        }
+        let Some(duration_us) = media.duration_us else {
+            return true;
+        };
+        if media.kind == MediaKind::Image {
+            return true;
+        }
+        let max_frames = u128::from(duration_us) * u128::from(self.settings.frame_rate.numerator)
+            / (1_000_000_u128 * u128::from(self.settings.frame_rate.denominator));
+        u128::from(clip.source_start_frame) + u128::from(clip.duration_frames) <= max_frames
     }
 }
 

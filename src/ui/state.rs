@@ -1,4 +1,4 @@
-use crate::media::{Media, MediaKind};
+use crate::media::{Media, MediaProbe, probe};
 use crate::project::{Command, Editor, Project, store};
 use creamui::widgets::{ScrollController, TextController};
 use creamui::{AppHandle, Signal};
@@ -182,22 +182,43 @@ impl UiState {
             move |result| {
                 state.busy.set(false);
                 match result {
-                    Ok((path, kind)) => {
-                        let id = state
+                    Ok((path, info)) => {
+                        let existing = state
                             .editor
                             .borrow()
                             .project()
                             .media()
                             .iter()
-                            .map(|m| m.id)
-                            .max()
-                            .unwrap_or(0)
-                            .checked_add(1);
+                            .find(|media| media.path == path)
+                            .cloned();
+                        let id = existing.as_ref().map(|media| media.id).or_else(|| {
+                            state
+                                .editor
+                                .borrow()
+                                .project()
+                                .media()
+                                .iter()
+                                .map(|media| media.id)
+                                .max()
+                                .unwrap_or(0)
+                                .checked_add(1)
+                        });
                         if let Some(id) = id {
-                            if state.edit(Command::ImportMedia(Media { id, path, kind })) {
-                                state
-                                    .status
-                                    .set("Source referenced · Playback/probing unavailable".into());
+                            let media = Media {
+                                id,
+                                path,
+                                kind: info.kind,
+                                duration_us: info.duration_us,
+                                has_audio: info.has_audio,
+                            };
+                            if existing.as_ref() == Some(&media) {
+                                state.status.set("Source already imported".into());
+                            } else if state.edit(if existing.is_some() {
+                                Command::ReprobeMedia(media)
+                            } else {
+                                Command::ImportMedia(media)
+                            }) {
+                                state.status.set("Media probed and imported".into());
                             }
                         } else {
                             state.status.set("Media ID limit reached".into());
@@ -208,30 +229,126 @@ impl UiState {
             },
         );
     }
+
+    pub fn insert_media(&self, media_id: u64) {
+        let editor = self.editor.borrow();
+        let project = editor.project();
+        let Some(media) = project.media().iter().find(|media| media.id == media_id) else {
+            return;
+        };
+        let primary_kind = match media.kind {
+            crate::media::MediaKind::Audio => crate::timeline::TrackKind::Audio,
+            _ => crate::timeline::TrackKind::Video,
+        };
+        let Some(primary) = project
+            .tracks()
+            .iter()
+            .find(|track| track.kind == primary_kind)
+        else {
+            self.status
+                .set("No compatible track for this source".into());
+            return;
+        };
+        let audio = if media.kind == crate::media::MediaKind::Video && media.has_audio {
+            match project
+                .tracks()
+                .iter()
+                .find(|track| track.kind == crate::timeline::TrackKind::Audio)
+            {
+                Some(track) => Some(track),
+                None => {
+                    self.status
+                        .set("Video has audio but no audio track exists".into());
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let frame_rate = &project.settings().frame_rate;
+        let frame_count = if let Some(duration_us) = media.duration_us {
+            let count = u128::from(duration_us) * u128::from(frame_rate.numerator)
+                / (1_000_000_u128 * u128::from(frame_rate.denominator));
+            u64::try_from(count).ok()
+        } else if media.kind == crate::media::MediaKind::Image {
+            Some((u64::from(frame_rate.numerator) * 3 / u64::from(frame_rate.denominator)).max(1))
+        } else {
+            None
+        };
+        let Some(duration_frames) = frame_count.filter(|count| *count > 0) else {
+            self.status
+                .set("Source has no usable duration; import it again to probe".into());
+            return;
+        };
+        let Some(start_frame) = std::iter::once(primary)
+            .chain(audio)
+            .flat_map(|track| &track.clips)
+            .map(|clip| clip.start_frame.checked_add(clip.duration_frames))
+            .try_fold(0_u64, |latest, end| Some(latest.max(end?)))
+        else {
+            return;
+        };
+        let Some(clip_id) = project
+            .tracks()
+            .iter()
+            .flat_map(|track| &track.clips)
+            .map(|clip| clip.id)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+        else {
+            return;
+        };
+        let track_id = primary.id;
+        let audio_track_id = audio.map(|track| track.id);
+        let clip = crate::timeline::Clip {
+            id: clip_id,
+            start_frame,
+            source_start_frame: 0,
+            duration_frames,
+            content: crate::timeline::ClipContent::Media { media_id },
+            volume: 1.0,
+            muted: false,
+        };
+        let command = if let Some(audio_id) = audio_track_id {
+            let Some(linked_id) = clip_id.checked_add(1) else {
+                self.status.set("Clip ID limit reached".into());
+                return;
+            };
+            let mut tracks = project.tracks().to_vec();
+            for (id, clip) in [
+                (track_id, clip.clone()),
+                (
+                    audio_id,
+                    crate::timeline::Clip {
+                        id: linked_id,
+                        ..clip
+                    },
+                ),
+            ] {
+                let Some(track) = tracks.iter_mut().find(|track| track.id == id) else {
+                    return;
+                };
+                track.clips.push(clip);
+            }
+            Command::ReplaceTracks(tracks)
+        } else {
+            Command::InsertClip { track_id, clip }
+        };
+        drop(editor);
+        if self.edit(command) {
+            self.selected.set(Some((track_id, clip_id)));
+            self.playhead.set(start_frame);
+        }
+    }
 }
 
-fn inspect_source(path: &Path) -> Result<(PathBuf, MediaKind), String> {
-    let kind = match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "mp4" | "mov" | "mkv" | "webm" => MediaKind::Video,
-        "wav" | "mp3" | "flac" | "ogg" | "m4a" => MediaKind::Audio,
-        "png" | "jpg" | "jpeg" | "webp" | "bmp" => MediaKind::Image,
-        _ => return Err("Unsupported source extension".into()),
-    };
-    let metadata =
-        std::fs::metadata(path).map_err(|error| format!("Cannot inspect source: {error}"))?;
-    if !metadata.is_file() {
-        return Err("Source is not a regular file".into());
-    }
+fn inspect_source(path: &Path) -> Result<(PathBuf, MediaProbe), String> {
+    let info = probe(path)?;
     let path = path
         .canonicalize()
         .map_err(|error| format!("Cannot resolve source: {error}"))?;
-    Ok((path, kind))
+    Ok((path, info))
 }
 
 #[cfg(test)]
@@ -240,11 +357,53 @@ mod tests {
     #[test]
     fn reference_import_checks_file_and_extension_without_modifying_source() {
         let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-        assert_eq!(
-            inspect_source(&file).unwrap_err(),
-            "Unsupported source extension"
-        );
+        assert!(inspect_source(&file).is_err());
         let missing = std::env::temp_dir().join("ocus-no-such-media.mp4");
         assert!(inspect_source(&missing).is_err());
+    }
+
+    #[test]
+    fn inserting_probed_audio_creates_reversible_clip_on_audio_track() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 4,
+            path: "tone.wav".into(),
+            kind: crate::media::MediaKind::Audio,
+            duration_us: Some(1_000_000),
+            has_audio: true,
+        })));
+        state.insert_media(4);
+        let editor = state.editor.borrow();
+        assert_eq!(editor.project().tracks()[2].clips.len(), 1);
+        assert_eq!(editor.project().tracks()[2].clips[0].duration_frames, 30);
+        assert!(editor.project().tracks()[0].clips.is_empty());
+        drop(editor);
+        state.undo();
+        assert!(state.editor.borrow().project().tracks()[2].clips.is_empty());
+    }
+
+    #[test]
+    fn inserting_video_with_audio_aligns_tracks_and_undoes_together() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 4,
+            path: "scene.mp4".into(),
+            kind: crate::media::MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: true,
+        })));
+        state.insert_media(4);
+        let editor = state.editor.borrow();
+        let video = &editor.project().tracks()[0].clips;
+        let audio = &editor.project().tracks()[2].clips;
+        assert_eq!(video.len(), 1);
+        assert_eq!(audio.len(), 1);
+        assert_eq!(video[0].start_frame, audio[0].start_frame);
+        assert_eq!(video[0].duration_frames, audio[0].duration_frames);
+        assert_ne!(video[0].id, audio[0].id);
+        drop(editor);
+        state.undo();
+        assert!(state.editor.borrow().project().tracks()[0].clips.is_empty());
+        assert!(state.editor.borrow().project().tracks()[2].clips.is_empty());
     }
 }

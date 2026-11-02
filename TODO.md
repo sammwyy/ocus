@@ -6,20 +6,20 @@ clip commands do not complete the corresponding editor workflows.
 
 ## Project and editing foundation
 
-- [ ] Extend existing settings/ID/range/compatibility checks with source
-  duration validation, linked AV clips, and media path migration/repair.
+- [ ] Extend existing settings/ID/range/compatibility and probed duration
+  checks with linked AV clips and media path migration/repair.
 - [x] Add project file open/save with atomic writes, external media paths,
   useful errors, and round-trip tests; retain explicit schema-version handling.
-- [ ] Extend existing insert/split/move/trim/delete and reference-import
-  commands with probed media durations and proper drag/drop gestures.
+- [ ] Extend existing insert/split/move/trim/delete and probed media
+  import commands with proper drag/drop gestures and linked audio.
 - [ ] Extend ripple delete across overlapping clips that span the removed range;
   existing implementation rejects these instead of silently dropping footage.
-- [ ] Make at least two video and two audio tracks usable for editing; the
-  initial empty tracks alone are not sufficient.
+- [ ] Make all video and audio tracks selectable as destinations from the UI;
+  current import appends to the first compatible track.
 
 ## Media, timeline, and preview
 
-- [ ] Probe and import video, audio, and image files without modifying the
+- [x] Probe and import video, audio, and image files without modifying the
   originals; report unsupported or missing files.
 - [ ] Generate regenerable thumbnails and show them in a responsive media
   bin without blocking the UI.
@@ -57,6 +57,5 @@ clip commands do not complete the corresponding editor workflows.
 - [ ] Publish the CreamUI GPU viewport, split-pane, and related input APIs
   to crates.io, then upgrade Ocus's pinned `creamui = "=0.3.0"` dependency
   before using them. Do not add a sibling path dependency.
-- [ ] Integrate FFmpeg library bindings once the platform supplies matching
-  development headers and pkg-config metadata (installed on the Fedora
-  development machine); see [DEVELOPMENT.md](DEVELOPMENT.md).
+- [x] Integrate FFmpeg library bindings for background probing; see
+  [DEVELOPMENT.md](DEVELOPMENT.md). Frame/audio decoding and encoding remain open.

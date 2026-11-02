@@ -33,10 +33,14 @@ and the in-memory project. It rejects missing or unsupported versions and
 round-trips media references and title clips. Project load validates settings,
 IDs, clip ranges and reference existence. `project::store` loads and saves on
 background jobs, with same-directory temporary files, sync, and rename for
-atomic writes. Imported media paths are absolute. Format migration and codec
-probing do not exist. `media.rs` defines source references, **not** a decoder.
-The UI supports frame stepping and title text display, not rendered video;
-title edits, split/move/trim/delete, and ripple delete use project commands.
+atomic writes. Imported media paths are absolute. Format migrations do not
+exist yet; optional probe metadata keeps version 1 files readable. Media
+probing uses the `ffmpeg-next` library to identify stream kind and duration
+on a worker thread. `media.rs` defines source references and probing, **not**
+a frame decoder. The UI supports frame stepping and title text display, not
+rendered video; title edits, split/move/trim/delete, audio clip settings, and ripple delete
+use project commands. Video sources with audio add aligned clips to both
+tracks; later edits to those clips are not linked yet.
 Audio, frame compositor, thumbnails and MP4 export remain unimplemented.
 
 ## Where new work belongs

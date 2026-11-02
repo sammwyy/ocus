@@ -196,9 +196,25 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     .background(SURFACE)
                     .child(text(name, TEXT, 12.0))
                     .child(text(
-                        format!("{:?} · reference only", media.kind),
+                        format!(
+                            "{:?} · {}",
+                            media.kind,
+                            media.duration_us.map_or_else(
+                                || "still / not probed".into(),
+                                |duration| format!("{:.1}s", duration as f64 / 1_000_000.0)
+                            )
+                        ),
                         MUTED,
                         10.0,
+                    ))
+                    .child(action(
+                        "＋ Timeline",
+                        media.duration_us.is_some() || media.kind == crate::media::MediaKind::Image,
+                        state,
+                        {
+                            let id = media.id;
+                            move |state| state.insert_media(id)
+                        },
                     )),
             ) as BoxedWidget
         })
@@ -210,7 +226,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             Flex::column()
                 .gap(6.0)
                 .child(input(&state.media_path))
-                .child(action("Add reference", !busy, state, UiState::import))
+                .child(action("Import file", !busy, state, UiState::import))
                 .child(Box::new(
                     RawScrollView::controlled(
                         Style {
@@ -225,7 +241,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     )
                     .child(Box::new(Flex::column().gap(4.0).with_children(files))),
                 ))
-                .child(text("Sources are not decoded yet", MUTED, 10.0)),
+                .child(text("Source preview is not available yet", MUTED, 10.0)),
         ),
     )
     .width(if compact { 205.0 } else { 240.0 });
@@ -247,6 +263,18 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 _ => None,
             })
         });
+    let media_at_frame = project
+        .tracks()
+        .iter()
+        .flat_map(|track| &track.clips)
+        .any(|clip| {
+            clip.start_frame <= frame
+                && clip
+                    .start_frame
+                    .checked_add(clip.duration_frames)
+                    .is_some_and(|end| frame < end)
+                && matches!(clip.content, ClipContent::Media { .. })
+        });
     let preview = panel(
         "PROGRAM MONITOR",
         "PREVIEW  /  16:9",
@@ -263,7 +291,11 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                         .background(STAGE)
                         .corner_radius(4.0)
                         .child(text(
-                            title_at_frame.unwrap_or("No frame to display"),
+                            title_at_frame.unwrap_or(if media_at_frame {
+                                "Media preview unavailable"
+                            } else {
+                                "No frame to display"
+                            }),
                             TEXT,
                             22.0,
                         ))
@@ -315,6 +347,63 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 state,
                 set_title_text,
             ));
+        }
+        if project
+            .tracks()
+            .iter()
+            .any(|track| track.id == track_id && track.kind == TrackKind::Audio)
+            && matches!(clip.content, ClipContent::Media { .. })
+        {
+            content = content
+                .child(text(
+                    format!(
+                        "Audio: {}%{}",
+                        (clip.volume * 100.0).round() as u32,
+                        if clip.muted { " · muted" } else { "" }
+                    ),
+                    AUDIO,
+                    11.0,
+                ))
+                .child(Box::new(
+                    Flex::row()
+                        .gap(5.0)
+                        .child(action("−10%", clip.volume > 0.0, state, move |state| {
+                            if let Some((_, clip)) = selected_clip(state) {
+                                state.edit(Command::SetClipAudio {
+                                    track_id,
+                                    clip_id,
+                                    volume: ((clip.volume * 10.0).round() - 1.0).max(0.0) / 10.0,
+                                    muted: clip.muted,
+                                });
+                            }
+                        }))
+                        .child(action("+10%", clip.volume < 2.0, state, move |state| {
+                            if let Some((_, clip)) = selected_clip(state) {
+                                state.edit(Command::SetClipAudio {
+                                    track_id,
+                                    clip_id,
+                                    volume: ((clip.volume * 10.0).round() + 1.0).min(20.0) / 10.0,
+                                    muted: clip.muted,
+                                });
+                            }
+                        })),
+                ))
+                .child(action(
+                    if clip.muted { "Unmute" } else { "Mute" },
+                    true,
+                    state,
+                    move |state| {
+                        if let Some((_, clip)) = selected_clip(state) {
+                            state.edit(Command::SetClipAudio {
+                                track_id,
+                                clip_id,
+                                volume: clip.volume,
+                                muted: !clip.muted,
+                            });
+                        }
+                    },
+                ))
+                .child(text("Settings saved; audio playback pending", MUTED, 10.0));
         }
         content = content
             .child(action("Move to other track", true, state, |s| {
@@ -424,7 +513,15 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 .map(|clip| {
                     let name = match &clip.content {
                         ClipContent::Title(title) => title.text.clone(),
-                        ClipContent::Media { media_id } => format!("Media {media_id}"),
+                        ClipContent::Media { media_id } => project
+                            .media()
+                            .iter()
+                            .find(|media| media.id == *media_id)
+                            .and_then(|media| media.path.file_name())
+                            .map_or_else(
+                                || format!("Media {media_id}"),
+                                |name| name.to_string_lossy().into_owned(),
+                            ),
                     };
                     let clip_id = clip.id;
                     let track_id = track.id;
@@ -504,11 +601,10 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         ))
         .child(Box::new(Flex::column().gap(3.0).with_children(tracks)));
 
-    let mut workspace = Flex::row().gap(4.0).grow(1.0);
-    if !compact {
-        workspace = workspace.child(Box::new(media));
-    }
-    workspace = workspace
+    let workspace = Flex::row()
+        .gap(4.0)
+        .grow(1.0)
+        .child(Box::new(media))
         .child(Box::new(preview))
         .child(Box::new(inspector));
 
@@ -535,25 +631,6 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                             .child(action("Save", !busy, state, UiState::save))
                             .child(text("Enter a .ocus path to open or save", MUTED, 11.0)),
                     ))
-                    .child(if compact {
-                        Box::new(
-                            Flex::row()
-                                .gap(6.0)
-                                .align(Align::Center)
-                                .padding(4.0)
-                                .background(PANEL)
-                                .child(text("MEDIA", ACCENT, 11.0))
-                                .child(input(&state.media_path))
-                                .child(action("Add reference", !busy, state, UiState::import))
-                                .child(text(
-                                    format!("{} sources", project.media().len()),
-                                    MUTED,
-                                    11.0,
-                                )),
-                        ) as BoxedWidget
-                    } else {
-                        Box::new(Flex::row().height(0.0)) as BoxedWidget
-                    })
                     .child(Box::new(workspace))
                     .child(Box::new(timeline))
                     .child(Box::new(Flex::row().height(20.0).child(text(
@@ -637,5 +714,28 @@ mod tests {
             }),
             Some("Title 1".into())
         );
+
+        assert!(state.edit(Command::ImportMedia(crate::media::Media {
+            id: 7,
+            path: "footage/tone.wav".into(),
+            kind: crate::media::MediaKind::Audio,
+            duration_us: Some(1_000_000),
+            has_audio: true,
+        })));
+        state.insert_media(7);
+        let mut painter = TestPainter::default();
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
+                creamui::Theme::dark(),
+            ));
+            Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+        });
+        assert!(
+            painter
+                .labels
+                .iter()
+                .any(|label| label.contains("tone.wav"))
+        );
+        assert!(painter.labels.iter().any(|label| label == "＋ Timeline"));
     }
 }

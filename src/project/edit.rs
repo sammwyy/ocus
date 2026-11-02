@@ -14,6 +14,7 @@ pub enum Command {
         clip_id: u64,
     },
     ImportMedia(Media),
+    ReprobeMedia(Media),
     RemoveMedia(u64),
     Split {
         track_id: u64,
@@ -33,6 +34,12 @@ pub enum Command {
         start_frame: u64,
         source_start_frame: u64,
         duration_frames: u64,
+    },
+    SetClipAudio {
+        track_id: u64,
+        clip_id: u64,
+        volume: f32,
+        muted: bool,
     },
     RippleDelete {
         track_id: u64,
@@ -94,10 +101,15 @@ impl Editor {
                 {
                     return None;
                 }
-                let track = self.project.tracks.iter_mut().find(|t| t.id == track_id)?;
+                let kind = self
+                    .project
+                    .tracks
+                    .iter()
+                    .find(|track| track.id == track_id)?
+                    .kind;
                 let compatible = match &clip.content {
                     ClipContent::Title(title) => {
-                        track.kind == TrackKind::Video
+                        kind == TrackKind::Video
                             && title.font_size.is_finite()
                             && title.font_size > 0.0
                             && title.x.is_finite()
@@ -111,16 +123,14 @@ impl Editor {
                         .iter()
                         .find(|media| media.id == *media_id)
                         .is_some_and(|media| {
-                            matches!(
-                                (track.kind, media.kind),
-                                (TrackKind::Video, MediaKind::Video | MediaKind::Image)
-                                    | (TrackKind::Audio, MediaKind::Audio)
-                            )
+                            (media.duration_us.is_some() || media.kind == MediaKind::Image)
+                                && self.project.media_clip_fits(media, kind, &clip)
                         }),
                 };
                 if !compatible {
                     return None;
                 }
+                let track = self.project.tracks.iter_mut().find(|t| t.id == track_id)?;
                 if track.clips.iter().any(|existing| {
                     existing
                         .start_frame
@@ -148,13 +158,37 @@ impl Editor {
             }
             Command::ImportMedia(media) => {
                 if media.path.as_os_str().is_empty()
-                    || self.project.media.iter().any(|m| m.id == media.id)
+                    || media.duration_us == Some(0)
+                    || self
+                        .project
+                        .media
+                        .iter()
+                        .any(|m| m.id == media.id || m.path == media.path)
                 {
                     return None;
                 }
                 let id = media.id;
                 self.project.media.push(media);
                 Some(Command::RemoveMedia(id))
+            }
+            Command::ReprobeMedia(media) => {
+                let index = self
+                    .project
+                    .media
+                    .iter()
+                    .position(|item| item.id == media.id)?;
+                if self.project.media[index].path != media.path
+                    || self.project.media[index].kind != media.kind
+                    || self.project.media[index] == media
+                {
+                    return None;
+                }
+                let original = std::mem::replace(&mut self.project.media[index], media);
+                if self.project.validate().is_err() {
+                    self.project.media[index] = original;
+                    return None;
+                }
+                Some(Command::ReprobeMedia(original))
             }
             Command::RemoveMedia(id) => {
                 if self
@@ -239,6 +273,37 @@ impl Editor {
                 clip.source_start_frame = source_start_frame;
                 clip.duration_frames = duration_frames;
                 self.execute(Command::ReplaceTracks(tracks))
+            }
+            Command::SetClipAudio {
+                track_id,
+                clip_id,
+                volume,
+                muted,
+            } => {
+                if !volume.is_finite() || !(0.0..=2.0).contains(&volume) {
+                    return None;
+                }
+                let track = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.id == track_id)?;
+                if track.kind != TrackKind::Audio {
+                    return None;
+                }
+                let clip = track.clips.iter_mut().find(|clip| clip.id == clip_id)?;
+                if clip.volume == volume && clip.muted == muted {
+                    return None;
+                }
+                let inverse = Command::SetClipAudio {
+                    track_id,
+                    clip_id,
+                    volume: clip.volume,
+                    muted: clip.muted,
+                };
+                clip.volume = volume;
+                clip.muted = muted;
+                Some(inverse)
             }
             Command::RippleDelete { track_id, clip_id } => {
                 let mut tracks = self.project.tracks.clone();
@@ -553,5 +618,139 @@ mod tests {
             clip_id: 1
         }));
         assert_eq!(editor.project().tracks(), before);
+    }
+
+    #[test]
+    fn imported_media_clips_cannot_extend_past_probed_source_duration() {
+        let mut editor = Editor::new(Project::new("Audio"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "tone.wav".into(),
+            kind: MediaKind::Audio,
+            duration_us: Some(1_000_000),
+            has_audio: true,
+        })));
+        let clip = Clip {
+            id: 2,
+            start_frame: 0,
+            source_start_frame: 0,
+            duration_frames: 31,
+            content: ClipContent::Media { media_id: 1 },
+            volume: 1.0,
+            muted: false,
+        };
+        assert!(!editor.apply(Command::InsertClip {
+            track_id: 2,
+            clip: clip.clone(),
+        }));
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 2,
+            clip: Clip {
+                duration_frames: 30,
+                ..clip
+            },
+        }));
+        assert!(editor.undo());
+        assert!(editor.undo());
+        assert!(editor.project().media().is_empty());
+    }
+
+    #[test]
+    fn reprobe_updates_duration_without_invalidating_existing_clips() {
+        let mut editor = Editor::new(Project::new("Audio"));
+        let media = Media {
+            id: 1,
+            path: "tone.wav".into(),
+            kind: MediaKind::Audio,
+            duration_us: None,
+            has_audio: true,
+        };
+        assert!(editor.apply(Command::ImportMedia(media.clone())));
+        assert!(!editor.apply(Command::InsertClip {
+            track_id: 2,
+            clip: Clip {
+                id: 1,
+                start_frame: 0,
+                source_start_frame: 0,
+                duration_frames: 30,
+                content: ClipContent::Media { media_id: 1 },
+                volume: 1.0,
+                muted: false,
+            },
+        }));
+        let known = Media {
+            duration_us: Some(1_000_000),
+            ..media.clone()
+        };
+        assert!(editor.apply(Command::ReprobeMedia(known.clone())));
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 2,
+            clip: Clip {
+                id: 1,
+                start_frame: 0,
+                source_start_frame: 0,
+                duration_frames: 30,
+                content: ClipContent::Media { media_id: 1 },
+                volume: 1.0,
+                muted: false,
+            },
+        }));
+        assert!(!editor.apply(Command::ReprobeMedia(Media {
+            duration_us: Some(500_000),
+            ..known.clone()
+        })));
+        assert_eq!(editor.project().media(), &[known]);
+        assert!(editor.undo());
+        assert!(editor.undo());
+        assert_eq!(editor.project().media(), &[media]);
+    }
+
+    #[test]
+    fn audio_clip_volume_and_mute_are_undoable() {
+        let mut editor = Editor::new(Project::new("Audio"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "tone.wav".into(),
+            kind: MediaKind::Audio,
+            duration_us: Some(1_000_000),
+            has_audio: true,
+        })));
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 2,
+            clip: Clip {
+                id: 1,
+                start_frame: 0,
+                source_start_frame: 0,
+                duration_frames: 30,
+                content: ClipContent::Media { media_id: 1 },
+                volume: 1.0,
+                muted: false,
+            },
+        }));
+        assert!(!editor.apply(Command::SetClipAudio {
+            track_id: 2,
+            clip_id: 1,
+            volume: f32::NAN,
+            muted: true,
+        }));
+        assert!(!editor.apply(Command::SetClipAudio {
+            track_id: 0,
+            clip_id: 1,
+            volume: 0.5,
+            muted: true,
+        }));
+        assert!(editor.apply(Command::SetClipAudio {
+            track_id: 2,
+            clip_id: 1,
+            volume: 0.5,
+            muted: true,
+        }));
+        assert_eq!(editor.project().tracks()[2].clips[0].volume, 0.5);
+        assert!(editor.project().tracks()[2].clips[0].muted);
+        assert!(editor.undo());
+        assert_eq!(editor.project().tracks()[2].clips[0].volume, 1.0);
+        assert!(!editor.project().tracks()[2].clips[0].muted);
+        assert!(editor.redo());
+        assert!(editor.project().tracks()[2].clips[0].muted);
     }
 }

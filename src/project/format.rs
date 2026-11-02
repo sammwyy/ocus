@@ -59,6 +59,8 @@ mod tests {
             id: 4,
             path: PathBuf::from("footage/scene.mp4"),
             kind: MediaKind::Video,
+            duration_us: Some(3_200_000),
+            has_audio: false,
         }]);
         fixture["tracks"][0]["clips"] = serde_json::json!([Clip {
             id: 8,
@@ -94,6 +96,45 @@ mod tests {
         let json = to_json(&Project::new("Untitled")).unwrap();
         assert!(from_json(&json.replace("\"version\": 1", "\"version\": 2")).is_err());
         assert!(from_json(&json.replace("\"version\": 1,", "")).is_err());
+    }
+
+    #[test]
+    fn old_media_references_without_probe_metadata_remain_readable() {
+        let mut document: serde_json::Value =
+            serde_json::from_str(&to_json(&Project::new("Legacy")).unwrap()).unwrap();
+        document["media"] = serde_json::json!([{
+            "id": 4, "path": "footage/old.mp4", "kind": "video"
+        }]);
+        let project = from_json(&document.to_string()).unwrap();
+        assert_eq!(project.media()[0].duration_us, None);
+        assert!(!project.media()[0].has_audio);
+        assert_eq!(from_json(&to_json(&project).unwrap()).unwrap(), project);
+    }
+
+    #[test]
+    fn paired_video_and_audio_clips_round_trip_with_probe_metadata() {
+        let mut document: serde_json::Value =
+            serde_json::from_str(&to_json(&Project::new("Paired")).unwrap()).unwrap();
+        document["media"] = serde_json::json!([Media {
+            id: 8,
+            path: PathBuf::from("footage/video.mp4"),
+            kind: MediaKind::Video,
+            duration_us: Some(1_000_000),
+            has_audio: true,
+        }]);
+        let clip = Clip {
+            id: 9,
+            start_frame: 0,
+            source_start_frame: 0,
+            duration_frames: 30,
+            content: ClipContent::Media { media_id: 8 },
+            volume: 1.0,
+            muted: false,
+        };
+        document["tracks"][0]["clips"] = serde_json::json!([clip.clone()]);
+        document["tracks"][2]["clips"] = serde_json::json!([Clip { id: 10, ..clip }]);
+        let project = from_json(&document.to_string()).unwrap();
+        assert_eq!(from_json(&to_json(&project).unwrap()).unwrap(), project);
     }
 
     #[test]

@@ -2,8 +2,9 @@
 
 These guidelines apply to human contributors and coding agents. Start with the
 [README](README.md), [architecture guide](ARCHITECTURE.md), and
-[code style](CODESTYLE.md). The [roadmap](ROADMAP.md) describes the intended
-releases; the README describes what runs today.
+[code style](CODESTYLE.md). For native dependencies and OS-specific build
+instructions, see [DEVELOPMENT.md](DEVELOPMENT.md). The [roadmap](ROADMAP.md)
+describes the intended releases; the README describes what runs today.
 
 ## Development workflow
 
@@ -19,8 +20,9 @@ releases; the README describes what runs today.
    commands, or architecture changes. Put concrete deferred work in
    [TODO.md](TODO.md); keep milestones in [ROADMAP.md](ROADMAP.md).
 
-Use Rust and Cargo. The initial desktop shell depends on the published
-`creamui = "=0.3.0"` crate, not a local path dependency:
+Use Rust and Cargo. The desktop shell depends on the published
+`creamui = "=0.3.0"` crate, not a local path dependency. Media probing uses
+`ffmpeg-next`; building requires FFmpeg development libraries and `libclang`:
 
 ```sh
 cargo run --locked
@@ -30,9 +32,10 @@ cargo clippy --all-targets --locked -- -D warnings
 ```
 
 `cargo run` needs a graphical desktop session. The model and UI rendering tests
-run headlessly. Add dependencies with `cargo add`, commit `Cargo.lock`, and enable
-only the features an implemented workflow uses. An unreleased CreamUI feature
-must not be substituted with a sibling checkout to make Ocus build.
+run headlessly but still link FFmpeg. Add dependencies with `cargo add`, commit
+`Cargo.lock`, and enable only the features an implemented workflow uses. An
+unreleased CreamUI feature must not be substituted with a sibling checkout
+to make Ocus build.
 
 ## Review boundaries
 

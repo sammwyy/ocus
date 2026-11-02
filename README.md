@@ -11,14 +11,19 @@ The compact workspace supports selecting and renaming titles, stepping through
 frames to inspect title text, splitting, moving, trimming, deleting and ripple
 deleting clips, and undo/redo. Enter a `.ocus` path and use **Save** or **Open**
 to persist/reload the project; saves are atomic and file operations run in the
-background. **Add reference** accepts an existing video, audio or image path,
-but only records its path and extension: sources are **not** decoded or probed.
+background. **Import file** probes an existing video, audio or image with
+FFmpeg on a worker thread. The media bin can insert a clip on a video or audio
+track using the probed duration (still images default to three seconds).
+Videos with audio place aligned video and audio clips in a single undoable
+action. Audio clips have editable volume and mute values, but those values do
+not affect playback or export yet. Previously saved references without probe
+metadata can be re-imported.
 
 This is not a completed v0.1 video editor. There is no frame compositor, audio
 playback, thumbnail generation, or MP4 export yet. The pinned CreamUI 0.3.0
-does not publish the GPU viewport API, and building FFmpeg bindings requires
-FFmpeg development libraries (now available on the Fedora development machine).
-The UI intentionally does not offer fake play or export buttons.
+does not publish the GPU viewport API. Building now requires FFmpeg development
+libraries (available on the Fedora development machine). The UI intentionally
+does not offer fake play or export buttons.
 
 ## Run and check
 
@@ -41,7 +46,7 @@ CreamUI checkout is needed.
 - `src/app.rs`: window startup and wiring.
 - `src/project/`: saved project, JSON format, and edit history/undo-redo.
 - `src/timeline.rs`: tracks, clips, and titles.
-- `src/media.rs`: referenced source files (decoding is not implemented).
+- `src/media.rs`: source references and FFmpeg probing (decoding is not implemented).
 - `src/ui/`: compact CreamUI workspace and background file workflow.
 - `src/main.rs`: executable entry point.
 

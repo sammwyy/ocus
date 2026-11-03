@@ -105,13 +105,7 @@ impl Project {
                 end = next;
                 match &clip.content {
                     ClipContent::Title(title)
-                        if track.kind == TrackKind::Video
-                            && title.font_size.is_finite()
-                            && title.font_size > 0.0
-                            && title.x.is_finite()
-                            && title.y.is_finite()
-                            && (0.0..=1.0).contains(&title.x)
-                            && (0.0..=1.0).contains(&title.y) => {}
+                        if track.kind == TrackKind::Video && title.valid() => {}
                     ClipContent::Media { media_id }
                         if self.media.iter().any(|media| {
                             media.id == *media_id && self.media_clip_fits(media, track.kind, clip)

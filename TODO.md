@@ -48,8 +48,9 @@ clip commands do not complete the corresponding editor workflows.
   export, with tests.
 - [ ] Draw audio waveforms in timeline clips and the source monitor; both
   currently show only the clip's volume level.
-- [ ] Extend editable title text with font, size, color, and position controls;
-  render titles consistently in the video preview and export.
+- [x] Extend editable title text with font, size, color, position, style and
+  opt-in markup controls; drag to move or resize titles in the video preview.
+- [ ] Include title overlays in exported video; export currently rejects them.
 - [ ] Export the edited project to MP4 with H.264 video and AAC audio.
 - [x] Encode silent H.264 MP4 from contiguous video and still-image clips
   on one track; reject unsupported sequences instead of dropping them.

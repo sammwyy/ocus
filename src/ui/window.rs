@@ -5,9 +5,11 @@ use super::controls::{
     play_button, secondary_button, segment, short_duration, sized_icon_button, surface, text,
     text_color, timecode, tool_button,
 };
+use super::edits::ClipRef;
 use super::interaction::{Action, DragPayload, MenuState};
-use super::state::{MediaView, SourceRange, ZOOM_SECONDS, audible, media_frames};
+use super::state::{MediaView, SourceRange, TitleGesture, ZOOM_SECONDS, audible, media_frames};
 use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
+use super::title_markup;
 use super::{MediaFilter, Sidebar, UiState};
 use crate::media::preview::StoryboardKey;
 use crate::media::{Media, MediaKind};
@@ -15,10 +17,13 @@ use crate::project::{Command, Project};
 use crate::settings::ThemeMode;
 use crate::timeline::{Clip, ClipContent, Title, TrackKind};
 use creamui::core::layout::{Dimension, Style};
-use creamui::core::{Painter, Rect, TextAlign, Widget};
+use creamui::core::{Painter, Point, Rect, TextAlign, Widget};
+use creamui::fonts::{FontWeight, HorizontalAlign, LayoutSettings, cached_layout, resolve};
 use creamui::widgets::layout::Flex;
 use creamui::widgets::layout::{Align, Grid, Justify, StyleExt};
-use creamui::widgets::{AppTitlebar, RawScrollView, TextController, TextInput};
+use creamui::widgets::{
+    AppTitlebar, Checkbox, ColorPicker, RawScrollView, TextArea, TextController, TextInput,
+};
 use creamui::{BoxedWidget, Color, GpuFrameSlot, GpuViewport, ImageData, Size, Styled};
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -78,19 +83,74 @@ fn edit_selection(state: &UiState, edit: impl FnOnce(&Clip, u64, u64) -> Command
 }
 
 fn set_title_text(state: &UiState) {
+    change_title(state, |title| title.text = state.title_text.peek());
+}
+
+fn change_title(state: &UiState, change: impl FnOnce(&mut Title)) {
     let Some((track_id, selected)) = selected_clip(state) else {
         return;
     };
-    let mut tracks = state.editor.borrow().project().tracks().to_vec();
-    if let Some(clip) = tracks
-        .iter_mut()
-        .find(|track| track.id == track_id)
-        .and_then(|track| track.clips.iter_mut().find(|clip| clip.id == selected.id))
-        && let ClipContent::Title(title) = &mut clip.content
-    {
-        title.text = state.title_text.peek();
-        state.edit(Command::ReplaceTracks(tracks));
+    let ClipContent::Title(mut title) = selected.content else {
+        return;
+    };
+    let old = title.clone();
+    change(&mut title);
+    if title != old {
+        state.edit(Command::SetTitle {
+            track_id,
+            clip_id: selected.id,
+            title,
+        });
     }
+}
+
+fn title_toggle(
+    state: &UiState,
+    label: &str,
+    checked: bool,
+    change: impl Fn(&mut Title) + 'static,
+) -> BoxedWidget {
+    let state = state.clone();
+    Box::new(
+        Flex::row()
+            .gap(8.0)
+            .align(Align::Center)
+            .child(Box::new(Checkbox::new(checked, move || {
+                change_title(&state, &change)
+            })))
+            .child(text(label, text_color(), 11.0)),
+    )
+}
+
+fn parse_hex_color(value: &str) -> Option<Color> {
+    let value = value.trim();
+    let hex = value.strip_prefix('#')?;
+    (matches!(hex.len(), 3 | 4 | 6 | 8) && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| value.parse().ok())
+        .flatten()
+}
+
+fn apply_title_style(state: &UiState) {
+    let family = state.title_font.peek();
+    let size = state.title_size.peek().trim().parse::<f32>();
+    let color = parse_hex_color(&state.title_color.peek());
+    let (Ok(size), Some(color)) = (size, color) else {
+        state
+            .status
+            .set("Enter a font size and a color such as #FFAA00".into());
+        return;
+    };
+    if family.trim().is_empty() || !size.is_finite() || size <= 0.0 {
+        state
+            .status
+            .set("Enter a font family and a positive font size".into());
+        return;
+    }
+    change_title(state, |title| {
+        title.font_family = family;
+        title.font_size = size;
+        title.color = [color.r, color.g, color.b, color.a];
+    });
 }
 
 fn set_clip_audio(state: &UiState, change: impl FnOnce(&Clip) -> (f32, bool)) {
@@ -260,7 +320,7 @@ fn monitor_viewport(slot: &GpuFrameSlot, aspect: f32) -> BoxedWidget {
     Box::new(GpuViewport::new(fill_style(), slot.clone()).aspect_ratio(aspect))
 }
 
-fn program_layers(project: &Project, frame: u64) -> (bool, Vec<Title>) {
+fn program_layers(project: &Project, frame: u64) -> (bool, Vec<(ClipRef, Title)>) {
     let mut picture = false;
     let mut titles = Vec::new();
     for track in project
@@ -273,7 +333,7 @@ fn program_layers(project: &Project, frame: u64) -> (bool, Vec<Title>) {
                 continue;
             }
             match &clip.content {
-                ClipContent::Title(title) => titles.push(title.clone()),
+                ClipContent::Title(title) => titles.push(((track.id, clip.id), title.clone())),
                 ClipContent::Media { media_id } => {
                     picture |= project
                         .media()
@@ -289,9 +349,78 @@ fn program_layers(project: &Project, frame: u64) -> (bool, Vec<Title>) {
 struct ProgramCanvas {
     slot: GpuFrameSlot,
     picture: bool,
-    titles: Vec<Title>,
+    titles: Vec<(ClipRef, Title)>,
+    selected: Option<ClipRef>,
+    state: UiState,
     aspect: f32,
     resolution: (u32, u32),
+}
+
+fn run_width(value: &str, size: f32, family: &str, bold: bool) -> f32 {
+    let face = resolve(
+        family,
+        if bold {
+            FontWeight::Bold
+        } else {
+            FontWeight::Regular
+        },
+    );
+    cached_layout(
+        &face,
+        value,
+        size,
+        &LayoutSettings {
+            horizontal_align: HorizontalAlign::Left,
+            ..Default::default()
+        },
+    )
+    .lines
+    .first()
+    .map_or(0.0, |line| line.width)
+}
+
+fn title_box(title: &Title, rect: Rect, aspect: f32, resolution: (u32, u32)) -> Rect {
+    let width = rect.width.min(rect.height * aspect);
+    let height = rect.height.min(rect.width / aspect);
+    let origin_x = rect.x + (rect.width - width) / 2.0;
+    let origin_y = rect.y + (rect.height - height) / 2.0;
+    let size = (title.font_size * width / resolution.0.max(1) as f32)
+        .max(1.0)
+        .min(height * 2.0);
+    let mut longest = 0.0_f32;
+    let mut line_width = 0.0;
+    let mut lines = 1;
+    for run in title_markup::parse(title) {
+        for (index, part) in run.text.split('\n').enumerate() {
+            if index > 0 {
+                longest = longest.max(line_width);
+                line_width = 0.0;
+                lines += 1;
+            }
+            line_width += run_width(part, size, &title.font_family, run.bold);
+        }
+    }
+    let box_width = (longest.max(line_width) + 16.0).clamp(32.0, width.max(32.0));
+    let box_height = (lines as f32 * size * 1.35 + 10.0).min(height);
+    Rect {
+        x: (origin_x + width * title.x - box_width / 2.0)
+            .clamp(origin_x, origin_x + (width - box_width).max(0.0)),
+        y: (origin_y + height * title.y - box_height / 2.0)
+            .clamp(origin_y, origin_y + (height - box_height).max(0.0)),
+        width: box_width,
+        height: box_height,
+    }
+}
+
+impl ProgramCanvas {
+    fn title_box(&self, rect: Rect) -> Option<Rect> {
+        if rect.width.min(rect.height * self.aspect) <= 16.0 || rect.height <= 0.0 {
+            return None;
+        }
+        let selected = self.selected?;
+        let title = &self.titles.iter().find(|(key, _)| *key == selected)?.1;
+        Some(title_box(title, rect, self.aspect, self.resolution))
+    }
 }
 
 impl Widget for ProgramCanvas {
@@ -318,57 +447,184 @@ impl Widget for ProgramCanvas {
         }
         let scale = width / self.resolution.0.max(1) as f32;
         painter.push_clip_rounded(bounds, 0.0);
-        for title in &self.titles {
-            let size = (title.font_size * scale).max(1.0).min(height * 0.4);
-            let lines: Vec<_> = title.text.lines().collect();
-            let line_height = size * 1.35;
-            let text_width = (width - 16.0).max(1.0);
-            let x = (bounds.x + width * title.x - text_width / 2.0)
-                .clamp(bounds.x, bounds.x + width - text_width);
-            let start_y = bounds.y + height * title.y - line_height * lines.len() as f32 / 2.0;
-            let color = Color::rgba(
-                title.color[0],
-                title.color[1],
-                title.color[2],
-                title.color[3],
-            );
-            for (index, line) in lines.into_iter().enumerate() {
-                if line.trim().is_empty() || color.a == 0 {
-                    continue;
+        for (_, title) in &self.titles {
+            let size = (title.font_size * scale).max(1.0).min(height * 2.0);
+            let runs = title_markup::parse(title);
+            let lines: Vec<Vec<_>> = {
+                let mut lines = vec![Vec::new()];
+                for run in runs {
+                    let mut parts = run.text.split('\n').peekable();
+                    while let Some(part) = parts.next() {
+                        if !part.is_empty() {
+                            let mut styled = run.clone();
+                            styled.text = part.to_owned();
+                            lines.last_mut().unwrap().push(styled);
+                        }
+                        if parts.peek().is_some() {
+                            lines.push(Vec::new());
+                        }
+                    }
                 }
-                let line_rect = Rect {
-                    x,
-                    y: start_y + index as f32 * line_height,
-                    width: text_width,
-                    height: line_height,
-                };
-                painter.fill_text_font(
-                    Rect {
-                        x: line_rect.x + 1.0,
-                        y: line_rect.y + 1.0,
-                        ..line_rect
-                    },
-                    line,
-                    Color::rgba(0, 0, 0, color.a.min(150)),
-                    size,
-                    TextAlign::Center,
-                    Some(&title.font_family),
-                    true,
-                    false,
-                );
-                painter.fill_text_font(
-                    line_rect,
-                    line,
-                    color,
-                    size,
-                    TextAlign::Center,
-                    Some(&title.font_family),
-                    true,
-                    false,
-                );
+                lines
+            };
+            let line_height = size * 1.35;
+            let start_y = bounds.y + height * title.y - line_height * lines.len() as f32 / 2.0;
+            for (index, line) in lines.iter().enumerate() {
+                let widths: Vec<_> = line
+                    .iter()
+                    .map(|run| run_width(&run.text, size, &title.font_family, run.bold))
+                    .collect();
+                let line_width: f32 = widths.iter().sum();
+                let mut x = bounds.x + width * title.x - line_width / 2.0;
+                for (run, text_width) in line.iter().zip(widths) {
+                    let line_rect = Rect {
+                        x,
+                        y: start_y + index as f32 * line_height,
+                        width: text_width.max(1.0),
+                        height: line_height,
+                    };
+                    if !run.text.trim().is_empty() && run.color.a > 0 {
+                        if title.outline {
+                            for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                                painter.fill_text_font(
+                                    Rect {
+                                        x: line_rect.x + dx,
+                                        y: line_rect.y + dy,
+                                        ..line_rect
+                                    },
+                                    &run.text,
+                                    Color::rgba(0, 0, 0, run.color.a),
+                                    size,
+                                    TextAlign::Start,
+                                    Some(&title.font_family),
+                                    run.bold,
+                                    run.italic,
+                                );
+                            }
+                        }
+                        painter.fill_text_font(
+                            line_rect,
+                            &run.text,
+                            run.color,
+                            size,
+                            TextAlign::Start,
+                            Some(&title.font_family),
+                            run.bold,
+                            run.italic,
+                        );
+                    }
+                    x += text_width;
+                }
             }
         }
         painter.pop_clip();
+        if let Some(box_rect) = self.title_box(rect) {
+            painter.stroke_rect(box_rect, accent(), 1.5, 0.0);
+            painter.fill_rect(
+                Rect {
+                    x: box_rect.x + box_rect.width - 5.0,
+                    y: box_rect.y + box_rect.height - 5.0,
+                    width: 10.0,
+                    height: 10.0,
+                },
+                accent(),
+                2.0,
+            );
+        }
+    }
+
+    fn on_drag_start(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
+        let selected = self.selected?;
+        let title = self
+            .titles
+            .iter()
+            .find(|(key, _)| *key == selected)?
+            .1
+            .clone();
+        let state = self.state.clone();
+        let aspect = self.aspect;
+        let resolution = self.resolution;
+        Some(Rc::new(move |pointer, rect| {
+            if rect.width.min(rect.height * aspect) <= 16.0 || rect.height <= 0.0 {
+                return;
+            }
+            let box_rect = title_box(&title, rect, aspect, resolution);
+            let position = Point {
+                x: pointer.x + rect.x,
+                y: pointer.y + rect.y,
+            };
+            if position.x < box_rect.x - 5.0
+                || position.x > box_rect.x + box_rect.width + 5.0
+                || position.y < box_rect.y - 5.0
+                || position.y > box_rect.y + box_rect.height + 5.0
+            {
+                return;
+            }
+            state.pause();
+            *state.title_gesture.borrow_mut() = Some(TitleGesture {
+                clip: selected,
+                title: title.clone(),
+                pointer,
+                resize: position.x > box_rect.x + box_rect.width - 12.0
+                    && position.y > box_rect.y + box_rect.height - 12.0,
+            });
+        }))
+    }
+
+    fn on_drag(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
+        let state = self.state.clone();
+        let aspect = self.aspect;
+        let resolution = self.resolution;
+        Some(Rc::new(move |pointer, rect| {
+            let (key, draft) = {
+                let gesture = state.title_gesture.borrow();
+                let Some(gesture) = gesture.as_ref() else {
+                    return;
+                };
+                let width = rect.width.min(rect.height * aspect).max(1.0);
+                let height = rect.height.min(rect.width / aspect).max(1.0);
+                let dx = pointer.x - gesture.pointer.x;
+                let dy = pointer.y - gesture.pointer.y;
+                let mut draft = gesture.title.clone();
+                if gesture.resize {
+                    let horizontal = dx * resolution.0 as f32 / width;
+                    let vertical = dy * resolution.1 as f32 / height;
+                    let delta = if horizontal.abs() > vertical.abs() {
+                        horizontal
+                    } else {
+                        vertical
+                    };
+                    draft.font_size = (draft.font_size + delta).clamp(1.0, 8192.0);
+                } else {
+                    draft.x = (draft.x + dx / width).clamp(0.0, 1.0);
+                    draft.y = (draft.y + dy / height).clamp(0.0, 1.0);
+                }
+                (gesture.clip, draft)
+            };
+            state.title_preview.set(Some((key, draft)));
+        }))
+    }
+
+    fn on_drag_end(&self) -> Option<Rc<dyn Fn()>> {
+        let state = self.state.clone();
+        Some(Rc::new(move || {
+            let Some(gesture) = state.title_gesture.borrow_mut().take() else {
+                return;
+            };
+            let draft = state.title_preview.peek();
+            state.title_preview.set(None);
+            if let Some((clip, title)) = draft
+                && clip == gesture.clip
+                && title != gesture.title
+            {
+                state.title_size.set_value(title.font_size.to_string());
+                state.edit(Command::SetTitle {
+                    track_id: clip.0,
+                    clip_id: clip.1,
+                    title,
+                });
+            }
+        }))
     }
 }
 
@@ -1109,11 +1365,17 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
             ));
         }
         rows.push(section("Timing", timing));
-        if matches!(clip.content, ClipContent::Title(_)) {
+        if let ClipContent::Title(title) = &clip.content {
             rows.push(section(
                 "Title",
                 vec![
-                    input(&state.title_text, inner),
+                    text("Text", muted(), 11.0),
+                    Box::new(
+                        TextArea::controlled(&state.title_text)
+                            .width(inner)
+                            .height(112.0)
+                            .wrap(true),
+                    ),
                     inline(secondary_button(
                         Some(Glyph::Title),
                         "Apply text",
@@ -1121,6 +1383,55 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         state,
                         set_title_text,
                     )),
+                    text("Font family", muted(), 11.0),
+                    input(&state.title_font, inner),
+                    text("Font size (px)", muted(), 11.0),
+                    input(&state.title_size, inner),
+                    text("Color (#RRGGBB or #RRGGBBAA)", muted(), 11.0),
+                    Box::new(
+                        ColorPicker::controlled(
+                            parse_hex_color(&state.title_color.value()).unwrap_or_else(|| {
+                                Color::rgba(
+                                    title.color[0],
+                                    title.color[1],
+                                    title.color[2],
+                                    title.color[3],
+                                )
+                            }),
+                            &state.title_picker,
+                            {
+                                let controller = state.title_color.clone();
+                                move |color: Color| {
+                                    controller.set_value(format!(
+                                        "#{:02X}{:02X}{:02X}{:02X}",
+                                        color.r, color.g, color.b, color.a
+                                    ));
+                                }
+                            },
+                        )
+                        .width(inner),
+                    ),
+                    input(&state.title_color, inner),
+                    inline(secondary_button(
+                        None,
+                        "Apply style",
+                        true,
+                        state,
+                        apply_title_style,
+                    )),
+                    title_toggle(state, "Bold", title.bold, |title| title.bold = !title.bold),
+                    title_toggle(state, "Italic", title.italic, |title| {
+                        title.italic = !title.italic
+                    }),
+                    title_toggle(state, "Outline", title.outline, |title| {
+                        title.outline = !title.outline
+                    }),
+                    title_toggle(state, "Parse HTML tags", title.parse_html, |title| {
+                        title.parse_html = !title.parse_html
+                    }),
+                    title_toggle(state, "Parse Markdown", title.parse_markdown, |title| {
+                        title.parse_markdown = !title.parse_markdown
+                    }),
                 ],
             ));
         }
@@ -1700,7 +2011,12 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
 
     let frame = state.program.position.get();
     let timeline_end = state.sequence_end();
-    let (picture, titles) = program_layers(project, frame);
+    let (picture, mut titles) = program_layers(project, frame);
+    if let Some((key, draft)) = state.title_preview.get()
+        && let Some((_, title)) = titles.iter_mut().find(|(clip, _)| *clip == key)
+    {
+        *title = draft;
+    }
     let empty_timeline = project.tracks().iter().all(|track| track.clips.is_empty());
     let first_media = project.media().first();
     let program_stage: BoxedWidget = if picture && !gpu_preview && titles.is_empty() {
@@ -1715,6 +2031,8 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             slot: state.program.slot.clone(),
             picture: picture && gpu_preview,
             titles,
+            selected: state.selected.get().last().copied(),
+            state: state.clone(),
             aspect,
             resolution: (project.settings().width, project.settings().height),
         })
@@ -2370,6 +2688,7 @@ mod tests {
         bounds: Vec<(String, Rect)>,
         images: Vec<Rect>,
         fills: Vec<(Rect, Color)>,
+        strokes: Vec<(Rect, Color)>,
         text_colors: Vec<(String, Color)>,
     }
 
@@ -2378,7 +2697,9 @@ mod tests {
             self.fills.push((rect, color));
         }
 
-        fn stroke_rect(&mut self, _: Rect, _: Color, _: f32, _: f32) {}
+        fn stroke_rect(&mut self, rect: Rect, color: Color, _: f32, _: f32) {
+            self.strokes.push((rect, color));
+        }
 
         fn fill_text(&mut self, rect: Rect, text: &str, color: Color, _: f32, _: TextAlign) {
             self.labels.push(text.to_owned());
@@ -2474,12 +2795,15 @@ mod tests {
             color: [245, 210, 80, 160],
             x: 0.25,
             y: 0.7,
+            ..Default::default()
         };
         let mut painter = TestPainter::default();
         ProgramCanvas {
             slot: GpuFrameSlot::new(),
             picture: true,
-            titles: vec![title],
+            titles: vec![((0, 1), title)],
+            selected: None,
+            state: UiState::new(),
             aspect: 16.0 / 9.0,
             resolution: (1920, 1080),
         }
@@ -2493,6 +2817,171 @@ mod tests {
             painter.text_colors.last().unwrap().1,
             Color::rgba(245, 210, 80, 160)
         );
+    }
+
+    #[test]
+    fn preview_title_drag_moves_and_resizes_with_one_undoable_edit() {
+        let state = UiState::new();
+        assert!(state.add_title());
+        let title = match &state.editor.borrow().project().tracks()[0].clips[0].content {
+            ClipContent::Title(title) => title.clone(),
+            _ => unreachable!(),
+        };
+        let canvas = ProgramCanvas {
+            slot: GpuFrameSlot::new(),
+            picture: false,
+            titles: vec![((0, 1), title.clone())],
+            selected: Some((0, 1)),
+            state: state.clone(),
+            aspect: 16.0 / 9.0,
+            resolution: (1920, 1080),
+        };
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 640.0,
+            height: 360.0,
+        };
+        let mut painter = TestPainter::default();
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
+                creamui::Theme::dark(),
+            ));
+            canvas.paint(&mut painter, rect);
+        });
+        assert!(
+            painter
+                .strokes
+                .iter()
+                .any(|(drawn, _)| *drawn == canvas.title_box(rect).unwrap())
+        );
+        let program_x = |painter: &TestPainter| {
+            painter
+                .bounds
+                .iter()
+                .find(|(label, rect)| {
+                    label == "Title 1"
+                        && (700.0..900.0).contains(&rect.x)
+                        && (150.0..400.0).contains(&rect.y)
+                })
+                .unwrap()
+                .1
+                .x
+        };
+        let before = program_x(&render(&state, 1280.0, 760.0));
+        let at = |x, y| Point { x, y };
+        let position = at(320.0, 180.0);
+        canvas.on_drag_start().unwrap()(position, rect);
+        canvas.on_drag().unwrap()(at(384.0, 216.0), rect);
+        assert_eq!(state.title_preview.peek().as_ref().unwrap().1.x, 0.6);
+        assert!(program_x(&render(&state, 1280.0, 760.0)) > before);
+        assert_eq!(title.x, 0.5);
+        canvas.on_drag_end().unwrap()();
+        let current = || match &state.editor.borrow().project().tracks()[0].clips[0].content {
+            ClipContent::Title(title) => title.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!((current().x, current().y), (0.6, 0.6));
+        state.undo();
+        assert_eq!((current().x, current().y), (0.5, 0.5));
+        state.redo();
+        assert_eq!((current().x, current().y), (0.6, 0.6));
+
+        let resized = current();
+        let canvas = ProgramCanvas {
+            titles: vec![((0, 1), resized.clone())],
+            ..canvas
+        };
+        let box_rect = canvas.title_box(rect).unwrap();
+        let handle = at(box_rect.x + box_rect.width, box_rect.y + box_rect.height);
+        canvas.on_drag_start().unwrap()(handle, rect);
+        canvas.on_drag().unwrap()(at(handle.x + 32.0, handle.y), rect);
+        canvas.on_drag_end().unwrap()();
+        assert!(current().font_size > resized.font_size);
+        state.undo();
+        assert_eq!(current().font_size, resized.font_size);
+        assert_eq!(state.title_size.peek(), resized.font_size.to_string());
+        canvas.on_drag_start().unwrap()(handle, rect);
+        canvas.on_drag().unwrap()(at(handle.x + 32.0, handle.y), rect);
+        state.run(Action::Escape);
+        canvas.on_drag_end().unwrap()();
+        assert!(state.title_preview.peek().is_none());
+        assert_eq!(state.selected.peek(), vec![(0, 1)]);
+        assert_eq!(current().font_size, resized.font_size);
+        canvas.on_drag_start().unwrap()(handle, rect);
+        canvas.on_drag().unwrap()(at(handle.x, handle.y + 18.0), rect);
+        canvas.on_drag_end().unwrap()();
+        assert!(current().font_size > resized.font_size);
+    }
+
+    #[test]
+    fn inspector_edits_styled_title_and_program_renders_parsed_runs() {
+        let state = UiState::new();
+        assert!(state.add_title());
+        state
+            .title_text
+            .set_value("<b>Hello</b> **world** <color=red>red</color>");
+        set_title_text(&state);
+        state.title_font.set_value("Sans");
+        state.title_size.set_value("92");
+        state.title_color.set_value("#55AAFFFF");
+        apply_title_style(&state);
+        change_title(&state, |title| {
+            title.bold = false;
+            title.italic = true;
+            title.outline = true;
+            title.parse_html = true;
+            title.parse_markdown = true;
+        });
+        let painter = render(&state, 1280.0, 1600.0);
+        for label in [
+            "Font family",
+            "Font size (px)",
+            "Color (#RRGGBB or #RRGGBBAA)",
+            "Bold",
+            "Italic",
+            "Outline",
+            "Parse HTML tags",
+            "Parse Markdown",
+        ] {
+            assert!(painter.labels.iter().any(|value| value == label), "{label}");
+        }
+        assert!(
+            painter
+                .text_colors
+                .iter()
+                .any(|(text, color)| text == "red" && *color == Color::rgb(255, 0, 0))
+        );
+        assert!(painter.labels.iter().any(|label| label == "Hello"));
+        assert!(painter.labels.iter().any(|label| label == "world"));
+        state.title_picker.set_open(true);
+        let popup = render(&state, 1280.0, 1600.0);
+        assert!(popup.labels.iter().any(|label| label == "Done"));
+        state.title_picker.set_open(false);
+        state.undo();
+        assert!(!state
+            .editor
+            .borrow()
+            .project()
+            .tracks()[0]
+            .clips
+            .iter()
+            .any(|clip| matches!(&clip.content, ClipContent::Title(title) if title.parse_markdown)));
+        assert_eq!(state.title_size.peek(), "92");
+    }
+
+    #[test]
+    fn invalid_color_text_cannot_crash_inspector_or_change_title() {
+        let state = UiState::new();
+        assert!(state.add_title());
+        state.title_color.set_value("#aé12345");
+        let painter = render(&state, 1280.0, 900.0);
+        assert!(painter.labels.iter().any(|label| label == "Title clip"));
+        apply_title_style(&state);
+        assert!(state.status.peek().contains("color"));
+        let editor = state.editor.borrow();
+        let title = &editor.project().tracks()[0].clips[0].content;
+        assert!(matches!(title, ClipContent::Title(title) if title.color == [255; 4]));
     }
 
     #[test]

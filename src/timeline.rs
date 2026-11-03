@@ -44,4 +44,47 @@ pub struct Title {
     pub color: [u8; 4],
     pub x: f32,
     pub y: f32,
+    #[serde(default = "default_bold")]
+    pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
+    #[serde(default)]
+    pub outline: bool,
+    #[serde(default)]
+    pub parse_html: bool,
+    #[serde(default)]
+    pub parse_markdown: bool,
+}
+
+fn default_bold() -> bool {
+    true
+}
+
+impl Default for Title {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            font_family: "Sans".into(),
+            font_size: 64.0,
+            color: [255; 4],
+            x: 0.5,
+            y: 0.5,
+            bold: true,
+            italic: false,
+            outline: false,
+            parse_html: false,
+            parse_markdown: false,
+        }
+    }
+}
+
+impl Title {
+    pub fn valid(&self) -> bool {
+        self.font_size.is_finite()
+            && self.font_size > 0.0
+            && self.x.is_finite()
+            && self.y.is_finite()
+            && (0.0..=1.0).contains(&self.x)
+            && (0.0..=1.0).contains(&self.y)
+    }
 }

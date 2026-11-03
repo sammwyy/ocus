@@ -78,12 +78,17 @@ mod tests {
             source_start_frame: 0,
             duration_frames: 48,
             content: ClipContent::Title(Title {
-                text: "Hello".into(),
+                text: "<b>Hello</b> **world**".into(),
                 font_family: "Sans".into(),
                 font_size: 48.0,
-                color: [255, 255, 255, 255],
-                x: 0.5,
-                y: 0.5,
+                color: [255, 150, 40, 180],
+                x: 0.3,
+                y: 0.7,
+                bold: false,
+                italic: true,
+                outline: true,
+                parse_html: true,
+                parse_markdown: true,
             }),
             volume: 1.0,
             muted: false,
@@ -91,6 +96,39 @@ mod tests {
         }]);
         let project = from_json(&fixture.to_string()).unwrap();
         assert_eq!(from_json(&to_json(&project).unwrap()).unwrap(), project);
+    }
+
+    #[test]
+    fn older_titles_load_without_new_style_fields() {
+        let mut document: serde_json::Value =
+            serde_json::from_str(&to_json(&Project::new("Legacy title")).unwrap()).unwrap();
+        let mut clip = serde_json::to_value(Clip {
+            id: 1,
+            start_frame: 0,
+            source_start_frame: 0,
+            duration_frames: 90,
+            content: ClipContent::Title(Title::default()),
+            volume: 1.0,
+            muted: false,
+            linked_audio: false,
+        })
+        .unwrap();
+        for field in ["bold", "italic", "outline", "parse_html", "parse_markdown"] {
+            clip["content"]["title"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+        }
+        clip["content"]["title"]["font_size"] = serde_json::json!(640.0);
+        document["tracks"][0]["clips"] = serde_json::json!([clip]);
+        let project = from_json(&document.to_string()).unwrap();
+        assert_eq!(
+            project.tracks()[0].clips[0].content,
+            ClipContent::Title(Title {
+                font_size: 640.0,
+                ..Title::default()
+            })
+        );
     }
 
     #[test]

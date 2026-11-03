@@ -243,6 +243,7 @@ pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Op
                 color: [255, 255, 255, 255],
                 x: 0.5,
                 y: 0.5,
+                ..Default::default()
             }),
             volume: 1.0,
             muted: false,
@@ -571,6 +572,7 @@ mod tests {
                 color: [255; 4],
                 x: 0.5,
                 y: 0.5,
+                ..Default::default()
             }),
             volume: 1.0,
             muted: false,

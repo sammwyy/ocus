@@ -7,10 +7,15 @@ yet.** Today the repository builds a CreamUI desktop shell with an integrated
 titlebar, four timeline tracks, a versioned JSON project representation, and
 undo/redo commands for renaming projects and inserting/removing clips. The
 timeline toolbar's **Title** tool adds a three-second text clip; over footage
-it places the title on a free video track at the playhead. The workspace
-supports selecting and renaming titles, stepping through
-frames to inspect title text, splitting, moving, trimming, deleting and ripple
-deleting clips, and undo/redo. **Open** and **Save as…** use native
+it places the title on a free video track at the playhead. Selecting a title
+shows a frame around it in the Program monitor: drag inside to move it or drag
+its bottom-right handle to resize it. The inspector edits its multiline text,
+font family, size, color (picker or hex), bold, italic and outline. Independent
+HTML and Markdown switches parse `<b>` / `<bold>`, `<i>` / `<italic>`,
+`<color=red>` / `<color=#ff0000>`, `**bold**` and `_italic_` in the preview;
+other HTML remains literal text. These edits can be undone and are saved with
+the project. The workspace also supports splitting, moving, trimming, deleting
+and ripple-deleting clips. **Open** and **Save as…** use native
 file dialogs instead of requiring typed paths; **Save** reuses the chosen
 path. **New** asks before discarding unsaved changes. Saves are atomic and
 file operations run in the background. **Import** accepts multiple

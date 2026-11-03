@@ -123,6 +123,7 @@ mod tests {
                     color: [255; 4],
                     x: 0.5,
                     y: 0.5,
+                    ..Default::default()
                 }),
                 volume: 1.0,
                 muted: false,

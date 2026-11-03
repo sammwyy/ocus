@@ -228,6 +228,8 @@ impl UiState {
                     self.close_menu();
                 } else if self.drag.peek().is_some() {
                     self.cancel_drag();
+                } else if self.title_gesture.borrow().is_some() {
+                    self.clear_title_gesture();
                 } else {
                     self.select_clip(None);
                 }

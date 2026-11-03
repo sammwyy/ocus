@@ -9,9 +9,9 @@ use crate::media::{Media, MediaKind, MediaProbe, Thumbnail, probe, thumbnail};
 use crate::playback::{self, Session};
 use crate::project::{Command, Editor, Project, store};
 use crate::settings::{self, Settings, ThemeMode};
-use crate::timeline::{Clip, ClipContent, TrackKind};
+use crate::timeline::{Clip, ClipContent, Title, TrackKind};
 use creamui::core::{Modifiers, Point, Rect, RgbaImage};
-use creamui::widgets::{ScrollController, TextController};
+use creamui::widgets::{ColorPickerController, ScrollController, TextController};
 use creamui::{AppHandle, GpuFrame, GpuFrameSlot, Signal, WindowHandle};
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use std::cell::{Cell, RefCell};
@@ -93,6 +93,13 @@ pub(crate) struct SourceRange {
     pub duration: u64,
 }
 
+pub(crate) struct TitleGesture {
+    pub clip: ClipRef,
+    pub title: Title,
+    pub pointer: Point,
+    pub resize: bool,
+}
+
 #[derive(Clone)]
 pub(crate) struct UiState {
     pub editor: Rc<RefCell<Editor>>,
@@ -105,6 +112,12 @@ pub(crate) struct UiState {
     pub preview_available: Signal<bool>,
     pub project_path: Signal<Option<PathBuf>>,
     pub title_text: TextController,
+    pub title_font: TextController,
+    pub title_size: TextController,
+    pub title_color: TextController,
+    pub title_picker: ColorPickerController,
+    pub title_preview: Signal<Option<(ClipRef, Title)>>,
+    pub title_gesture: Rc<RefCell<Option<TitleGesture>>>,
     pub media_query: TextController,
     pub media_filter: Signal<MediaFilter>,
     pub media_view: Signal<MediaView>,
@@ -163,6 +176,12 @@ impl UiState {
             preview_available: Signal::new(false),
             project_path: Signal::new(None),
             title_text: TextController::default(),
+            title_font: TextController::default(),
+            title_size: TextController::default(),
+            title_color: TextController::default(),
+            title_picker: ColorPickerController::new(),
+            title_preview: Signal::new(None),
+            title_gesture: Rc::new(RefCell::new(None)),
             media_query: TextController::default(),
             media_filter: Signal::new(MediaFilter::All),
             media_view: Signal::new(MediaView::Grid),
@@ -374,12 +393,14 @@ impl UiState {
     pub fn undo(&self) {
         if self.editor.borrow_mut().undo() {
             self.refresh_after_edit("Undid edit · Unsaved changes");
+            self.sync_title_controllers();
         }
     }
 
     pub fn redo(&self) {
         if self.editor.borrow_mut().redo() {
             self.refresh_after_edit("Redid edit · Unsaved changes");
+            self.sync_title_controllers();
         }
     }
 
@@ -582,6 +603,41 @@ impl UiState {
         self.select_clips(selection.into_iter().collect());
     }
 
+    fn sync_title_controllers(&self) {
+        let Some((track_id, clip_id)) = self.primary_clip() else {
+            return;
+        };
+        let editor = self.editor.borrow();
+        let title = editor
+            .project()
+            .tracks()
+            .iter()
+            .find(|track| track.id == track_id)
+            .and_then(|track| track.clips.iter().find(|clip| clip.id == clip_id))
+            .and_then(|clip| match &clip.content {
+                ClipContent::Title(title) => Some(title.clone()),
+                ClipContent::Media { .. } => None,
+            });
+        drop(editor);
+        let Some(title) = title else {
+            return;
+        };
+        self.title_text.set_value(title.text);
+        self.title_font.set_value(title.font_family);
+        self.title_size.set_value(title.font_size.to_string());
+        self.title_color.set_value(format!(
+            "#{:02X}{:02X}{:02X}{:02X}",
+            title.color[0], title.color[1], title.color[2], title.color[3]
+        ));
+    }
+
+    pub(super) fn clear_title_gesture(&self) {
+        self.title_gesture.borrow_mut().take();
+        if self.title_preview.peek().is_some() {
+            self.title_preview.set(None);
+        }
+    }
+
     /// Replaces the clip selection; the last entry becomes the primary clip.
     pub fn select_clips(&self, mut selection: Vec<ClipRef>) {
         let mut seen = HashSet::new();
@@ -592,26 +648,14 @@ impl UiState {
         if self.selected.peek() == selection {
             return;
         }
+        self.clear_title_gesture();
+        self.title_picker.set_open(false);
         self.selected.set(selection);
         let primary = self.primary_clip();
-        if let Some((track_id, clip_id)) = primary {
+        if primary.is_some() {
             self.selected_media.set(None);
             self.sidebar.set(Sidebar::Inspector);
-            let title = self
-                .editor
-                .borrow()
-                .project()
-                .tracks()
-                .iter()
-                .find(|track| track.id == track_id)
-                .and_then(|track| track.clips.iter().find(|clip| clip.id == clip_id))
-                .and_then(|clip| match &clip.content {
-                    ClipContent::Title(title) => Some(title.text.clone()),
-                    ClipContent::Media { .. } => None,
-                });
-            if let Some(title) = title {
-                self.title_text.set_value(title);
-            }
+            self.sync_title_controllers();
         }
         if previous.map(|(_, clip)| clip) != primary.map(|(_, clip)| clip) {
             self.reset_source();
@@ -678,6 +722,8 @@ impl UiState {
         if self.selected_media.peek() == Some(media_id) && self.selected.peek().is_empty() {
             return;
         }
+        self.clear_title_gesture();
+        self.title_picker.set_open(false);
         self.selected.set(Vec::new());
         self.selected_media.set(Some(media_id));
         self.reset_source();
@@ -962,6 +1008,8 @@ impl UiState {
     fn reset_monitors(&self) {
         self.pause();
         self.pause_source();
+        self.clear_title_gesture();
+        self.title_picker.set_open(false);
         if let Some(window) = self.window.borrow().as_ref() {
             self.program.slot.clear(window);
             self.source.slot.clear(window);

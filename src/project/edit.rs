@@ -1,6 +1,6 @@
 use super::Project;
 use crate::media::{Media, MediaKind};
-use crate::timeline::{Clip, ClipContent, Track, TrackKind};
+use crate::timeline::{Clip, ClipContent, Title, Track, TrackKind};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
@@ -40,6 +40,11 @@ pub enum Command {
         clip_id: u64,
         volume: f32,
         muted: bool,
+    },
+    SetTitle {
+        track_id: u64,
+        clip_id: u64,
+        title: Title,
     },
     RippleDelete {
         track_id: u64,
@@ -108,15 +113,7 @@ impl Editor {
                     .find(|track| track.id == track_id)?
                     .kind;
                 let compatible = match &clip.content {
-                    ClipContent::Title(title) => {
-                        kind == TrackKind::Video
-                            && title.font_size.is_finite()
-                            && title.font_size > 0.0
-                            && title.x.is_finite()
-                            && title.y.is_finite()
-                            && (0.0..=1.0).contains(&title.x)
-                            && (0.0..=1.0).contains(&title.y)
-                    }
+                    ClipContent::Title(title) => kind == TrackKind::Video && title.valid(),
                     ClipContent::Media { media_id } => self
                         .project
                         .media
@@ -306,6 +303,34 @@ impl Editor {
                 clip.muted = muted;
                 Some(inverse)
             }
+            Command::SetTitle {
+                track_id,
+                clip_id,
+                title,
+            } => {
+                if !title.valid() {
+                    return None;
+                }
+                let clip = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.id == track_id)?
+                    .clips
+                    .iter_mut()
+                    .find(|clip| clip.id == clip_id)?;
+                let ClipContent::Title(current) = &mut clip.content else {
+                    return None;
+                };
+                if *current == title {
+                    return None;
+                }
+                Some(Command::SetTitle {
+                    track_id,
+                    clip_id,
+                    title: std::mem::replace(current, title),
+                })
+            }
             Command::RippleDelete { track_id, clip_id } => {
                 let mut tracks = self.project.tracks.clone();
                 let track = tracks.iter_mut().find(|t| t.id == track_id)?;
@@ -416,6 +441,7 @@ mod tests {
                 color: [255; 4],
                 x: 0.5,
                 y: 0.5,
+                ..Default::default()
             }),
             volume: 1.0,
             muted: false,
@@ -449,6 +475,62 @@ mod tests {
     }
 
     #[test]
+    fn title_style_edits_are_validated_and_undoable() {
+        let mut editor = Editor::new(Project::new("Styled"));
+        let title = Title::default();
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 0,
+            clip: Clip {
+                id: 1,
+                start_frame: 0,
+                source_start_frame: 0,
+                duration_frames: 90,
+                content: ClipContent::Title(title.clone()),
+                volume: 1.0,
+                muted: false,
+                linked_audio: false,
+            },
+        }));
+        let changed = Title {
+            text: "<b>Hello</b>".into(),
+            x: 0.25,
+            font_size: 108.0,
+            italic: true,
+            parse_html: true,
+            outline: true,
+            ..title.clone()
+        };
+        let set = |title| Command::SetTitle {
+            track_id: 0,
+            clip_id: 1,
+            title,
+        };
+        assert!(!editor.apply(set(Title {
+            font_size: f32::NAN,
+            ..title.clone()
+        })));
+        assert!(!editor.apply(set(Title {
+            x: 2.0,
+            ..title.clone()
+        })));
+        assert!(editor.apply(set(changed.clone())));
+        assert_eq!(
+            editor.project().tracks()[0].clips[0].content,
+            ClipContent::Title(changed.clone())
+        );
+        assert!(editor.undo());
+        assert_eq!(
+            editor.project().tracks()[0].clips[0].content,
+            ClipContent::Title(title)
+        );
+        assert!(editor.redo());
+        assert_eq!(
+            editor.project().tracks()[0].clips[0].content,
+            ClipContent::Title(changed)
+        );
+    }
+
+    #[test]
     fn clip_insertion_rejects_invalid_ranges_overlap_and_missing_media() {
         let mut editor = Editor::new(Project::new("Film"));
         let title = Clip {
@@ -463,6 +545,7 @@ mod tests {
                 color: [255; 4],
                 x: 0.5,
                 y: 0.5,
+                ..Default::default()
             }),
             volume: 1.0,
             muted: false,
@@ -526,6 +609,7 @@ mod tests {
                 color: [255; 4],
                 x: 0.5,
                 y: 0.5,
+                ..Default::default()
             }),
             volume: 1.0,
             muted: false,
@@ -610,6 +694,7 @@ mod tests {
                         color: [255; 4],
                         x: 0.5,
                         y: 0.5,
+                        ..Default::default()
                     }),
                     volume: 1.0,
                     muted: false,

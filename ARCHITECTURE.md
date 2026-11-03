@@ -26,6 +26,7 @@ src/
     window.rs       integrated titlebar, editor layout, and clip controls
     controls.rs     palette, vector glyphs, buttons, scrubber, thumbnails
     timeline_view.rs  painted ruler, track lanes, clips, playhead and gestures
+    title_markup.rs   opt-in HTML/Markdown title styling
     interaction.rs  drag and drop, shortcuts and the actions they trigger
     edits.rs        multi-clip move, snap, split, delete and paste planning
     state.rs        transient selection, monitors, file dialogs, background jobs
@@ -49,7 +50,8 @@ round-trips media references and title clips. Project load validates settings,
 IDs, clip ranges and reference existence. `project::store` loads and saves on
 background jobs, with same-directory temporary files, sync, and rename for
 atomic writes. Imported media paths are absolute. Format migrations do not
-exist yet; optional probe metadata keeps version 1 files readable. Media
+exist yet; optional probe metadata and title style/parse flags keep version 1
+files readable. Media
 probing and bounded first-frame thumbnails use the `ffmpeg-next` library on
 workers. `media/preview.rs` decodes and scales frames off the UI thread,
 maintaining a small frame buffer during playback and seeking to source frames
@@ -69,9 +71,12 @@ Clip selection may hold several clips; dragging, pasting, nudging, splitting
 and deleting a selection is planned in `ui/edits.rs` against the current
 project and applied as one `ReplaceTracks` command, so it undoes in one step
 and the project's own validation still rejects overlaps. Drag previews and
-the rubber band are transient UI state. It does
-overlays title text over the first active video/still layer in the Program
-monitor, but does not composite simultaneous video layers; title edits, split/move/trim/delete,
+the rubber band are transient UI state. The Program monitor overlays title
+text over the first active video/still layer; the selected title has a draggable
+frame and resize handle, with a transient draft committed as one `SetTitle`
+command on release. `ui/title_markup.rs` parses only the supported HTML and
+Markdown syntax when their respective switches are enabled. The preview does
+not composite simultaneous video layers; title edits, split/move/trim/delete,
 audio clip settings, track creation/removal and ripple delete use project
 commands. A video with sound is inserted as one clip with `linked_audio`, an
 optional field that keeps version 1 files readable (absent means false), so

@@ -1,9 +1,9 @@
 use super::controls::{
-    ACCENT, AUDIO, BACKGROUND, BORDER, DragOverlay, ExportMeter, FAINT, Glyph, IMAGE, Layer, MUTED,
-    PANEL, PANEL_RAISED, PLAYHEAD, STAGE, SURFACE, Scrubber, TEXT, TITLE, Thumb, VIDEO, ZoomSlider,
-    accent_button, chip, fit, glyph, heading, icon_button, kind_color, list_row, media_item,
-    menu_row, play_button, secondary_button, segment, short_duration, sized_icon_button, text,
-    timecode, tool_button,
+    AUDIO, DragOverlay, ExportMeter, Glyph, IMAGE, Layer, PLAYHEAD, STAGE, Scrubber, TITLE, Thumb,
+    VIDEO, ZoomSlider, accent, accent_button, background, border, chip, faint, fit, glyph, heading,
+    icon_button, kind_color, list_row, media_item, menu_row, muted, panel, panel_raised,
+    play_button, secondary_button, segment, short_duration, sized_icon_button, surface, text,
+    text_color, timecode, tool_button,
 };
 use super::interaction::{Action, DragPayload, MenuState};
 use super::state::{MediaView, SourceRange, ZOOM_SECONDS, audible, media_frames};
@@ -12,13 +12,37 @@ use super::{MediaFilter, Sidebar, UiState};
 use crate::media::preview::StoryboardKey;
 use crate::media::{Media, MediaKind};
 use crate::project::{Command, Project};
+use crate::settings::ThemeMode;
 use crate::timeline::{Clip, ClipContent, TrackKind};
 use creamui::core::layout::{Dimension, Style};
+use creamui::core::{Painter, Rect, Widget};
 use creamui::widgets::layout::Flex;
 use creamui::widgets::layout::{Align, Grid, Justify, StyleExt};
 use creamui::widgets::{AppTitlebar, RawScrollView, TextController, TextInput};
-use creamui::{BoxedWidget, Color, GpuFrameSlot, GpuViewport, Size, Styled};
+use creamui::{BoxedWidget, Color, GpuFrameSlot, GpuViewport, ImageData, Size, Styled};
 use std::rc::Rc;
+use std::sync::OnceLock;
+
+fn logo() -> ImageData {
+    static LOGO: OnceLock<ImageData> = OnceLock::new();
+    LOGO.get_or_init(|| {
+        ImageData::from_bytes(include_bytes!("../../assets/ocus-video-logo-dark-64.png"))
+            .expect("bundled Ocus logo must be a PNG")
+    })
+    .clone()
+}
+
+struct Logo;
+
+impl Widget for Logo {
+    fn style(&self) -> creamui::Style {
+        Style::default().size(26.0, 26.0).into()
+    }
+
+    fn paint(&self, painter: &mut dyn Painter, rect: Rect) {
+        painter.draw_image(rect, logo().image(), None);
+    }
+}
 
 fn selected_clip(state: &UiState) -> Option<(u64, Clip)> {
     let (track_id, clip_id) = state.selected.get().last().copied()?;
@@ -158,7 +182,7 @@ fn dot(color: Color, size: f32) -> BoxedWidget {
 }
 
 fn divider() -> BoxedWidget {
-    Box::new(Flex::row().size(1.0, 18.0).background(BORDER))
+    Box::new(Flex::row().size(1.0, 18.0).background(border()))
 }
 
 fn fill_style() -> Style {
@@ -178,7 +202,7 @@ fn panel_header(title: &str, detail: BoxedWidget, actions: Vec<BoxedWidget>) -> 
             .height(28.0)
             .gap(8.0)
             .align(Align::Center)
-            .child(heading(title, TEXT, 13.0))
+            .child(heading(title, text_color(), 13.0))
             .child(detail)
             .child(spacer()),
         actions,
@@ -190,9 +214,9 @@ fn section(title: &str, rows: Vec<BoxedWidget>) -> BoxedWidget {
         Flex::column()
             .gap(7.0)
             .child(Box::new(
-                Flex::row().height(1.0).full_width().background(BORDER),
+                Flex::row().height(1.0).full_width().background(border()),
             ))
-            .child(heading(title.to_uppercase(), FAINT, 10.0)),
+            .child(heading(title.to_uppercase(), faint(), 10.0)),
         rows,
     ))
 }
@@ -202,10 +226,12 @@ fn property(label: &str, value: impl Into<String>) -> BoxedWidget {
         Flex::row()
             .gap(8.0)
             .align(Align::Center)
-            .child(Box::new(
-                Flex::row().width(86.0).child(text(label, MUTED, 11.0)),
-            ))
-            .child(text(value, TEXT, 11.0)),
+            .child(Box::new(Flex::row().width(86.0).child(text(
+                label,
+                muted(),
+                11.0,
+            ))))
+            .child(text(value, text_color(), 11.0)),
     )
 }
 
@@ -219,9 +245,9 @@ fn stage_message(
         .gap(8.0)
         .align(Align::Center)
         .padding(16.0)
-        .child(glyph(icon, FAINT, 30.0))
-        .child(heading(title, TEXT.mix(MUTED, 0.3), 14.0))
-        .child(text(detail, MUTED, 11.0));
+        .child(glyph(icon, faint(), 30.0))
+        .child(heading(title, text_color().mix(muted(), 0.3), 14.0))
+        .child(text(detail, muted(), 11.0));
     if let Some(action) = action {
         content = content
             .child(Box::new(Flex::row().height(4.0)))
@@ -235,8 +261,8 @@ fn title_card(title: &str) -> BoxedWidget {
         Flex::column()
             .gap(6.0)
             .align(Align::Center)
-            .child(heading(title, TEXT, 26.0))
-            .child(text("Title overlay preview", FAINT, 10.0)),
+            .child(heading(title, text_color(), 26.0))
+            .child(text("Title overlay preview", faint(), 10.0)),
     )
 }
 
@@ -323,7 +349,7 @@ fn transport(
                         .justify(Justify::End)
                         .child(text(
                             timecode(end, fps),
-                            MUTED,
+                            muted(),
                             if compact { 10.0 } else { 11.0 },
                         )),
                 )),
@@ -345,7 +371,7 @@ fn monitor(
             .basis(0.0)
             .gap(8.0)
             .padding(10.0)
-            .background(PANEL)
+            .background(panel())
             .corner_radius(10.0)
             .child(Box::new(append(
                 Flex::row()
@@ -353,8 +379,8 @@ fn monitor(
                     .gap(8.0)
                     .align(Align::Center)
                     .child(dot(accent, 7.0))
-                    .child(heading(title, TEXT, 13.0))
-                    .child(text(detail, MUTED, 11.0))
+                    .child(heading(title, text_color(), 13.0))
+                    .child(text(detail, muted(), 11.0))
                     .child(spacer()),
                 actions,
             )))
@@ -365,7 +391,7 @@ fn monitor(
                     .justify(Justify::Center)
                     .background(STAGE)
                     .corner_radius(6.0)
-                    .border(BORDER, 1.0)
+                    .border(border(), 1.0)
                     .child(stage),
             )),
         controls,
@@ -428,7 +454,11 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                                     Flex::column()
                                         .gap(2.0)
                                         .grow(1.0)
-                                        .child(text(fit(&name, tile - 40.0, 11.0), TEXT, 11.0))
+                                        .child(text(
+                                            fit(&name, tile - 40.0, 11.0),
+                                            text_color(),
+                                            11.0,
+                                        ))
                                         .child(text(
                                             match media.kind {
                                                 MediaKind::Video if media.has_audio => {
@@ -438,7 +468,7 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                                                 MediaKind::Audio => "Audio",
                                                 MediaKind::Image => "Still",
                                             },
-                                            kind_color(media.kind).mix(MUTED, 0.5),
+                                            kind_color(media.kind).mix(muted(), 0.5),
                                             10.0,
                                         )),
                                 ))
@@ -468,8 +498,8 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                             Flex::column()
                                 .gap(3.0)
                                 .grow(1.0)
-                                .child(text(fit(&name, inner - 120.0, 12.0), TEXT, 12.0))
-                                .child(text(media_details(media), MUTED, 10.0)),
+                                .child(text(fit(&name, inner - 120.0, 12.0), text_color(), 12.0))
+                                .child(text(media_details(media), muted(), 10.0)),
                         ),
                         insert,
                     ],
@@ -559,7 +589,7 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
             .gap(8.0)
             .padding(10.0)
             .width(width)
-            .background(PANEL)
+            .background(panel())
             .corner_radius(10.0),
         vec![
             panel_header(
@@ -570,7 +600,7 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     } else {
                         format!("{count} of {}", project.media().len())
                     },
-                    FAINT,
+                    faint(),
                     11.0,
                 ),
                 vec![
@@ -605,15 +635,19 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 Flex::row()
                     .gap(3.0)
                     .padding(3.0)
-                    .background(BACKGROUND)
-                    .border(BORDER, 1.0)
+                    .background(background())
+                    .border(border(), 1.0)
                     .corner_radius(9.0)
                     .with_children(filters),
             ),
             Box::new(
                 RawScrollView::controlled(fill_style(), state.media_scroll.clone()).child(content),
             ),
-            text("Drag into the timeline · drop files anywhere", FAINT, 10.0),
+            text(
+                "Drag into the timeline · drop files anywhere",
+                faint(),
+                10.0,
+            ),
         ],
     ))
 }
@@ -770,36 +804,44 @@ fn selection_rows(state: &UiState, project: &Project, inner: f32) -> Vec<BoxedWi
                     .align(Align::Center)
                     .child(Box::new(Flex::row().grow(1.0).child(list_row(
                         vec![
-                            Box::new(
-                                Flex::row()
-                                    .size(3.0, 20.0)
-                                    .background(color)
-                                    .corner_radius(1.5),
-                            ),
-                            Box::new(
-                                Flex::column()
-                                    .grow(1.0)
-                                    .gap(1.0)
-                                    .child(text(fit(&name, inner - 110.0, 11.0), TEXT, 11.0))
-                                    .child(text(
-                                        format!(
-                                            "{track}  ·  {}{}",
-                                            timecode(clip.start_frame, fps),
-                                            if clip.linked_audio { "  ·  linked audio" } else { "" }
-                                        ),
-                                        FAINT,
-                                        10.0,
-                                    )),
-                            ),
-                            text(
-                                short_duration(
-                                    clip.duration_frames as f64 * f64::from(fps.1)
-                                        / f64::from(fps.0.max(1)),
+                                Box::new(
+                                    Flex::row()
+                                        .size(3.0, 20.0)
+                                        .background(color)
+                                        .corner_radius(1.5),
                                 ),
-                                MUTED,
-                                10.0,
-                            ),
-                        ],
+                                Box::new(
+                                    Flex::column()
+                                        .grow(1.0)
+                                        .gap(1.0)
+                                        .child(text(
+                                            fit(&name, inner - 110.0, 11.0),
+                                            text_color(),
+                                            11.0,
+                                        ))
+                                        .child(text(
+                                            format!(
+                                                "{track}  ·  {}{}",
+                                                timecode(clip.start_frame, fps),
+                                                if clip.linked_audio {
+                                                    "  ·  linked audio"
+                                                } else {
+                                                    ""
+                                                }
+                                            ),
+                                            faint(),
+                                            10.0,
+                                        )),
+                                ),
+                                text(
+                                    short_duration(
+                                        clip.duration_frames as f64 * f64::from(fps.1)
+                                            / f64::from(fps.0.max(1)),
+                                    ),
+                                    muted(),
+                                    10.0,
+                                ),
+                            ],
                         state,
                         move |s| s.select_clip(Some(clip_ref)),
                     ))))
@@ -815,15 +857,19 @@ fn selection_rows(state: &UiState, project: &Project, inner: f32) -> Vec<BoxedWi
         })
         .collect();
     if clips.len() > SHOWN {
-        list.push(text(format!("+ {} more", clips.len() - SHOWN), FAINT, 10.0));
+        list.push(text(
+            format!("+ {} more", clips.len() - SHOWN),
+            faint(),
+            10.0,
+        ));
     }
     vec![
         Box::new(
             Flex::column()
                 .gap(10.0)
                 .padding(14.0)
-                .background(PANEL_RAISED)
-                .border(BORDER, 1.0)
+                .background(panel_raised())
+                .border(border(), 1.0)
                 .corner_radius(10.0)
                 .child(Box::new(
                     Flex::row()
@@ -836,17 +882,17 @@ fn selection_rows(state: &UiState, project: &Project, inner: f32) -> Vec<BoxedWi
                                 .justify(Justify::Center)
                                 .background(Color::rgba(92, 208, 190, 30))
                                 .corner_radius(10.0)
-                                .child(heading(clips.len().to_string(), ACCENT, 18.0)),
+                                .child(heading(clips.len().to_string(), accent(), 18.0)),
                         ))
                         .child(Box::new(
                             Flex::column()
                                 .gap(3.0)
-                                .child(heading("clips selected", TEXT, 13.0))
-                                .child(text(kinds, MUTED, 10.0)),
+                                .child(heading("clips selected", text_color(), 13.0))
+                                .child(text(kinds, muted(), 10.0)),
                         )),
                 ))
                 .child(Box::new(
-                    Flex::row().height(1.0).full_width().background(BORDER),
+                    Flex::row().height(1.0).full_width().background(border()),
                 ))
                 .child(property(
                     "Span",
@@ -867,7 +913,7 @@ fn selection_rows(state: &UiState, project: &Project, inner: f32) -> Vec<BoxedWi
                 Box::new(Flex::column().gap(1.0).with_children(list)),
                 text(
                     "Drag any clip to move them all · Ctrl+click to add or remove",
-                    FAINT,
+                    faint(),
                     10.0,
                 ),
             ],
@@ -911,7 +957,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
             (ClipContent::Title(title), _) => (title.text.clone(), TITLE),
             (_, Some(media)) if track_kind == TrackKind::Audio => (media_name(media), AUDIO),
             (_, Some(media)) => (media_name(media), kind_color(media.kind)),
-            _ => ("Missing source".into(), MUTED),
+            _ => ("Missing source".into(), muted()),
         };
         subtitle = match (&clip.content, track_kind) {
             (ClipContent::Title(_), _) => "Title clip",
@@ -929,7 +975,11 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     .justify(Justify::Center)
                     .background(STAGE)
                     .corner_radius(6.0)
-                    .child(heading(fit(&title.text, inner - 20.0, 18.0), TEXT, 18.0)),
+                    .child(heading(
+                        fit(&title.text, inner - 20.0, 18.0),
+                        text_color(),
+                        18.0,
+                    )),
             ),
             (_, Some(media)) => Box::new(Thumb {
                 image: (track_kind == TrackKind::Video)
@@ -952,7 +1002,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 .gap(7.0)
                 .align(Align::Center)
                 .child(dot(color, 8.0))
-                .child(heading(fit(&name, inner - 20.0, 13.0), TEXT, 13.0)),
+                .child(heading(fit(&name, inner - 20.0, 13.0), text_color(), 13.0)),
         ));
         rows.push(section(
             "Timing",
@@ -1000,26 +1050,26 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                                 } else {
                                     Glyph::Volume
                                 },
-                                if clip.muted { MUTED } else { AUDIO },
+                                if clip.muted { muted() } else { AUDIO },
                                 16.0,
                             ))
                             .child(Box::new(
                                 Flex::row()
                                     .width(inner - 136.0)
                                     .height(6.0)
-                                    .background(SURFACE)
+                                    .background(surface())
                                     .corner_radius(3.0)
                                     .child(Box::new(
                                         Flex::row()
                                             .width(((inner - 136.0) * volume / 2.0).max(0.0))
                                             .height(6.0)
-                                            .background(if clip.muted { FAINT } else { AUDIO })
+                                            .background(if clip.muted { faint() } else { AUDIO })
                                             .corner_radius(3.0),
                                     )),
                             ))
                             .child(Box::new(Flex::row().width(36.0).child(text(
                                 format!("{}%", (volume * 100.0).round() as u32),
-                                TEXT,
+                                text_color(),
                                 11.0,
                             ))))
                             .child(spacer())
@@ -1090,7 +1140,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         } else {
                             "Saved with the project; audio playback is pending."
                         },
-                        FAINT,
+                        faint(),
                         10.0,
                     ),
                 ],
@@ -1111,9 +1161,11 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     Flex::row()
                         .gap(4.0)
                         .align(Align::Center)
-                        .child(Box::new(
-                            Flex::row().width(86.0).child(text("Position", MUTED, 11.0)),
-                        ))
+                        .child(Box::new(Flex::row().width(86.0).child(text(
+                            "Position",
+                            muted(),
+                            11.0,
+                        ))))
                         .child(sized_icon_button(
                             Glyph::ChevronLeft,
                             26.0,
@@ -1144,15 +1196,17 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                                 })
                             },
                         ))
-                        .child(text("1 frame", FAINT, 10.0)),
+                        .child(text("1 frame", faint(), 10.0)),
                 ),
                 Box::new(
                     Flex::row()
                         .gap(4.0)
                         .align(Align::Center)
-                        .child(Box::new(
-                            Flex::row().width(86.0).child(text("Length", MUTED, 11.0)),
-                        ))
+                        .child(Box::new(Flex::row().width(86.0).child(text(
+                            "Length",
+                            muted(),
+                            11.0,
+                        ))))
                         .child(sized_icon_button(
                             Glyph::Minus,
                             26.0,
@@ -1185,7 +1239,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                                 })
                             },
                         ))
-                        .child(text("1 frame", FAINT, 10.0)),
+                        .child(text("1 frame", faint(), 10.0)),
                 ),
                 inline(secondary_button(
                     Some(Glyph::ChevronDown),
@@ -1256,7 +1310,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 .child(dot(kind_color(media.kind), 8.0))
                 .child(heading(
                     fit(&media_name(media), inner - 20.0, 13.0),
-                    TEXT,
+                    text_color(),
                     13.0,
                 )),
         ));
@@ -1293,15 +1347,19 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
             Flex::column()
                 .gap(6.0)
                 .padding(12.0)
-                .background(PANEL_RAISED)
+                .background(panel_raised())
                 .corner_radius(8.0)
-                .child(heading("Nothing selected", TEXT, 13.0))
+                .child(heading("Nothing selected", text_color(), 13.0))
                 .child(text(
                     "Select a clip on the timeline to edit it,",
-                    MUTED,
+                    muted(),
                     11.0,
                 ))
-                .child(text("or a file in the media bin to view it.", MUTED, 11.0)),
+                .child(text(
+                    "or a file in the media bin to view it.",
+                    muted(),
+                    11.0,
+                )),
         ));
         rows.push(section(
             "Sequence",
@@ -1328,7 +1386,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 } else {
                     "GPU rendering is required for video preview"
                 },
-                MUTED,
+                muted(),
                 11.0,
             )],
         ));
@@ -1351,10 +1409,12 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     Flex::row()
                         .gap(8.0)
                         .align(Align::Center)
-                        .child(Box::new(
-                            Flex::row().width(112.0).child(text(keys, TEXT, 10.0)),
-                        ))
-                        .child(text(action, MUTED, 10.0)),
+                        .child(Box::new(Flex::row().width(112.0).child(text(
+                            keys,
+                            text_color(),
+                            10.0,
+                        ))))
+                        .child(text(action, muted(), 10.0)),
                 ) as BoxedWidget
             })
             .collect(),
@@ -1365,11 +1425,11 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
             .width(width)
             .gap(8.0)
             .padding(12.0)
-            .background(PANEL)
+            .background(panel())
             .corner_radius(10.0)
             .child(panel_header(
                 "Inspector",
-                text(subtitle, FAINT, 11.0),
+                text(subtitle, faint(), 11.0),
                 Vec::new(),
             ))
             .child(Box::new(
@@ -1448,6 +1508,7 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
 }
 
 pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
+    state.sync_system_theme();
     state.revision.get();
     state.ui_revision.get();
     let editor = state.editor.borrow();
@@ -1483,23 +1544,15 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         .height(46.0)
         .padding(12.0)
         .center_margin(32.0)
-        .foreground(TEXT)
-        .background(PANEL)
+        .foreground(text_color())
+        .background(panel())
         .start_boxed(Box::new(
             Flex::row()
                 .gap(4.0)
                 .align(Align::Center)
-                .child(Box::new(
-                    Flex::row()
-                        .size(26.0, 26.0)
-                        .align(Align::Center)
-                        .justify(Justify::Center)
-                        .background(ACCENT)
-                        .corner_radius(7.0)
-                        .child(glyph(Glyph::Film, Color::rgb(5, 28, 25), 16.0)),
-                ))
+                .child(Box::new(Logo))
                 .child(Box::new(Flex::row().width(4.0)))
-                .child(heading("OCUS", TEXT, 15.0))
+                .child(heading("OCUS", text_color(), 15.0))
                 .child(Box::new(Flex::row().width(10.0)))
                 .child(divider())
                 .child(Box::new(Flex::row().width(6.0)))
@@ -1516,17 +1569,17 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             Flex::row()
                 .gap(8.0)
                 .align(Align::Center)
-                .child(text(fit(&project_label, 220.0, 12.0), TEXT, 12.0))
+                .child(text(fit(&project_label, 220.0, 12.0), text_color(), 12.0))
                 .child(if dirty {
                     Box::new(
                         Flex::row()
                             .gap(5.0)
                             .align(Align::Center)
                             .padding_xy(7.0, 2.0)
-                            .background(SURFACE)
+                            .background(surface())
                             .corner_radius(9.0)
                             .child(dot(IMAGE, 6.0))
-                            .child(text("Edited", MUTED, 10.0)),
+                            .child(text("Edited", muted(), 10.0)),
                     ) as BoxedWidget
                 } else {
                     Box::new(Flex::row().width(0.0))
@@ -1547,6 +1600,13 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     !busy && editor.can_redo(),
                     state,
                     UiState::redo,
+                ))
+                .child(Box::new(Flex::row().width(6.0)))
+                .child(icon_button(
+                    Glyph::Settings,
+                    true,
+                    state,
+                    UiState::open_settings,
                 ))
                 .child(Box::new(Flex::row().width(6.0)))
                 .child(secondary_button(
@@ -1663,7 +1723,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         "Sequence".into(),
         vec![text(
             format!("{}p · {}", project.settings().height, frame_rate_label(fps)),
-            FAINT,
+            faint(),
             10.0,
         )],
         program_stage,
@@ -1675,7 +1735,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 fps,
                 playing: program_playing,
                 can_play: playable && (gpu_preview || !has_picture),
-                color: ACCENT,
+                color: accent(),
                 compact: narrow,
             },
             |state, target| {
@@ -1822,7 +1882,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         .height(timeline_height)
         .gap(6.0)
         .padding(8.0)
-        .background(PANEL)
+        .background(panel())
         .corner_radius(10.0)
         .child(Box::new(
             Flex::row()
@@ -1830,11 +1890,11 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 .gap(4.0)
                 .align(Align::Center)
                 .child(Box::new(Flex::row().width(4.0)))
-                .child(heading(timecode(frame, fps), ACCENT, 15.0))
+                .child(heading(timecode(frame, fps), accent(), 15.0))
                 .child(Box::new(Flex::row().width(6.0)))
                 .child(text(
                     format!("of {}", timecode(timeline_end, fps)),
-                    FAINT,
+                    faint(),
                     11.0,
                 ))
                 .child(Box::new(Flex::row().width(10.0)))
@@ -1911,7 +1971,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 .child(Box::new(
                     Flex::row().width(40.0).justify(Justify::Center).child(text(
                         short_duration(ZOOM_SECONDS[zoom.min(ZOOM_SECONDS.len() - 1)] as f64),
-                        MUTED,
+                        muted(),
                         11.0,
                     )),
                 ))
@@ -1977,7 +2037,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                             Flex::row()
                                 .gap(2.0)
                                 .padding(2.0)
-                                .background(PANEL)
+                                .background(panel())
                                 .corner_radius(8.0)
                                 .child(chip("Media", active == Sidebar::Media, state, |s| {
                                     s.sidebar.set(Sidebar::Media)
@@ -2021,7 +2081,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             } else if dirty {
                 VIDEO
             } else {
-                ACCENT
+                accent()
             },
             7.0,
         ))
@@ -2033,16 +2093,16 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             } else {
                 "READY"
             },
-            MUTED,
+            muted(),
             10.0,
         ))
-        .child(text(state.status.get(), MUTED, 11.0))
+        .child(text(state.status.get(), muted(), 11.0))
         .child(spacer());
     if state.exporting.get()
         && let Some(control) = state.export_control()
     {
         status = status
-            .child(text("Exporting", MUTED, 10.0))
+            .child(text("Exporting", muted(), 10.0))
             .child(Box::new(ExportMeter {
                 control,
                 total: state.export_total.get(),
@@ -2056,7 +2116,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             project.tracks().len(),
             project.media().len()
         ),
-        FAINT,
+        faint(),
         10.0,
     ));
 
@@ -2064,7 +2124,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         Flex::column()
             .size(viewport.width, viewport.height)
             .gap(6.0)
-            .background(BACKGROUND)
+            .background(background())
             .child(Box::new(titlebar))
             .child(Box::new(
                 Flex::column()
@@ -2088,6 +2148,73 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 Some(menu) => context_menu(state, menu, viewport),
                 None => Box::new(Flex::row().size(0.0, 0.0)),
             }),
+    )
+}
+
+pub(crate) fn build_settings(state: &UiState, viewport: Size) -> BoxedWidget {
+    state.sync_system_theme();
+    let settings = state.settings.get();
+    let theme = creamui::use_theme();
+    let colors = theme.colors;
+    let options = [
+        ("System", ThemeMode::System),
+        ("Light", ThemeMode::Light),
+        ("Dark", ThemeMode::Dark),
+        ("Midnight", ThemeMode::Midnight),
+    ]
+    .into_iter()
+    .map(|(label, mode)| {
+        chip(label, settings.theme == mode, state, move |state| {
+            state.set_theme_mode(mode)
+        })
+    })
+    .collect::<Vec<_>>();
+    Box::new(
+        Flex::column()
+            .size(viewport.width, viewport.height)
+            .padding(24.0)
+            .gap(16.0)
+            .background(colors.surface)
+            .child(heading("Editor settings", colors.text_primary, 20.0))
+            .child(text("Appearance", colors.text_secondary, 13.0))
+            .child(Box::new(append(Flex::row().gap(6.0), options)))
+            .child(text("Accent color", colors.text_secondary, 13.0))
+            .child(Box::new(append(
+                Flex::column().gap(6.0),
+                creamui::ThemeDefinition::builtin_default()
+                    .accent_presets
+                    .chunks(3)
+                    .map(|row| {
+                        Box::new(append(
+                            Flex::row().gap(6.0),
+                            row.iter()
+                                .map(|preset| {
+                                    let id = preset.id.clone();
+                                    if settings.theme == ThemeMode::System {
+                                        secondary_button(None, &preset.name, false, state, |_| {})
+                                    } else {
+                                        chip(
+                                            &preset.name,
+                                            settings.accent.as_deref().unwrap_or("orange") == id,
+                                            state,
+                                            move |state| state.set_accent(&id),
+                                        )
+                                    }
+                                })
+                                .collect(),
+                        )) as BoxedWidget
+                    })
+                    .collect(),
+            )))
+            .child(text(
+                if settings.theme == ThemeMode::System {
+                    "System theme and accent are provided by CreamUI"
+                } else {
+                    "Changes are saved automatically"
+                },
+                colors.text_secondary,
+                11.0,
+            )),
     )
 }
 
@@ -2123,7 +2250,7 @@ fn context_menu(state: &UiState, menu: MenuState, viewport: Size) -> BoxedWidget
                     .align(Align::Center)
                     .padding_xy(8.0, 0.0)
                     .child(Box::new(
-                        Flex::row().height(1.0).grow(1.0).background(BORDER),
+                        Flex::row().height(1.0).grow(1.0).background(border()),
                     )),
             ) as BoxedWidget,
         })
@@ -2139,8 +2266,8 @@ fn context_menu(state: &UiState, menu: MenuState, viewport: Size) -> BoxedWidget
                 Flex::column()
                     .size(WIDTH, height)
                     .padding(6.0)
-                    .background(PANEL_RAISED)
-                    .border(SURFACE, 1.0)
+                    .background(panel_raised())
+                    .border(surface(), 1.0)
                     .corner_radius(9.0)
                     .box_shadow(creamui::BoxShadow::new(
                         0.0,
@@ -2154,7 +2281,7 @@ fn context_menu(state: &UiState, menu: MenuState, viewport: Size) -> BoxedWidget
                             .height(26.0)
                             .align(Align::Center)
                             .padding_xy(10.0, 0.0)
-                            .child(heading(fit(&menu.title, WIDTH - 32.0, 11.0), MUTED, 11.0)),
+                            .child(heading(fit(&menu.title, WIDTH - 32.0, 11.0), muted(), 11.0)),
                     )),
                 entries,
             ))],
@@ -2200,6 +2327,50 @@ mod tests {
             Renderer::new().render(build(state, viewport), viewport, &mut painter);
         });
         painter
+    }
+
+    #[test]
+    fn settings_show_creamui_presets_and_custom_theme_changes_palette() {
+        let state = UiState::new();
+        state.set_theme_mode(ThemeMode::Dark);
+        state.set_accent("orange");
+        assert_eq!(
+            state.settings.peek().theme().colors.accent,
+            creamui::Color::rgb(224, 165, 46)
+        );
+        let viewport = Size {
+            width: 420.0,
+            height: 310.0,
+        };
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
+                state.settings.peek().theme(),
+            ));
+            let mut painter = TestPainter::default();
+            Renderer::new().render(build_settings(&state, viewport), viewport, &mut painter);
+            for preset in creamui::ThemeDefinition::builtin_default().accent_presets {
+                assert!(painter.labels.contains(&preset.name));
+            }
+        });
+        state.set_theme_mode(ThemeMode::System);
+        assert!(state.settings.peek().accent.is_none());
+    }
+
+    #[test]
+    fn editor_palette_tracks_the_window_theme() {
+        for mode in [ThemeMode::Light, ThemeMode::Dark, ThemeMode::Midnight] {
+            creamui::reactive::with_context_scope(|| {
+                let settings = crate::settings::Settings {
+                    theme: mode,
+                    accent: None,
+                };
+                let theme = settings.theme();
+                creamui::reactive::provide_context(creamui::ThemeProvider::new(theme));
+                assert_eq!(background(), theme.colors.surface);
+                assert_eq!(accent(), creamui::Color::rgb(224, 165, 46));
+                assert_eq!(text_color(), theme.colors.text_primary);
+            });
+        }
     }
 
     fn x_of(painter: &TestPainter, label: &str) -> Option<f32> {

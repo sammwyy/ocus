@@ -28,8 +28,14 @@ fn is_ffmpeg_dll(name: &str) -> bool {
 }
 
 fn main() {
+    #[cfg(windows)]
+    winres::WindowsResource::new()
+        .set_icon("assets/ocus.ico")
+        .compile()
+        .expect("failed to embed Ocus icon");
     println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
+    println!("cargo:rerun-if-changed=assets/ocus.ico");
 
     if env::var("CARGO_CFG_WINDOWS").is_err() {
         return;

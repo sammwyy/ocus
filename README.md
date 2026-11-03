@@ -74,6 +74,13 @@ on the same GPU device as CreamUI. On a CPU-only window the monitors instead
 explain why video cannot be displayed. On narrower windows the media bin and
 inspector share a tabbed sidebar.
 
+The titlebar gear opens a separate settings window. Appearance can follow the
+system through CreamUI or use Light, Dark, or Midnight. Custom themes offer
+CreamUI's built-in Blue, Cyan, Green, Pink, Purple, and Orange accent presets;
+Orange is the initial custom accent. Preferences are saved independently of
+project files in `Ocus/settings.toml` under the platform configuration
+directory (XDG config on Linux, AppData on Windows).
+
 **Export** (disabled while the timeline is empty) encodes H.264 from a
 continuous sequence of video-only
 clips and still images on one video track. Cuts and trims are honored; export

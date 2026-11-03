@@ -11,6 +11,7 @@ justify a separate crate. The v0.1 scope is in [ROADMAP.md](ROADMAP.md).
 src/
   main.rs           executable entry point
   app.rs            starts CreamUI and connects the project to the window
+  settings.rs       editor appearance preferences in the platform config directory
   project/
     mod.rs          saved project and output settings
     edit.rs         project commands and undo/redo history
@@ -35,6 +36,10 @@ it to `ui`. The UI reads saved state but does not edit it directly. Changes
 to the project should be commands handled beside the project model so they
 can be undone and redone. Selection, playhead, focus, scroll position, and
 panel sizes are transient editor state, not project-file data.
+Editor appearance preferences are separate from saved projects: `settings.rs`
+loads and validates `settings.toml` from the OS config directory, and the
+settings window applies CreamUI system themes or a manual Light, Dark or
+Midnight theme with one of CreamUI's built-in accent presets.
 File pickers and confirmation dialogs run from the UI event handler; once a
 file is selected, loading, saving, and media probing stay on background jobs.
 

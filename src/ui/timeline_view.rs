@@ -1,7 +1,7 @@
 use super::UiState;
 use super::controls::{
-    ACCENT, AUDIO, BORDER, FAINT, Glyph, IMAGE, MUTED, PANEL, PANEL_RAISED, PLAYHEAD, STAGE,
-    SURFACE, TEXT, TITLE, VIDEO, draw_glyph, fit,
+    AUDIO, Glyph, IMAGE, PLAYHEAD, STAGE, TITLE, VIDEO, accent, border, draw_glyph, faint, fit,
+    muted, panel, panel_raised, surface, text_color,
 };
 use super::edits::ClipRef;
 use super::interaction::Gesture;
@@ -373,7 +373,7 @@ impl TimelineView {
             width: geometry.width,
             height: RULER_HEIGHT,
         };
-        painter.fill_rect(ruler, PANEL_RAISED, 0.0);
+        painter.fill_rect(ruler, panel_raised(), 0.0);
         painter.fill_text(
             Rect {
                 x: rect.x + 12.0,
@@ -382,7 +382,7 @@ impl TimelineView {
                 height: RULER_HEIGHT,
             },
             "TRACKS",
-            FAINT,
+            faint(),
             10.0,
             TextAlign::Start,
         );
@@ -411,7 +411,7 @@ impl TimelineView {
                     width: 1.0,
                     height: if is_major { 9.0 } else { 4.0 },
                 },
-                if is_major { MUTED } else { FAINT },
+                if is_major { muted() } else { faint() },
                 0.0,
             );
             if is_major {
@@ -434,7 +434,7 @@ impl TimelineView {
                             height: 14.0,
                         },
                         &ruler_label(seconds),
-                        MUTED,
+                        muted(),
                         10.0,
                         TextAlign::Start,
                     );
@@ -448,7 +448,7 @@ impl TimelineView {
                 width: rect.width,
                 height: 1.0,
             },
-            BORDER,
+            border(),
             0.0,
         );
     }
@@ -463,7 +463,7 @@ impl TimelineView {
             width: HEADER_WIDTH - 6.0,
             ..rect
         };
-        painter.fill_rect(header, PANEL_RAISED, 5.0);
+        painter.fill_rect(header, panel_raised(), 5.0);
         painter.fill_rect(
             Rect {
                 width: 3.0,
@@ -490,7 +490,7 @@ impl TimelineView {
                 Glyph::Volume
             },
             icon,
-            color.mix(MUTED, 0.4),
+            color.mix(muted(), 0.4),
         );
         painter.fill_text_weight(
             Rect {
@@ -500,7 +500,7 @@ impl TimelineView {
                 height: 15.0,
             },
             &lane.label,
-            TEXT,
+            text_color(),
             12.0,
             TextAlign::Start,
             true,
@@ -518,7 +518,7 @@ impl TimelineView {
                 1 => "1 clip".to_owned(),
                 count => format!("{count} clips"),
             },
-            FAINT,
+            faint(),
             10.0,
             TextAlign::Start,
         );
@@ -535,7 +535,7 @@ impl TimelineView {
                     height: 1.0,
                     ..band
                 },
-                SURFACE,
+                surface(),
                 0.0,
             );
             painter.fill_rect(
@@ -558,7 +558,7 @@ impl TimelineView {
                     width: side,
                     height: side,
                 },
-                AUDIO.mix(MUTED, 0.3),
+                AUDIO.mix(muted(), 0.3),
             );
             painter.fill_text(
                 Rect {
@@ -567,7 +567,7 @@ impl TimelineView {
                     ..band
                 },
                 "Linked audio",
-                AUDIO.mix(MUTED, 0.45),
+                AUDIO.mix(muted(), 0.45),
                 10.0,
                 TextAlign::Start,
             );
@@ -576,7 +576,7 @@ impl TimelineView {
             let button = header_button(rect);
             let on_button = painter.hovered(button);
             if on_button {
-                painter.fill_rect(button, SURFACE, 5.0);
+                painter.fill_rect(button, surface(), 5.0);
             }
             draw_glyph(
                 painter,
@@ -587,15 +587,19 @@ impl TimelineView {
                     width: 14.0,
                     height: 14.0,
                 },
-                if on_button { PLAYHEAD } else { MUTED },
+                if on_button { PLAYHEAD } else { muted() },
             );
         }
     }
 
     fn paint_add_track(&self, painter: &mut dyn Painter, button: Rect) {
         let hovered = painter.hovered(button);
-        painter.fill_rect(button, if hovered { SURFACE } else { PANEL_RAISED }, 5.0);
-        painter.stroke_rect(button, BORDER, 1.0, 5.0);
+        painter.fill_rect(
+            button,
+            if hovered { surface() } else { panel_raised() },
+            5.0,
+        );
+        painter.stroke_rect(button, border(), 1.0, 5.0);
         draw_glyph(
             painter,
             Glyph::Plus,
@@ -605,7 +609,7 @@ impl TimelineView {
                 width: 14.0,
                 height: 14.0,
             },
-            if hovered { ACCENT } else { MUTED },
+            if hovered { accent() } else { muted() },
         );
         painter.fill_text(
             Rect {
@@ -614,7 +618,7 @@ impl TimelineView {
                 ..button
             },
             "Add track",
-            if hovered { TEXT } else { MUTED },
+            if hovered { text_color() } else { muted() },
             11.0,
             TextAlign::Start,
         );
@@ -651,7 +655,7 @@ impl TimelineView {
         painter.push_clip_rounded(body, 4.0);
         painter.fill_rect(
             body,
-            base.mix(PANEL, if selected { tone - 0.12 } else { tone }),
+            base.mix(panel(), if selected { tone - 0.12 } else { tone }),
             4.0,
         );
         let content = Rect {
@@ -713,7 +717,7 @@ impl TimelineView {
                         height: content.y + content.height - y,
                         ..content
                     },
-                    base.mix(PANEL, if clip.muted { 0.85 } else { 0.5 }),
+                    base.mix(panel(), if clip.muted { 0.85 } else { 0.5 }),
                     0.0,
                 );
                 painter.fill_rect(
@@ -722,7 +726,7 @@ impl TimelineView {
                         height: 2.0,
                         ..content
                     },
-                    if clip.muted { MUTED } else { base },
+                    if clip.muted { muted() } else { base },
                     0.0,
                 );
                 if clip.muted && content.height >= 16.0 && body.width >= 60.0 {
@@ -735,7 +739,7 @@ impl TimelineView {
                             width: 14.0,
                             height: 14.0,
                         },
-                        TEXT,
+                        text_color(),
                     );
                 }
             }
@@ -750,7 +754,7 @@ impl TimelineView {
                         width: side,
                         height: side,
                     },
-                    base.mix(TEXT, 0.5),
+                    base.mix(text_color(), 0.5),
                 );
             }
             _ => {}
@@ -781,7 +785,7 @@ impl TimelineView {
                 label_space - if show_duration { 44.0 } else { 0.0 },
                 10.0,
             ),
-            TEXT,
+            text_color(),
             10.0,
             TextAlign::Start,
         );
@@ -794,7 +798,7 @@ impl TimelineView {
                     height: CLIP_HEADER - 2.0,
                 },
                 &duration,
-                TEXT.mix(base, 0.4),
+                text_color().mix(base, 0.4),
                 10.0,
                 TextAlign::End,
             );
@@ -817,9 +821,9 @@ impl TimelineView {
         painter.stroke_rect(
             outline,
             if selected {
-                ACCENT
+                accent()
             } else {
-                base.mix(PANEL, 0.3)
+                base.mix(panel(), 0.3)
             },
             if selected { 2.0 } else { 1.0 },
             4.0,
@@ -842,7 +846,7 @@ impl TimelineView {
         } else {
             0.66
         };
-        painter.fill_rect(sound, AUDIO.mix(PANEL, tone), 0.0);
+        painter.fill_rect(sound, AUDIO.mix(panel(), tone), 0.0);
         let level = (clip.volume / 2.0).clamp(0.0, 1.0);
         let y = snap(
             painter,
@@ -854,7 +858,7 @@ impl TimelineView {
                 height: sound.y + sound.height - y,
                 ..sound
             },
-            AUDIO.mix(PANEL, if clip.muted { 0.88 } else { 0.5 }),
+            AUDIO.mix(panel(), if clip.muted { 0.88 } else { 0.5 }),
             0.0,
         );
         painter.fill_rect(
@@ -863,7 +867,7 @@ impl TimelineView {
                 height: 2.0,
                 ..sound
             },
-            if clip.muted { MUTED } else { AUDIO },
+            if clip.muted { muted() } else { AUDIO },
             0.0,
         );
         painter.fill_rect(
@@ -885,7 +889,7 @@ impl TimelineView {
                     width: side,
                     height: side,
                 },
-                TEXT.mix(AUDIO, 0.3),
+                text_color().mix(AUDIO, 0.3),
             );
         }
         painter.pop_clip();
@@ -908,7 +912,7 @@ impl TimelineView {
             if right <= x {
                 continue;
             }
-            let color = if ghost.valid { ACCENT } else { PLAYHEAD };
+            let color = if ghost.valid { accent() } else { PLAYHEAD };
             let body = Rect {
                 x,
                 y: lane.y + 2.0,
@@ -1114,7 +1118,7 @@ impl Widget for TimelineView {
                     width: 3.0,
                     height: thumb,
                 },
-                SURFACE,
+                surface(),
                 1.5,
             );
         }
@@ -1126,7 +1130,7 @@ impl Widget for TimelineView {
                 ..marquee
             };
             painter.fill_rect(area, Color::rgba(92, 208, 190, 28), 2.0);
-            painter.stroke_rect(area, ACCENT, 1.0, 2.0);
+            painter.stroke_rect(area, accent(), 1.0, 2.0);
         }
         painter.pop_clip();
         self.paint_playhead(painter, rect, &geometry);
@@ -1137,7 +1141,7 @@ impl Widget for TimelineView {
                 width: 1.0,
                 height: rect.height,
             },
-            SURFACE,
+            surface(),
             0.0,
         );
         painter.pop_clip();

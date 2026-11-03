@@ -8,6 +8,7 @@ use crate::media::preview::{
 use crate::media::{Media, MediaKind, MediaProbe, Thumbnail, probe, thumbnail};
 use crate::playback::{self, Session};
 use crate::project::{Command, Editor, Project, store};
+use crate::settings::{self, Settings, ThemeMode};
 use crate::timeline::{Clip, ClipContent, TrackKind};
 use creamui::core::{Modifiers, Point, Rect, RgbaImage};
 use creamui::widgets::{ScrollController, TextController};
@@ -18,7 +19,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Sidebar {
@@ -131,8 +133,13 @@ pub(crate) struct UiState {
     pub menu: Signal<Option<MenuState>>,
     pub pointer: Rc<Cell<Point>>,
     pub sidebar: Signal<Sidebar>,
+    pub settings: Signal<Settings>,
     app: Rc<RefCell<Option<AppHandle>>>,
     window: Rc<RefCell<Option<WindowHandle>>>,
+    settings_window: Rc<RefCell<Option<WindowHandle>>>,
+    settings_open: Rc<Cell<bool>>,
+    settings_serial: Arc<AtomicU64>,
+    settings_write: Arc<Mutex<()>>,
     storyboard_cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
     storyboard_serial: Rc<Cell<u64>>,
     export_control: Rc<RefCell<Option<Arc<ExportControl>>>>,
@@ -142,6 +149,9 @@ pub(crate) struct UiState {
 
 impl UiState {
     pub fn new() -> Self {
+        let settings = settings::path()
+            .and_then(|path| settings::load(&path).ok())
+            .unwrap_or_default();
         Self {
             editor: Rc::new(RefCell::new(Editor::new(Project::new("Untitled")))),
             revision: Signal::new(0),
@@ -179,8 +189,13 @@ impl UiState {
             menu: Signal::new(None),
             pointer: Rc::new(Cell::new(Point::default())),
             sidebar: Signal::new(Sidebar::Media),
+            settings: Signal::new(settings),
             app: Rc::new(RefCell::new(None)),
             window: Rc::new(RefCell::new(None)),
+            settings_window: Rc::new(RefCell::new(None)),
+            settings_open: Rc::new(Cell::new(false)),
+            settings_serial: Arc::new(AtomicU64::new(0)),
+            settings_write: Arc::new(Mutex::new(())),
             storyboard_cancel: Rc::new(RefCell::new(None)),
             storyboard_serial: Rc::new(Cell::new(0)),
             export_control: Rc::new(RefCell::new(None)),
@@ -199,6 +214,124 @@ impl UiState {
         *self.window.borrow_mut() = Some(window);
         self.request_preview();
         self.request_source_preview();
+    }
+
+    pub fn settings_window(&self) -> Option<WindowHandle> {
+        self.settings_window.borrow().clone()
+    }
+
+    fn update_settings(&self, settings: Settings) {
+        if let Err(error) = settings.validate() {
+            self.status.set(error);
+            return;
+        }
+        if settings == self.settings.peek() {
+            return;
+        }
+        self.settings.set(settings.clone());
+        if settings.theme != ThemeMode::System {
+            if let Some(window) = self.window.borrow().as_ref() {
+                window.set_theme(settings.theme());
+            }
+            if let Some(window) = self.settings_window.borrow().as_ref() {
+                window.set_theme(settings.theme());
+            }
+        }
+        if let (Some(app), Some(path)) = (self.app.borrow().as_ref(), settings::path()) {
+            let state = self.clone();
+            let serial = self.settings_serial.fetch_add(1, Ordering::Relaxed) + 1;
+            let latest = self.settings_serial.clone();
+            let write = self.settings_write.clone();
+            app.spawn_background(
+                move || {
+                    let _guard = write
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if serial != latest.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    settings::save(&path, &settings).map_err(|error| error.to_string())
+                },
+                move |result| {
+                    if let Err(error) = result {
+                        state
+                            .status
+                            .set(format!("Could not save settings: {error}"));
+                    }
+                },
+            );
+        }
+    }
+
+    pub fn set_theme_mode(&self, mode: ThemeMode) {
+        let mut settings = self.settings.peek();
+        settings.theme = mode;
+        if mode == ThemeMode::System {
+            settings.accent = None;
+        }
+        self.update_settings(settings);
+    }
+
+    pub fn set_accent(&self, id: &str) {
+        let mut settings = self.settings.peek();
+        settings.accent = Some(id.to_owned());
+        self.update_settings(settings);
+    }
+
+    pub fn sync_system_theme(&self) {
+        if self.settings.get().theme != ThemeMode::System
+            || (self.window.borrow().is_none() && self.settings_window.borrow().is_none())
+        {
+            return;
+        }
+        let appearance = creamui::use_system_appearance().get();
+        if let Ok(resolved) =
+            creamui::theme_loader::SystemThemeLoader::new().load_with_system(&appearance)
+        {
+            let main = self.window.borrow();
+            let preferences = self.settings_window.borrow();
+            for window in [main.as_ref(), preferences.as_ref()].into_iter().flatten() {
+                if window.theme() != resolved.theme {
+                    window.set_theme(resolved.theme);
+                }
+            }
+        }
+    }
+
+    pub fn open_settings(&self) {
+        if self.settings_open.get() {
+            return;
+        }
+        let Some(app) = self.app.borrow().as_ref().cloned() else {
+            return;
+        };
+        self.settings_open.set(true);
+        let ready = self.clone();
+        let content = self.clone();
+        let theme = self.settings.peek().theme();
+        app.append_window(
+            creamui::WindowOptions {
+                title: "Ocus settings".into(),
+                width: 420,
+                height: 310,
+                theme,
+                ..Default::default()
+            },
+            theme.colors.surface,
+            move |window| {
+                if ready.settings.peek().theme != ThemeMode::System {
+                    window.set_theme(ready.settings.peek().theme());
+                }
+                *ready.settings_window.borrow_mut() = Some(window.clone());
+                let state = ready.clone();
+                window.on_close_requested(move || {
+                    *state.settings_window.borrow_mut() = None;
+                    state.settings_open.set(false);
+                    true
+                });
+            },
+            move |viewport| super::window::build_settings(&content, viewport),
+        );
     }
 
     fn refresh_after_edit(&self, status: &str) {

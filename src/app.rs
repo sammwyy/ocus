@@ -1,9 +1,15 @@
-use crate::ui::{BACKGROUND, UiState, build};
+use crate::settings::ThemeMode;
+use crate::ui::{UiState, build};
 use creamui::{AppBuilder, Theme, WindowOptions};
 
 pub fn run_app() {
     let state = UiState::new();
-    AppBuilder::new()
+    let builder = AppBuilder::new().system_theme().unwrap_or_else(|error| {
+        eprintln!("Could not load system theme: {error}");
+        AppBuilder::new()
+    });
+    let settings = state.settings.peek();
+    builder
         .on_started(move |app| {
             state.connect(app.clone());
             let close = state.clone();
@@ -14,11 +20,18 @@ pub fn run_app() {
                     width: 1280,
                     height: 760,
                     decorations: true,
-                    theme: Theme::dark(),
+                    theme: if settings.theme == ThemeMode::System {
+                        Theme::dark()
+                    } else {
+                        settings.theme()
+                    },
                     ..Default::default()
                 },
-                BACKGROUND,
+                settings.theme().colors.surface,
                 move |window| {
+                    if preview.settings.peek().theme != ThemeMode::System {
+                        window.set_theme(preview.settings.peek().theme());
+                    }
                     preview.connect_window(window.clone());
                     window.on_close_requested(move || {
                         if close.busy.peek() {
@@ -28,6 +41,9 @@ pub fn run_app() {
                             return false;
                         }
                         if close.confirm_discard() {
+                            if let Some(window) = close.settings_window() {
+                                window.close();
+                            }
                             close.pause();
                             close.pause_source();
                             true

@@ -9,18 +9,49 @@ use creamui::{BoxedWidget, Color, StateStyle, Styled};
 use std::rc::Rc;
 use std::sync::Arc;
 
-pub(crate) const BACKGROUND: Color = Color::rgb(11, 12, 15);
-pub(super) const PANEL: Color = Color::rgb(20, 22, 27);
-pub(super) const PANEL_RAISED: Color = Color::rgb(26, 29, 35);
-pub(super) const SURFACE: Color = Color::rgb(34, 38, 45);
-pub(super) const SURFACE_HOVER: Color = Color::rgb(46, 51, 60);
-pub(super) const BORDER: Color = Color::rgb(38, 42, 50);
+fn colors() -> creamui::ColorScheme {
+    creamui::reactive::try_use_context::<creamui::ThemeProvider>()
+        .map_or_else(creamui::Theme::dark, |provider| provider.get())
+        .colors
+}
+
+pub(super) fn background() -> Color {
+    colors().surface
+}
+pub(super) fn panel() -> Color {
+    colors().surface_elevated
+}
+pub(super) fn panel_raised() -> Color {
+    let colors = colors();
+    colors.surface_elevated.mix(colors.text_primary, 0.025)
+}
+pub(super) fn surface() -> Color {
+    let colors = colors();
+    colors.surface_elevated.mix(colors.text_primary, 0.06)
+}
+pub(super) fn surface_hover() -> Color {
+    let colors = colors();
+    colors.surface_elevated.mix(colors.text_primary, 0.12)
+}
+pub(super) fn border() -> Color {
+    colors().border_strong
+}
 pub(super) const STAGE: Color = Color::rgb(3, 4, 6);
-pub(super) const TEXT: Color = Color::rgb(232, 235, 239);
-pub(super) const MUTED: Color = Color::rgb(139, 146, 157);
-pub(super) const FAINT: Color = Color::rgb(84, 91, 102);
-pub(super) const ACCENT: Color = Color::rgb(92, 208, 190);
-pub(super) const ACCENT_TEXT: Color = Color::rgb(5, 28, 25);
+pub(super) fn text_color() -> Color {
+    colors().text_primary
+}
+pub(super) fn muted() -> Color {
+    colors().text_secondary
+}
+pub(super) fn faint() -> Color {
+    colors().text_disabled
+}
+pub(super) fn accent() -> Color {
+    colors().accent
+}
+pub(super) fn accent_text() -> Color {
+    colors().selection_text
+}
 pub(super) const PLAYHEAD: Color = Color::rgb(255, 94, 94);
 pub(super) const VIDEO: Color = Color::rgb(84, 146, 232);
 pub(super) const AUDIO: Color = Color::rgb(70, 194, 132);
@@ -134,6 +165,7 @@ pub(crate) enum Glyph {
     Unlink,
     Tracks,
     Expand,
+    Settings,
     Close,
 }
 
@@ -468,6 +500,18 @@ pub(super) fn draw_glyph(painter: &mut dyn Painter, glyph: Glyph, rect: Rect, co
             pen.bar(3.0, 10.5, 12.0, 3.5);
             pen.bar(3.0, 16.0, 15.0, 3.5);
         }
+        Glyph::Settings => {
+            pen.arc((12.0, 12.0), 7.0, 0.0, 360.0);
+            pen.arc((12.0, 12.0), 2.7, 0.0, 360.0);
+            for step in 0..8 {
+                let angle = step as f32 * std::f32::consts::FRAC_PI_4;
+                let direction = (angle.cos(), angle.sin());
+                pen.line(&[
+                    (12.0 + 7.0 * direction.0, 12.0 + 7.0 * direction.1),
+                    (12.0 + 10.0 * direction.0, 12.0 + 10.0 * direction.1),
+                ]);
+            }
+        }
         Glyph::Picture | Glyph::Search | Glyph::Folder | Glyph::Close => {}
     }
 }
@@ -530,8 +574,8 @@ fn pressable(
             .background(look.background)
             .corner_radius(look.radius)
             .hover_style(StateStyle::new().background(hover))
-            .pressed_style(StateStyle::new().background(hover.mix(BACKGROUND, 0.35)))
-            .focus_style(StateStyle::new().outline(ACCENT, 2.0))
+            .pressed_style(StateStyle::new().background(hover.mix(background(), 0.35)))
+            .focus_style(StateStyle::new().outline(accent(), 2.0))
             .disabled_style(StateStyle::new().background(look.background)),
     )
 }
@@ -555,16 +599,16 @@ pub(super) fn sized_icon_button(
     operation: impl Fn(&UiState) + 'static,
 ) -> BoxedWidget {
     let color = if !enabled {
-        FAINT
+        faint()
     } else if active {
-        ACCENT
+        accent()
     } else {
-        TEXT.mix(MUTED, 0.35)
+        text_color().mix(muted(), 0.35)
     };
     pressable(
         Look {
-            background: if active { SURFACE } else { CLEAR },
-            hover: SURFACE_HOVER,
+            background: if active { surface() } else { CLEAR },
+            hover: surface_hover(),
             height: size,
             width: Some(size),
             padding: 0.0,
@@ -586,8 +630,8 @@ pub(super) fn play_button(
 ) -> BoxedWidget {
     pressable(
         Look {
-            background: if enabled { ACCENT } else { SURFACE },
-            hover: ACCENT.mix(TEXT, 0.25),
+            background: if enabled { accent() } else { surface() },
+            hover: accent().mix(text_color(), 0.25),
             height: 34.0,
             width: Some(34.0),
             padding: 0.0,
@@ -596,7 +640,7 @@ pub(super) fn play_button(
         enabled,
         vec![glyph(
             if playing { Glyph::Pause } else { Glyph::Play },
-            if enabled { ACCENT_TEXT } else { FAINT },
+            if enabled { accent_text() } else { faint() },
             16.0,
         )],
         state,
@@ -614,13 +658,17 @@ pub(super) fn tool_button(
 ) -> BoxedWidget {
     let mut children = Vec::new();
     if let Some(icon) = icon {
-        children.push(glyph(icon, if enabled { MUTED } else { FAINT }, 15.0));
+        children.push(glyph(icon, if enabled { muted() } else { faint() }, 15.0));
     }
-    children.push(text(label, if enabled { TEXT } else { FAINT }, 12.0));
+    children.push(text(
+        label,
+        if enabled { text_color() } else { faint() },
+        12.0,
+    ));
     pressable(
         Look {
             background: CLEAR,
-            hover: SURFACE_HOVER,
+            hover: surface_hover(),
             height: 28.0,
             width: None,
             padding: 9.0,
@@ -641,7 +689,7 @@ pub(super) fn accent_button(
     state: &UiState,
     operation: impl Fn(&UiState) + 'static,
 ) -> BoxedWidget {
-    let color = if enabled { ACCENT_TEXT } else { FAINT };
+    let color = if enabled { accent_text() } else { faint() };
     let mut children = Vec::new();
     if let Some(icon) = icon {
         children.push(glyph(icon, color, 15.0));
@@ -649,8 +697,8 @@ pub(super) fn accent_button(
     children.push(heading(label, color, 12.0));
     pressable(
         Look {
-            background: if enabled { ACCENT } else { SURFACE },
-            hover: ACCENT.mix(TEXT, 0.2),
+            background: if enabled { accent() } else { surface() },
+            hover: accent().mix(text_color(), 0.2),
             height: 30.0,
             width: None,
             padding: 12.0,
@@ -671,16 +719,16 @@ pub(super) fn secondary_button(
     state: &UiState,
     operation: impl Fn(&UiState) + 'static,
 ) -> BoxedWidget {
-    let color = if enabled { TEXT } else { FAINT };
+    let color = if enabled { text_color() } else { faint() };
     let mut children = Vec::new();
     if let Some(icon) = icon {
-        children.push(glyph(icon, if enabled { MUTED } else { FAINT }, 14.0));
+        children.push(glyph(icon, if enabled { muted() } else { faint() }, 14.0));
     }
     children.push(text(label, color, 12.0));
     pressable(
         Look {
-            background: SURFACE,
-            hover: SURFACE_HOVER,
+            background: surface(),
+            hover: surface_hover(),
             height: 28.0,
             width: None,
             padding: 10.0,
@@ -702,15 +750,19 @@ pub(super) fn chip(
 ) -> BoxedWidget {
     pressable(
         Look {
-            background: if active { SURFACE_HOVER } else { CLEAR },
-            hover: if active { SURFACE_HOVER } else { SURFACE },
+            background: if active { surface_hover() } else { CLEAR },
+            hover: if active { surface_hover() } else { surface() },
             height: 24.0,
             width: None,
             padding: 9.0,
             radius: 5.0,
         },
         true,
-        vec![text(label, if active { TEXT } else { MUTED }, 11.0)],
+        vec![text(
+            label,
+            if active { text_color() } else { muted() },
+            11.0,
+        )],
         state,
         operation,
     )
@@ -730,7 +782,7 @@ pub(super) fn media_item(
     };
     let (click, start, drag, end) = (state.clone(), state.clone(), state.clone(), state.clone());
     let menu = state.clone();
-    let background = if selected { SURFACE } else { PANEL_RAISED };
+    let background = if selected { surface() } else { panel_raised() };
     Box::new(
         RawButton::new(style, move || click.select_media(media_id))
             .with_drag_start(move |position, rect| {
@@ -741,10 +793,10 @@ pub(super) fn media_item(
             .with_context_menu(move |point| menu.open_media_menu(media_id, point))
             .with_children(children)
             .background(background)
-            .border(if selected { ACCENT } else { BORDER }, 1.0)
+            .border(if selected { accent() } else { border() }, 1.0)
             .corner_radius(8.0)
-            .hover_style(StateStyle::new().background(SURFACE))
-            .focus_style(StateStyle::new().outline(ACCENT, 2.0)),
+            .hover_style(StateStyle::new().background(surface()))
+            .focus_style(StateStyle::new().outline(accent(), 2.0)),
     )
 }
 
@@ -825,7 +877,7 @@ impl Widget for Thumb {
                 height: 15.0,
             };
             painter.fill_rect(pill, Color::rgba(0, 0, 0, 190), 4.0);
-            painter.fill_text(pill, badge, TEXT, 10.0, TextAlign::Center);
+            painter.fill_text(pill, badge, text_color(), 10.0, TextAlign::Center);
         }
         painter.pop_clip();
     }
@@ -855,7 +907,7 @@ impl Widget for Scrubber {
             width: rect.width,
             height: thickness,
         };
-        painter.fill_rect(bar, SURFACE, thickness / 2.0);
+        painter.fill_rect(bar, surface(), thickness / 2.0);
         if self.end == 0 {
             return;
         }
@@ -877,7 +929,7 @@ impl Widget for Scrubber {
                 width: knob,
                 height: knob,
             },
-            TEXT,
+            text_color(),
             knob / 2.0,
         );
     }
@@ -910,14 +962,14 @@ impl Widget for ExportMeter {
 
     fn paint(&self, painter: &mut dyn Painter, rect: Rect) {
         let _ = painter.animation_time();
-        painter.fill_rect(rect, SURFACE, 2.5);
+        painter.fill_rect(rect, surface(), 2.5);
         painter.fill_rect(
             Rect {
                 width: rect.width
                     * (self.control.frames_done() as f32 / self.total.max(1) as f32).min(1.0),
                 ..rect
             },
-            ACCENT,
+            accent(),
             2.5,
         );
     }
@@ -955,9 +1007,9 @@ impl Widget for DragOverlay {
             width,
             height: 26.0,
         };
-        let color = if self.valid { ACCENT } else { PLAYHEAD };
+        let color = if self.valid { accent() } else { PLAYHEAD };
         painter.draw_box_shadow(chip, Color::rgba(0, 0, 0, 140), 0.0, 4.0, 12.0, 0.0, 7.0);
-        painter.fill_rect(chip, SURFACE, 7.0);
+        painter.fill_rect(chip, surface(), 7.0);
         painter.stroke_rect(chip, color, 1.0, 7.0);
         painter.fill_rect(
             Rect {
@@ -976,7 +1028,7 @@ impl Widget for DragOverlay {
                 ..chip
             },
             &fit(&self.label, chip.width - 28.0, 11.0),
-            TEXT,
+            text_color(),
             11.0,
             TextAlign::Start,
         );
@@ -1055,14 +1107,14 @@ impl Widget for ZoomSlider {
             width: rect.width - 12.0,
             height: 4.0,
         };
-        painter.fill_rect(track, SURFACE, 2.0);
+        painter.fill_rect(track, surface(), 2.0);
         let progress = self.level as f32 / self.levels.saturating_sub(1).max(1) as f32;
         painter.fill_rect(
             Rect {
                 width: track.width * progress,
                 ..track
             },
-            ACCENT.mix(PANEL, 0.35),
+            accent().mix(panel(), 0.35),
             2.0,
         );
         let knob = if hovered { 13.0 } else { 11.0 };
@@ -1073,7 +1125,7 @@ impl Widget for ZoomSlider {
                 width: knob,
                 height: knob,
             },
-            TEXT,
+            text_color(),
             knob / 2.0,
         );
     }
@@ -1102,7 +1154,7 @@ pub(super) fn segment(
     operation: impl Fn(&UiState) + 'static,
 ) -> BoxedWidget {
     let state = state.clone();
-    let color = if active { TEXT } else { MUTED };
+    let color = if active { text_color() } else { muted() };
     let mut style = Style::default()
         .flex_row()
         .align(Align::Center)
@@ -1114,7 +1166,7 @@ pub(super) fn segment(
     style.min_size.width = Dimension::Length(0.0);
     let mut children = Vec::new();
     if let Some(icon) = icon {
-        children.push(glyph(icon, if active { ACCENT } else { MUTED }, 14.0));
+        children.push(glyph(icon, if active { accent() } else { muted() }, 14.0));
     }
     if let Some(label) = label {
         children.push(text(label, color, 11.0));
@@ -1122,22 +1174,26 @@ pub(super) fn segment(
     children.push(Box::new(
         creamui::widgets::layout::Flex::row()
             .padding_xy(5.0, 1.0)
-            .background(if active { BACKGROUND } else { PANEL_RAISED })
+            .background(if active { background() } else { panel_raised() })
             .corner_radius(6.0)
             .child(text(
                 count.to_string(),
-                if active { TEXT } else { FAINT },
+                if active { text_color() } else { faint() },
                 10.0,
             )),
     ));
     Box::new(
         RawButton::new(style, move || operation(&state))
             .with_children(children)
-            .background(if active { SURFACE_HOVER } else { CLEAR })
-            .border(if active { BORDER } else { CLEAR }, 1.0)
+            .background(if active { surface_hover() } else { CLEAR })
+            .border(if active { border() } else { CLEAR }, 1.0)
             .corner_radius(7.0)
-            .hover_style(StateStyle::new().background(if active { SURFACE_HOVER } else { SURFACE }))
-            .focus_style(StateStyle::new().outline(ACCENT, 2.0)),
+            .hover_style(StateStyle::new().background(if active {
+                surface_hover()
+            } else {
+                surface()
+            }))
+            .focus_style(StateStyle::new().outline(accent(), 2.0)),
     )
 }
 
@@ -1160,8 +1216,8 @@ pub(super) fn list_row(
             .with_children(children)
             .background(CLEAR)
             .corner_radius(6.0)
-            .hover_style(StateStyle::new().background(SURFACE))
-            .focus_style(StateStyle::new().outline(ACCENT, 2.0)),
+            .hover_style(StateStyle::new().background(surface()))
+            .focus_style(StateStyle::new().outline(accent(), 2.0)),
     )
 }
 
@@ -1176,9 +1232,9 @@ pub(super) fn menu_row(
     operation: impl Fn(&UiState) + 'static,
 ) -> BoxedWidget {
     let color = match (enabled, danger) {
-        (false, _) => FAINT,
-        (true, true) => PLAYHEAD.mix(TEXT, 0.25),
-        (true, false) => TEXT,
+        (false, _) => faint(),
+        (true, true) => PLAYHEAD.mix(text_color(), 0.25),
+        (true, false) => text_color(),
     };
     let state = state.clone();
     let style = Style::default()
@@ -1201,11 +1257,11 @@ pub(super) fn menu_row(
                     Some(icon) => glyph(
                         icon,
                         if !enabled {
-                            FAINT
+                            faint()
                         } else if danger {
                             color
                         } else {
-                            MUTED
+                            muted()
                         },
                         15.0,
                     ),
@@ -1220,12 +1276,12 @@ pub(super) fn menu_row(
                         .grow(1.0)
                         .child(text(label, color, 12.0)),
                 ),
-                text(shortcut, FAINT, 10.0),
+                text(shortcut, faint(), 10.0),
             ])
             .disabled(!enabled)
             .corner_radius(6.0)
             .hover_style(StateStyle::new().background(hover))
-            .pressed_style(StateStyle::new().background(hover.mix(BACKGROUND, 0.3)))
+            .pressed_style(StateStyle::new().background(hover.mix(background(), 0.3)))
             .focus_style(StateStyle::new().background(hover)),
     )
 }

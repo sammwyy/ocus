@@ -270,7 +270,9 @@ impl UiState {
             Action::Save => self.save(),
             Action::SaveAs => self.save_as_dialog(),
             Action::Import => self.import_dialog(),
-            Action::Export if !self.exporting.peek() => self.export_dialog(),
+            Action::Export if !self.exporting.peek() && self.sequence_end() > 0 => {
+                self.export_dialog()
+            }
             _ => {}
         }
     }
@@ -926,7 +928,7 @@ impl UiState {
     }
 
     /// Selected clips that make sound, and whether all of them are muted.
-    fn audible_selection(&self) -> (Vec<ClipRef>, bool) {
+    pub(super) fn audible_selection(&self) -> (Vec<ClipRef>, bool) {
         let editor = self.editor.borrow();
         let selection = self.selected.peek();
         let clips: Vec<_> = editor

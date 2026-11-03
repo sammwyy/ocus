@@ -17,6 +17,8 @@ pub(super) const HEADER_WIDTH: f32 = 128.0;
 pub(super) const RULER_HEIGHT: f32 = 28.0;
 const LANE_GAP: f32 = 3.0;
 const CLIP_HEADER: f32 = 17.0;
+/// Ctrl+wheel travel, in pixels, per zoom step.
+const ZOOM_TRAVEL: f32 = 24.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClipLook {
@@ -194,10 +196,6 @@ impl Geometry {
 
     pub(super) fn top(&self) -> f32 {
         self.top
-    }
-
-    pub(super) fn overflow(&self) -> f32 {
-        self.overflow
     }
 
     fn x(&self, frame: u64) -> f32 {
@@ -1328,42 +1326,47 @@ impl Widget for TimelineView {
         let weights = self.weights();
         let (start, span, scroll) = (self.start, self.span, self.scroll);
         Some(Rc::new(move |input| {
-            let rect = state.timeline_rect.get();
-            let overflow = Geometry::new(rect, &weights, start, span, scroll).overflow();
-            let over_headers = state.pointer.get().x < rect.x + HEADER_WIDTH;
-            if overflow > 0.0 && (over_headers || input.modifiers.shift) && !input.modifiers.ctrl {
-                let delta = if input.delta.y != 0.0 {
-                    input.delta.y
-                } else {
-                    input.delta.x
-                };
+            let geometry = Geometry::new(state.timeline_rect.get(), &weights, start, span, scroll);
+            if input.modifiers.ctrl {
+                let travel = state.zoom_travel.get() + input.delta.y + input.delta.x;
+                if travel.abs() < ZOOM_TRAVEL {
+                    state.zoom_travel.set(travel);
+                    return;
+                }
+                state.zoom_travel.set(0.0);
+                let pointer = state.pointer.get();
+                let fraction =
+                    f64::from((pointer.x - geometry.left) / geometry.width).clamp(0.0, 1.0);
+                let anchor = geometry.frame_at(pointer.x).max(0.0).round() as u64;
+                let zoom = state.timeline_zoom.peek();
+                state.zoom_timeline_around(
+                    if travel > 0.0 {
+                        zoom + 1
+                    } else {
+                        zoom.saturating_sub(1)
+                    },
+                    anchor,
+                    fraction,
+                );
+                return;
+            }
+            let (mut horizontal, mut vertical) = (input.delta.x, input.delta.y);
+            if input.modifiers.shift && horizontal == 0.0 {
+                (horizontal, vertical) = (vertical, 0.0);
+            }
+            if vertical != 0.0 && geometry.overflow > 0.0 {
                 state
                     .track_scroll
-                    .set((scroll + delta).clamp(0.0, overflow));
-                return;
+                    .set((scroll + vertical).clamp(0.0, geometry.overflow));
             }
-            let amount = if input.delta.x.abs() > input.delta.y.abs() {
-                input.delta.x
-            } else {
-                input.delta.y
-            };
-            if amount == 0.0 {
-                return;
-            }
-            if input.modifiers.ctrl {
-                let zoom = state.timeline_zoom.peek();
-                state.zoom_timeline(if amount > 0.0 {
-                    zoom + 1
+            if horizontal != 0.0 {
+                let frames = f64::from(horizontal / geometry.pixels_per_frame());
+                let frames = if frames.abs() < 1.0 {
+                    frames.signum()
                 } else {
-                    zoom.saturating_sub(1)
-                });
-            } else {
-                let steps = (amount / 40.0).round() as i64;
-                state.scroll_timeline(if steps == 0 {
-                    amount.signum() as i64
-                } else {
-                    steps
-                });
+                    frames.round()
+                };
+                state.scroll_timeline_frames(frames as i64);
             }
         }))
     }

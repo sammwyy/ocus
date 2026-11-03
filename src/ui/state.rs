@@ -40,8 +40,11 @@ pub(crate) enum MediaView {
 
 const MAX_THUMBNAILS: usize = 256;
 const MAX_STORYBOARDS: usize = 64;
-pub(crate) const ZOOM_SECONDS: [u64; 6] = [2, 5, 10, 30, 60, 180];
-const DEFAULT_ZOOM: usize = 2;
+/// Seconds shown across the timeline at each zoom level, closest first.
+pub(crate) const ZOOM_SECONDS: [u64; 16] = [
+    1, 2, 3, 5, 8, 10, 15, 20, 30, 45, 60, 90, 120, 180, 300, 600,
+];
+const DEFAULT_ZOOM: usize = 5;
 
 pub(crate) type Storyboard = Arc<Vec<Arc<RgbaImage>>>;
 
@@ -110,6 +113,9 @@ pub(crate) struct UiState {
     pub timeline_start: Signal<u64>,
     pub timeline_zoom: Signal<usize>,
     pub track_scroll: Signal<f32>,
+    /// Ctrl+wheel travel not yet turned into a zoom step, so touchpads
+    /// with many tiny deltas zoom at the same pace as a mouse wheel.
+    pub zoom_travel: Rc<Cell<f32>>,
     pub timeline_expanded: Signal<bool>,
     pub gesture: Rc<RefCell<Gesture>>,
     pub drag: Signal<Option<DragState>>,
@@ -155,6 +161,7 @@ impl UiState {
             timeline_start: Signal::new(0),
             timeline_zoom: Signal::new(DEFAULT_ZOOM),
             track_scroll: Signal::new(0.0),
+            zoom_travel: Rc::new(Cell::new(0.0)),
             timeline_expanded: Signal::new(false),
             gesture: Rc::new(RefCell::new(Gesture::Idle)),
             drag: Signal::new(None),
@@ -267,27 +274,58 @@ impl UiState {
         }
     }
 
+    /// Zooms keeping the playhead where it is on screen when it is visible,
+    /// otherwise keeping the middle of the view.
     pub fn zoom_timeline(&self, zoom: usize) {
+        let (start, span) = (self.timeline_start.peek(), self.visible_frames());
+        let playhead = self.program.position.peek();
+        let (anchor, fraction) = if playhead >= start && playhead < start + span {
+            (playhead, (playhead - start) as f64 / span as f64)
+        } else {
+            (start + span / 2, 0.5)
+        };
+        self.zoom_timeline_around(zoom, anchor, fraction);
+    }
+
+    /// Zooms so `anchor` stays `fraction` of the way across the view.
+    pub fn zoom_timeline_around(&self, zoom: usize, anchor: u64, fraction: f64) {
         let zoom = zoom.min(ZOOM_SECONDS.len() - 1);
         if zoom == self.timeline_zoom.peek() {
             return;
         }
         self.timeline_zoom.set(zoom);
-        let span = self.visible_frames();
+        let span = self.visible_frames() as f64;
+        let start = (anchor as f64 - fraction.clamp(0.0, 1.0) * span)
+            .max(0.0)
+            .round() as u64;
         self.timeline_start
-            .set(self.program.position.peek().saturating_sub(span / 4));
+            .set(start.min(self.sequence_end().saturating_sub(1)));
+    }
+
+    /// The closest zoom that shows the whole sequence, from its start.
+    pub fn zoom_to_fit(&self) {
+        let (numerator, denominator) = self.frame_rate();
+        let seconds =
+            self.sequence_end() as f64 * f64::from(denominator) / f64::from(numerator.max(1));
+        let zoom = ZOOM_SECONDS
+            .iter()
+            .position(|level| *level as f64 >= seconds * 1.05)
+            .unwrap_or(ZOOM_SECONDS.len() - 1);
+        self.timeline_zoom.set(zoom);
+        self.timeline_start.set(0);
     }
 
     pub fn scroll_timeline(&self, steps: i64) {
-        let step = (self.visible_frames() / 8).max(1);
+        let step = (self.visible_frames() / 8).max(1) as i64;
+        self.scroll_timeline_frames(step.saturating_mul(steps));
+    }
+
+    /// Moves the view by `frames`, staying within the sequence.
+    pub fn scroll_timeline_frames(&self, frames: i64) {
         let start = self.timeline_start.peek();
-        let distance = step.saturating_mul(steps.unsigned_abs());
-        let next = if steps < 0 {
-            start.saturating_sub(distance)
-        } else {
-            start.saturating_add(distance)
-        };
-        let next = next.min(self.sequence_end().saturating_sub(1));
+        let next = start
+            .saturating_add_signed(frames)
+            .min(self.sequence_end().saturating_sub(1));
         if next != start {
             self.timeline_start.set(next);
         }
@@ -1499,10 +1537,21 @@ mod tests {
         state.scroll_timeline(1_000);
         assert_eq!(state.timeline_start.peek(), 1_799);
         state.focus_frame(900);
+        state.scroll_timeline_frames(150);
+        assert_eq!(state.timeline_start.peek(), 1_050);
+        state.focus_frame(1_200);
         state.zoom_timeline(0);
-        assert_eq!(state.visible_frames(), 60);
-        assert_eq!(state.timeline_start.peek(), 885);
+        assert_eq!(state.visible_frames(), 30);
+        assert_eq!(state.timeline_start.peek(), 1_200 - 150 / 10);
+        state.zoom_timeline_around(3, 300, 0.5);
+        assert_eq!(state.visible_frames(), 150);
+        assert_eq!(state.timeline_start.peek(), 225);
         state.zoom_timeline(99);
-        assert_eq!(state.visible_frames(), 5_400);
+        assert_eq!(state.visible_frames(), 18_000);
+        state.zoom_to_fit();
+        assert_eq!(ZOOM_SECONDS[state.timeline_zoom.peek()], 90);
+        assert_eq!(state.timeline_start.peek(), 0);
+        state.scroll_timeline_frames(-50);
+        assert_eq!(state.timeline_start.peek(), 0);
     }
 }

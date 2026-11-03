@@ -133,6 +133,8 @@ pub(crate) enum Glyph {
     Link,
     Unlink,
     Tracks,
+    Expand,
+    Close,
 }
 
 struct Pen<'a> {
@@ -246,6 +248,7 @@ impl Pen<'_> {
 pub(super) fn draw_glyph(painter: &mut dyn Painter, glyph: Glyph, rect: Rect, color: Color) {
     let symbol = match glyph {
         Glyph::Picture => Some(Symbol::Image),
+        Glyph::Close => Some(Symbol::Close),
         Glyph::Search => Some(Symbol::Search),
         Glyph::Folder => Some(Symbol::Folder),
         _ => None,
@@ -453,12 +456,19 @@ pub(super) fn draw_glyph(painter: &mut dyn Painter, glyph: Glyph, rect: Rect, co
                 pen.line(&[(11.0, 4.0), (13.0, 20.0)]);
             }
         }
+        Glyph::Expand => {
+            pen.line(&[(3.0, 12.0), (21.0, 12.0)]);
+            pen.line(&[(7.0, 8.0), (3.0, 12.0), (7.0, 16.0)]);
+            pen.line(&[(17.0, 8.0), (21.0, 12.0), (17.0, 16.0)]);
+            pen.line(&[(3.0, 4.0), (3.0, 20.0)]);
+            pen.line(&[(21.0, 4.0), (21.0, 20.0)]);
+        }
         Glyph::Tracks => {
             pen.bar(3.0, 5.0, 18.0, 3.5);
             pen.bar(3.0, 10.5, 12.0, 3.5);
             pen.bar(3.0, 16.0, 15.0, 3.5);
         }
-        Glyph::Picture | Glyph::Search | Glyph::Folder => {}
+        Glyph::Picture | Glyph::Search | Glyph::Folder | Glyph::Close => {}
     }
 }
 
@@ -1021,6 +1031,138 @@ impl Widget for Layer {
         let close = self.on_click.clone()?;
         Some(Rc::new(move |_| close()))
     }
+}
+
+/// A horizontal slider over discrete zoom levels; left is closest.
+pub(super) struct ZoomSlider {
+    pub level: usize,
+    pub levels: usize,
+    pub set: Rc<dyn Fn(usize)>,
+}
+
+impl Widget for ZoomSlider {
+    fn style(&self) -> creamui::Style {
+        let mut style = Style::default().size(96.0, 24.0);
+        style.flex_shrink = 0.0;
+        style.into()
+    }
+
+    fn paint(&self, painter: &mut dyn Painter, rect: Rect) {
+        let hovered = painter.hovered(rect);
+        let track = Rect {
+            x: rect.x + 6.0,
+            y: rect.y + rect.height / 2.0 - 2.0,
+            width: rect.width - 12.0,
+            height: 4.0,
+        };
+        painter.fill_rect(track, SURFACE, 2.0);
+        let progress = self.level as f32 / self.levels.saturating_sub(1).max(1) as f32;
+        painter.fill_rect(
+            Rect {
+                width: track.width * progress,
+                ..track
+            },
+            ACCENT.mix(PANEL, 0.35),
+            2.0,
+        );
+        let knob = if hovered { 13.0 } else { 11.0 };
+        painter.fill_rect(
+            Rect {
+                x: (track.x + track.width * progress - knob / 2.0).round(),
+                y: (rect.y + (rect.height - knob) / 2.0).round(),
+                width: knob,
+                height: knob,
+            },
+            TEXT,
+            knob / 2.0,
+        );
+    }
+
+    fn on_drag(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
+        let (levels, set) = (self.levels, self.set.clone());
+        Some(Rc::new(move |position, rect| {
+            let progress = ((position.x - 6.0) / (rect.width - 12.0).max(1.0)).clamp(0.0, 1.0);
+            set((progress * levels.saturating_sub(1) as f32).round() as usize);
+        }))
+    }
+
+    fn cursor_icon(&self) -> Option<CursorIcon> {
+        Some(CursorIcon::Pointer)
+    }
+}
+
+/// One equal-width option of a segmented control: an optional glyph, an
+/// optional label and a count badge.
+pub(super) fn segment(
+    icon: Option<Glyph>,
+    label: Option<&str>,
+    count: usize,
+    active: bool,
+    state: &UiState,
+    operation: impl Fn(&UiState) + 'static,
+) -> BoxedWidget {
+    let state = state.clone();
+    let color = if active { TEXT } else { MUTED };
+    let mut style = Style::default()
+        .flex_row()
+        .align(Align::Center)
+        .justify(Justify::Center)
+        .gap(6.0)
+        .height(30.0)
+        .grow(1.0)
+        .basis(0.0);
+    style.min_size.width = Dimension::Length(0.0);
+    let mut children = Vec::new();
+    if let Some(icon) = icon {
+        children.push(glyph(icon, if active { ACCENT } else { MUTED }, 14.0));
+    }
+    if let Some(label) = label {
+        children.push(text(label, color, 11.0));
+    }
+    children.push(Box::new(
+        creamui::widgets::layout::Flex::row()
+            .padding_xy(5.0, 1.0)
+            .background(if active { BACKGROUND } else { PANEL_RAISED })
+            .corner_radius(6.0)
+            .child(text(
+                count.to_string(),
+                if active { TEXT } else { FAINT },
+                10.0,
+            )),
+    ));
+    Box::new(
+        RawButton::new(style, move || operation(&state))
+            .with_children(children)
+            .background(if active { SURFACE_HOVER } else { CLEAR })
+            .border(if active { BORDER } else { CLEAR }, 1.0)
+            .corner_radius(7.0)
+            .hover_style(StateStyle::new().background(if active { SURFACE_HOVER } else { SURFACE }))
+            .focus_style(StateStyle::new().outline(ACCENT, 2.0)),
+    )
+}
+
+/// A full-width, borderless row that highlights on hover and runs
+/// `operation` when clicked.
+pub(super) fn list_row(
+    children: Vec<BoxedWidget>,
+    state: &UiState,
+    operation: impl Fn(&UiState) + 'static,
+) -> BoxedWidget {
+    let state = state.clone();
+    let style = Style::default()
+        .flex_row()
+        .align(Align::Center)
+        .gap(8.0)
+        .height(34.0)
+        .padding_xy(8.0, 0.0);
+    Box::new(
+        RawButton::new(style, move || operation(&state))
+            .with_children(children)
+            .background(CLEAR)
+            .corner_radius(6.0)
+            .hover_style(StateStyle::new().background(SURFACE))
+            .focus_style(StateStyle::new().outline(ACCENT, 2.0)),
+    )
 }
 
 /// One row of a context menu.

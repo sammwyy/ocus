@@ -15,8 +15,8 @@ path. **New** asks before discarding unsaved changes. Saves are atomic and
 file operations run in the background. **Import** accepts multiple
 files from the native picker and probes video, audio, and images with FFmpeg
 on a worker thread. Video and still-image sources get small, regenerable
-first-frame thumbnails. The media bin offers search, video/audio/still
-filters, grid and list views, and files can also be dropped onto it to import
+first-frame thumbnails. The media bin offers search, a segmented
+All/video/audio/still filter with per-type counts, grid and list views, and files can also be dropped onto it to import
 them. Each source has a one-click insert action that adds a clip on a video or
 audio track using the probed duration (still images default to three seconds).
 A video with sound becomes one clip whose audio is linked to the picture:
@@ -35,15 +35,14 @@ clip's trimmed range, or the whole file selected in the media bin, and
 Play/Pause, frame stepping and jump-to-start/end; starting one pauses the
 other. **Match frame** moves the program playhead to the source monitor's
 frame, and **Insert** adds the selected bin file. The timeline is one painted
-surface with track headers, a zoomable ruler (2 s to 3 min per view), clip
+surface with track headers, a zoomable ruler (1 s to 10 min per view, with zoom buttons, a slider and **Fit**), clip
 filmstrips sampled from their actual trimmed source range, audio volume
 levels and a playhead across every track.
 
 Tracks can be added from the timeline's **Tracks** button, the **Add
 track** button under the track headers or any right-click menu, and deleted
 from a header's hover button or its menu (one video and one audio track always
-remain). With many tracks the lanes scroll: use the wheel over the headers or
-Shift+wheel. Right-click opens a context menu on clips (cut, copy, paste,
+remain). Right-click opens a context menu on clips (cut, copy, paste,
 duplicate, split, detach/link audio, mute, delete, ripple delete), on empty
 track space (paste here, add title here, move playhead, track actions), on
 track headers and on media bin items (insert at end or at the playhead, open in
@@ -62,15 +61,21 @@ and duplicate, S or Ctrl+K splits at the playhead, Ctrl+A selects all, Esc
 clears the selection or cancels a drag, Space or K plays and pauses, the
 arrows step a frame (Shift: one second, Alt: nudge the selection), Home/End
 jump, +/− zoom, T adds a title, and Ctrl+N/O/S/Shift+S/I/E run the file
-actions. Every edit is one undoable step. The mouse wheel scrolls through time
-and Ctrl+wheel zooms. Filmstrips regenerate in the
+actions. Every edit is one undoable step. On the timeline, vertical scrolling
+only moves through the tracks (when they overflow) and horizontal scrolling
+only moves through time, so two-finger touchpad gestures follow their axis;
+with a plain mouse wheel, Shift+wheel scrolls time. Ctrl+wheel (or a touchpad
+pinch reported as Ctrl+wheel) zooms around the pointer. Selecting several
+clips turns the inspector into a selection view with a summary, shared
+actions and the list of selected clips. Filmstrips regenerate in the
 background and do not change the project file. The timeline can expand to give
 tracks more room. Video decoding happens on workers and frames are presented
 on the same GPU device as CreamUI. On a CPU-only window the monitors instead
 explain why video cannot be displayed. On narrower windows the media bin and
 inspector share a tabbed sidebar.
 
-**Export silent MP4** encodes H.264 from a continuous sequence of video-only
+**Export** (disabled while the timeline is empty) encodes H.264 from a
+continuous sequence of video-only
 clips and still images on one video track. Cuts and trims are honored; export
 runs in the background, shows progress, can be cancelled, and publishes a
 completed file atomically. The button reports unsupported sequences rather

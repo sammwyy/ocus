@@ -1,10 +1,11 @@
 use super::controls::{
     ACCENT, AUDIO, BACKGROUND, BORDER, DragOverlay, ExportMeter, FAINT, Glyph, IMAGE, Layer, MUTED,
-    PANEL, PANEL_RAISED, PLAYHEAD, STAGE, SURFACE, Scrubber, TEXT, TITLE, Thumb, VIDEO,
-    accent_button, chip, fit, glyph, heading, icon_button, kind_color, media_item, menu_row,
-    play_button, secondary_button, short_duration, sized_icon_button, text, timecode, tool_button,
+    PANEL, PANEL_RAISED, PLAYHEAD, STAGE, SURFACE, Scrubber, TEXT, TITLE, Thumb, VIDEO, ZoomSlider,
+    accent_button, chip, fit, glyph, heading, icon_button, kind_color, list_row, media_item,
+    menu_row, play_button, secondary_button, segment, short_duration, sized_icon_button, text,
+    timecode, tool_button,
 };
-use super::interaction::{DragPayload, MenuState};
+use super::interaction::{Action, DragPayload, MenuState};
 use super::state::{MediaView, SourceRange, ZOOM_SECONDS, media_frames};
 use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
 use super::{MediaFilter, Sidebar, UiState};
@@ -101,6 +102,14 @@ fn media_details(media: &Media) -> String {
         (MediaKind::Video, None) => "Video · not probed".into(),
         (MediaKind::Audio, None) => "Audio · not probed".into(),
     }
+}
+
+/// A short `12.5s` reading of a frame count.
+fn seconds(frames: u64, fps: (u32, u32)) -> String {
+    format!(
+        "{:.1}s",
+        frames as f64 * f64::from(fps.1) / f64::from(fps.0.max(1))
+    )
 }
 
 fn frame_rate_label(fps: (u32, u32)) -> String {
@@ -505,17 +514,44 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
     } else {
         Box::new(Flex::column().gap(5.0).with_children(items))
     };
+    let count_of = |kind: Option<MediaKind>| {
+        project
+            .media()
+            .iter()
+            .filter(|media| kind.is_none_or(|kind| media.kind == kind))
+            .count()
+    };
     let filters = [
-        ("All", MediaFilter::All),
-        ("Video", MediaFilter::Video),
-        ("Audio", MediaFilter::Audio),
-        ("Stills", MediaFilter::Image),
+        (None, Some("All"), None, MediaFilter::All),
+        (
+            Some(Glyph::Film),
+            None,
+            Some(MediaKind::Video),
+            MediaFilter::Video,
+        ),
+        (
+            Some(Glyph::Music),
+            None,
+            Some(MediaKind::Audio),
+            MediaFilter::Audio,
+        ),
+        (
+            Some(Glyph::Picture),
+            None,
+            Some(MediaKind::Image),
+            MediaFilter::Image,
+        ),
     ]
     .into_iter()
-    .map(|(label, option)| {
-        chip(label, filter == option, state, move |s| {
-            s.media_filter.set(option)
-        })
+    .map(|(icon, label, kind, option)| {
+        segment(
+            icon,
+            label,
+            count_of(kind),
+            filter == option,
+            state,
+            move |s| s.media_filter.set(option),
+        )
     })
     .collect();
     Box::new(append(
@@ -567,10 +603,11 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
             ),
             Box::new(
                 Flex::row()
-                    .gap(2.0)
-                    .padding(2.0)
+                    .gap(3.0)
+                    .padding(3.0)
                     .background(BACKGROUND)
-                    .corner_radius(7.0)
+                    .border(BORDER, 1.0)
+                    .corner_radius(9.0)
                     .with_children(filters),
             ),
             Box::new(
@@ -583,6 +620,259 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
 
 fn input(controller: &TextController, width: f32) -> BoxedWidget {
     Box::new(TextInput::controlled(controller).width(width).height(30.0))
+}
+
+/// The inspector for several selected clips: a summary, the actions that
+/// apply to all of them and the list of clips.
+fn selection_rows(state: &UiState, project: &Project, inner: f32) -> Vec<BoxedWidget> {
+    let fps = (
+        project.settings().frame_rate.numerator,
+        project.settings().frame_rate.denominator,
+    );
+    let labels = track_labels(project);
+    let selection = state.selected.get();
+    let clips: Vec<_> = selection
+        .iter()
+        .filter_map(|&(track_id, clip_id)| {
+            let track = project.tracks().iter().find(|track| track.id == track_id)?;
+            let clip = track.clips.iter().find(|clip| clip.id == clip_id)?;
+            Some((track_id, track.kind, clip))
+        })
+        .collect();
+    let first = clips
+        .iter()
+        .map(|(_, _, clip)| clip.start_frame)
+        .min()
+        .unwrap_or(0);
+    let last = clips
+        .iter()
+        .map(|(_, _, clip)| clip.start_frame + clip.duration_frames)
+        .max()
+        .unwrap_or(0);
+    let total: u64 = clips.iter().map(|(_, _, clip)| clip.duration_frames).sum();
+    let (mut video, mut audio, mut titles) = (0, 0, 0);
+    for (_, kind, clip) in &clips {
+        match (&clip.content, kind) {
+            (ClipContent::Title(_), _) => titles += 1,
+            (_, TrackKind::Audio) => audio += 1,
+            _ => video += 1,
+        }
+    }
+    let kinds = [(video, "video"), (audio, "audio"), (titles, "title")]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, kind)| {
+            format!(
+                "{count} {kind}{}",
+                if count > 1 && kind == "title" {
+                    "s"
+                } else {
+                    ""
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("  ·  ");
+    let mut tracks: Vec<String> = Vec::new();
+    for (track_id, _, _) in &clips {
+        if let Some((_, label)) = labels.iter().find(|(id, _)| id == track_id)
+            && !tracks.contains(label)
+        {
+            tracks.push(label.clone());
+        }
+    }
+    let (detachable, linkable) = state.audio_link_state();
+    let (audible, all_muted) = state.audible_selection();
+    let splittable = !state.split_targets().is_empty();
+    let mut actions = vec![
+        secondary_button(Some(Glyph::Copy), "Copy", true, state, |s| {
+            s.run(Action::Copy)
+        }),
+        secondary_button(Some(Glyph::Copy), "Duplicate", true, state, |s| {
+            s.run(Action::Duplicate)
+        }),
+        secondary_button(Some(Glyph::Split), "Split", splittable, state, |s| {
+            s.split_at_playhead()
+        }),
+    ];
+    if !audible.is_empty() {
+        actions.push(secondary_button(
+            Some(if all_muted {
+                Glyph::Volume
+            } else {
+                Glyph::Mute
+            }),
+            if all_muted { "Unmute" } else { "Mute" },
+            true,
+            state,
+            UiState::toggle_mute,
+        ));
+    }
+    if detachable {
+        actions.push(secondary_button(
+            Some(Glyph::Unlink),
+            "Detach audio",
+            true,
+            state,
+            UiState::detach_audio,
+        ));
+    }
+    if linkable {
+        actions.push(secondary_button(
+            Some(Glyph::Link),
+            "Link audio",
+            true,
+            state,
+            UiState::link_audio,
+        ));
+    }
+    actions.push(secondary_button(
+        Some(Glyph::Trash),
+        "Delete",
+        true,
+        state,
+        |s| s.delete_selection(false),
+    ));
+    actions.push(secondary_button(
+        Some(Glyph::Ripple),
+        "Ripple delete",
+        true,
+        state,
+        |s| s.delete_selection(true),
+    ));
+    const SHOWN: usize = 12;
+    let mut list: Vec<BoxedWidget> = clips
+        .iter()
+        .take(SHOWN)
+        .map(|&(track_id, kind, clip)| {
+            let clip_ref = (track_id, clip.id);
+            let (name, color) = match &clip.content {
+                ClipContent::Title(title) => (title.text.clone(), TITLE),
+                ClipContent::Media { media_id } => {
+                    let media = project.media().iter().find(|media| media.id == *media_id);
+                    (
+                        media.map_or_else(|| "Missing source".into(), media_name),
+                        if kind == TrackKind::Audio {
+                            AUDIO
+                        } else {
+                            media.map_or(VIDEO, |media| kind_color(media.kind))
+                        },
+                    )
+                }
+            };
+            let track = labels
+                .iter()
+                .find(|(id, _)| *id == track_id)
+                .map_or_else(String::new, |(_, label)| label.clone());
+            Box::new(
+                Flex::row()
+                    .gap(2.0)
+                    .align(Align::Center)
+                    .child(Box::new(Flex::row().grow(1.0).child(list_row(
+                        vec![
+                            Box::new(
+                                Flex::row()
+                                    .size(3.0, 20.0)
+                                    .background(color)
+                                    .corner_radius(1.5),
+                            ),
+                            Box::new(
+                                Flex::column()
+                                    .grow(1.0)
+                                    .gap(1.0)
+                                    .child(text(fit(&name, inner - 110.0, 11.0), TEXT, 11.0))
+                                    .child(text(
+                                        format!(
+                                            "{track}  ·  {}{}",
+                                            timecode(clip.start_frame, fps),
+                                            if clip.linked_audio { "  ·  linked audio" } else { "" }
+                                        ),
+                                        FAINT,
+                                        10.0,
+                                    )),
+                            ),
+                            text(
+                                short_duration(
+                                    clip.duration_frames as f64 * f64::from(fps.1)
+                                        / f64::from(fps.0.max(1)),
+                                ),
+                                MUTED,
+                                10.0,
+                            ),
+                        ],
+                        state,
+                        move |s| s.select_clip(Some(clip_ref)),
+                    ))))
+                    .child(sized_icon_button(
+                        Glyph::Close,
+                        22.0,
+                        true,
+                        false,
+                        state,
+                        move |s| s.toggle_clip(clip_ref),
+                    )),
+            ) as BoxedWidget
+        })
+        .collect();
+    if clips.len() > SHOWN {
+        list.push(text(format!("+ {} more", clips.len() - SHOWN), FAINT, 10.0));
+    }
+    vec![
+        Box::new(
+            Flex::column()
+                .gap(10.0)
+                .padding(14.0)
+                .background(PANEL_RAISED)
+                .border(BORDER, 1.0)
+                .corner_radius(10.0)
+                .child(Box::new(
+                    Flex::row()
+                        .gap(12.0)
+                        .align(Align::Center)
+                        .child(Box::new(
+                            Flex::row()
+                                .size(42.0, 42.0)
+                                .align(Align::Center)
+                                .justify(Justify::Center)
+                                .background(Color::rgba(92, 208, 190, 30))
+                                .corner_radius(10.0)
+                                .child(heading(clips.len().to_string(), ACCENT, 18.0)),
+                        ))
+                        .child(Box::new(
+                            Flex::column()
+                                .gap(3.0)
+                                .child(heading("clips selected", TEXT, 13.0))
+                                .child(text(kinds, MUTED, 10.0)),
+                        )),
+                ))
+                .child(Box::new(
+                    Flex::row().height(1.0).full_width().background(BORDER),
+                ))
+                .child(property(
+                    "Span",
+                    format!("{} → {}", seconds(first, fps), seconds(last, fps)),
+                ))
+                .child(property("Total length", seconds(total, fps)))
+                .child(property("Tracks", tracks.join(", "))),
+        ),
+        section(
+            "Actions",
+            vec![Box::new(
+                Grid::new().columns(2).gap(6.0).with_children(actions),
+            )],
+        ),
+        section(
+            "Clips",
+            vec![
+                Box::new(Flex::column().gap(1.0).with_children(list)),
+                text(
+                    "Drag any clip to move them all · Ctrl+click to add or remove",
+                    FAINT,
+                    10.0,
+                ),
+            ],
+        ),
+    ]
 }
 
 fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> BoxedWidget {
@@ -603,48 +893,9 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
     let count = state.selected.get().len();
     let (_, linkable) = state.audio_link_state();
     if count > 1 {
-        rows.push(Box::new(
-            Flex::column()
-                .gap(8.0)
-                .padding(12.0)
-                .background(PANEL_RAISED)
-                .border(ACCENT, 1.0)
-                .corner_radius(8.0)
-                .child(heading(format!("{count} clips selected"), TEXT, 13.0))
-                .child(text("Drag any of them to move them together.", MUTED, 11.0))
-                .child(Box::new(
-                    Flex::row()
-                        .gap(6.0)
-                        .child(secondary_button(
-                            Some(Glyph::Trash),
-                            "Delete",
-                            true,
-                            state,
-                            |s| s.delete_selection(false),
-                        ))
-                        .child(secondary_button(
-                            Some(Glyph::Ripple),
-                            "Ripple",
-                            true,
-                            state,
-                            |s| s.delete_selection(true),
-                        ))
-                        .child(if linkable {
-                            secondary_button(Some(Glyph::Link), "Link", true, state, |s| {
-                                s.link_audio()
-                            })
-                        } else {
-                            Box::new(Flex::row().width(0.0))
-                        }),
-                ))
-                .child(text(
-                    "The last clip you picked is shown below.",
-                    FAINT,
-                    10.0,
-                )),
-        ));
-    }
-    if let Some((track_id, clip)) = selected_clip(state) {
+        subtitle = "Selection";
+        rows.extend(selection_rows(state, project, inner));
+    } else if let Some((track_id, clip)) = selected_clip(state) {
         let track_kind = project
             .tracks()
             .iter()
@@ -1310,12 +1561,8 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 } else {
                     accent_button(
                         Some(Glyph::Export),
-                        if narrow {
-                            "Export"
-                        } else {
-                            "Export silent MP4"
-                        },
-                        !busy,
+                        "Export",
+                        !busy && state.sequence_end() > 0,
                         state,
                         UiState::export_dialog,
                     )
@@ -1637,16 +1884,31 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     state,
                     |s| s.zoom_timeline(s.timeline_zoom.peek() + 1),
                 ))
+                .child(Box::new(ZoomSlider {
+                    level: ZOOM_SECONDS.len() - 1 - zoom.min(ZOOM_SECONDS.len() - 1),
+                    levels: ZOOM_SECONDS.len(),
+                    set: {
+                        let state = state.clone();
+                        Rc::new(move |level| state.zoom_timeline(ZOOM_SECONDS.len() - 1 - level))
+                    },
+                }))
+                .child(icon_button(Glyph::ZoomIn, zoom > 0, state, |s| {
+                    s.zoom_timeline(s.timeline_zoom.peek().saturating_sub(1))
+                }))
                 .child(Box::new(
-                    Flex::row().width(44.0).justify(Justify::Center).child(text(
+                    Flex::row().width(40.0).justify(Justify::Center).child(text(
                         short_duration(ZOOM_SECONDS[zoom.min(ZOOM_SECONDS.len() - 1)] as f64),
                         MUTED,
                         11.0,
                     )),
                 ))
-                .child(icon_button(Glyph::ZoomIn, zoom > 0, state, |s| {
-                    s.zoom_timeline(s.timeline_zoom.peek().saturating_sub(1))
-                }))
+                .child(tool_button(
+                    Some(Glyph::Expand),
+                    "Fit",
+                    timeline_end > 0,
+                    state,
+                    UiState::zoom_to_fit,
+                ))
                 .child(divider())
                 .child(icon_button(
                     if expanded_timeline {
@@ -1890,7 +2152,6 @@ fn context_menu(state: &UiState, menu: MenuState, viewport: Size) -> BoxedWidget
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::interaction::Action;
     use creamui::core::{Painter, Point, Rect, Renderer, RgbaImage, TextAlign, Widget};
     use std::sync::Arc;
 
@@ -2214,10 +2475,75 @@ mod tests {
     }
 
     #[test]
+    fn wheel_axes_scroll_tracks_or_time_and_ctrl_zooms_at_the_pointer() {
+        let state = UiState::new();
+        state.timeline_rect.set(TIMELINE);
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/tmp/long.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(60_000_000),
+            has_audio: true,
+        })));
+        state.insert_media(1);
+        for _ in 0..4 {
+            state.add_track(TrackKind::Audio);
+        }
+        let wheel = |state: &UiState, x: f32, y: f32, ctrl: bool| {
+            let view = TimelineView {
+                start: state.timeline_start.peek(),
+                scroll: state.track_scroll.peek(),
+                ..view(state)
+            };
+            view.on_wheel().unwrap()(creamui::WheelInput {
+                delta: Point { x, y },
+                modifiers: creamui::core::Modifiers {
+                    ctrl,
+                    ..Default::default()
+                },
+            });
+        };
+        wheel(&state, 0.0, 60.0, false);
+        assert_eq!(state.timeline_start.peek(), 0);
+        assert_eq!(state.track_scroll.peek(), 60.0);
+        wheel(&state, 100.0, 0.0, false);
+        assert_eq!(state.timeline_start.peek(), 30);
+        assert_eq!(state.track_scroll.peek(), 60.0);
+        wheel(&state, -1.0, 0.0, false);
+        assert_eq!(state.timeline_start.peek(), 29);
+        wheel(&state, 0.0, -500.0, false);
+        assert_eq!(state.track_scroll.peek(), 0.0);
+        assert_eq!(state.timeline_start.peek(), 29);
+
+        state.pointer.set(Point {
+            x: at(150.0),
+            y: 60.0,
+        });
+        let zoom = state.timeline_zoom.peek();
+        wheel(&state, 0.0, -10.0, true);
+        assert_eq!(state.timeline_zoom.peek(), zoom);
+        wheel(&state, 0.0, -20.0, true);
+        assert_eq!(state.timeline_zoom.peek(), zoom - 1);
+        assert_eq!(state.visible_frames(), 240);
+        assert_eq!(state.timeline_start.peek(), 179 - 120);
+    }
+
+    #[test]
+    fn export_is_disabled_until_the_timeline_has_content() {
+        let state = UiState::new();
+        let painter = render(&state, 1440.0, 900.0);
+        assert!(painter.labels.iter().any(|label| label == "Export"));
+        assert!(!painter.labels.iter().any(|label| label.contains("silent")));
+        state.run(Action::Export);
+        assert_eq!(state.status.peek(), "Ready · Project not saved");
+    }
+
+    #[test]
     fn frame_rates_drop_redundant_decimals() {
         assert_eq!(frame_rate_label((30, 1)), "30 fps");
         assert_eq!(frame_rate_label((30_000, 1_001)), "29.97 fps");
         assert_eq!(frame_rate_label((25, 2)), "12.5 fps");
+        assert_eq!(seconds(375, (30, 1)), "12.5s");
     }
 
     #[test]

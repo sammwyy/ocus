@@ -14,8 +14,9 @@ file dialogs instead of requiring typed paths; **Save** reuses the chosen
 path. **New** asks before discarding unsaved changes. Saves are atomic and
 file operations run in the background. **Import media** accepts multiple
 files from the native picker and probes video, audio, and images with FFmpeg
-on a worker thread. The media bin can insert a clip on a video or audio track
-using the probed duration (still images default to three seconds).
+on a worker thread. Video and still-image sources get small, regenerable
+first-frame thumbnails. The media bin can insert a clip on a video or audio
+track using the probed duration (still images default to three seconds).
 Videos with audio place aligned video and audio clips in a single undoable
 action. Audio clips have editable volume and mute values, but those values do
 not affect playback or export yet. Previously saved references without probe
@@ -25,11 +26,18 @@ The workspace shows a time-scaled, paged timeline, a text-only monitor, and
 an inspector that scrolls through clip controls. On narrower windows the
 media library and inspector share a tabbed sidebar.
 
-This is not a completed v0.1 video editor. There is no frame compositor, audio
-playback, thumbnail generation, or MP4 export yet. The pinned CreamUI 0.3.0
-does not publish the GPU viewport API. Building now requires FFmpeg development
-libraries (available on the Fedora development machine). The UI intentionally
-does not offer fake play or export buttons.
+**Export silent MP4** encodes H.264 from a continuous sequence of video-only
+clips and still images on one video track. Cuts and trims are honored; export
+runs in the background, shows progress, can be cancelled, and publishes a
+completed file atomically. The button reports unsupported sequences rather
+than silently omitting content. Audio, titles, gaps and multiple active tracks
+are **not** exported, and output has no AAC audio stream.
+
+This is not a completed v0.1 video editor. There is no video-frame preview,
+audio playback, or compositor. The pinned CreamUI 0.3.0 does not publish the
+GPU viewport API required by the planned preview. Building now requires FFmpeg
+development libraries (available on the Fedora development machine); there
+is no fake play control.
 
 ## Run and check
 
@@ -52,7 +60,8 @@ CreamUI checkout is needed.
 - `src/app.rs`: window startup and wiring.
 - `src/project/`: saved project, JSON format, and edit history/undo-redo.
 - `src/timeline.rs`: tracks, clips, and titles.
-- `src/media.rs`: source references and FFmpeg probing (decoding is not implemented).
+- `src/media.rs`: source references, FFmpeg probing and still thumbnails.
+- `src/export.rs`: limited H.264 MP4 encoding and cancellation.
 - `src/ui/`: compact CreamUI workspace and background file workflow.
 - `src/main.rs`: executable entry point.
 

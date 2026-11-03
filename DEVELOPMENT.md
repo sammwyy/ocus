@@ -77,6 +77,11 @@ The native file pickers use the desktop's XDG portal backend on Linux. Ensure
 an appropriate portal implementation is running; `zenity` provides a fallback
 for file and confirmation dialogs on desktops without that backend.
 
+The limited silent MP4 exporter also needs an H.264 encoder enabled in the
+installed FFmpeg build (such as `libx264`). Preview and audio export are not
+available yet; installing more FFmpeg packages does not provide CreamUI's
+unpublished GPU viewport API.
+
 ## macOS
 
 Install Xcode Command Line Tools, Rust with rustup, and FFmpeg via Homebrew:

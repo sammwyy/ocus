@@ -21,7 +21,7 @@ clip commands do not complete the corresponding editor workflows.
 
 - [x] Probe and import video, audio, and image files without modifying the
   originals; report unsupported or missing files.
-- [ ] Generate regenerable thumbnails and show them in a responsive media
+- [x] Generate regenerable thumbnails and show them in a responsive media
   bin without blocking the UI.
 - [ ] Build timeline clip rendering and interactions for selection, split,
   move, trim, delete, and ripple delete; connect gestures to commands.
@@ -39,8 +39,10 @@ clip commands do not complete the corresponding editor workflows.
 - [ ] Extend editable title text with font, size, color, and position controls;
   render titles consistently in the video preview and export.
 - [ ] Export the edited project to MP4 with H.264 video and AAC audio.
+- [x] Encode silent H.264 MP4 from contiguous video and still-image clips
+  on one track; reject unsupported sequences instead of dropping them.
 - [ ] Add and test export presets for 1080p, 720p, and vertical 9:16.
-- [ ] Run export off the UI thread with progress, cancellation, and cleanup
+- [x] Run export off the UI thread with progress, cancellation, and cleanup
   of incomplete outputs.
 
 ## End-to-end usability
@@ -57,5 +59,6 @@ clip commands do not complete the corresponding editor workflows.
 - [ ] Publish the CreamUI GPU viewport, split-pane, and related input APIs
   to crates.io, then upgrade Ocus's pinned `creamui = "=0.3.0"` dependency
   before using them. Do not add a sibling path dependency.
-- [x] Integrate FFmpeg library bindings for background probing; see
-  [DEVELOPMENT.md](DEVELOPMENT.md). Frame/audio decoding and encoding remain open.
+- [x] Integrate FFmpeg library bindings for background probing, thumbnails,
+  and limited H.264 export; see [DEVELOPMENT.md](DEVELOPMENT.md). Playback
+  decoding, audio processing, and full A/V encoding remain open.

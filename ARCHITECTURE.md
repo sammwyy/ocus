@@ -15,7 +15,8 @@ src/
     mod.rs          saved project and output settings
     edit.rs         project commands and undo/redo history
     format.rs       versioned JSON string format
-  media.rs          referenced source paths and kinds
+  media.rs          source references, probing and thumbnail decoding
+  export.rs         silent H.264 MP4 encoding with cancellation
   timeline.rs       tracks, clips, and title data
   ui/
     window.rs       integrated titlebar, editor layout, and clip controls
@@ -37,13 +38,16 @@ IDs, clip ranges and reference existence. `project::store` loads and saves on
 background jobs, with same-directory temporary files, sync, and rename for
 atomic writes. Imported media paths are absolute. Format migrations do not
 exist yet; optional probe metadata keeps version 1 files readable. Media
-probing uses the `ffmpeg-next` library to identify stream kind and duration
-on a worker thread. `media.rs` defines source references and probing, **not**
-a frame decoder. The UI supports frame stepping and title text display, not
-rendered video; title edits, split/move/trim/delete, audio clip settings, and ripple delete
+probing and bounded first-frame thumbnails use the `ffmpeg-next` library on
+workers; `media.rs` does not provide a playback decoder. `export.rs` decodes
+video and still-image clips sequentially with bounded frame storage and
+encodes a silent H.264 MP4 from one continuous video track. It refuses audio,
+titles, gaps, and multiple active tracks rather than dropping them silently.
+The UI supports frame stepping and title text display, not rendered video;
+title edits, split/move/trim/delete, audio clip settings, and ripple delete
 use project commands. Video sources with audio add aligned clips to both
-tracks; later edits to those clips are not linked yet.
-Audio, frame compositor, thumbnails and MP4 export remain unimplemented.
+tracks; later edits to those clips are not linked yet. Audio, the preview
+compositor, title rendering, and full A/V export remain unimplemented.
 
 ## Where new work belongs
 
@@ -54,7 +58,7 @@ Audio, frame compositor, thumbnails and MP4 export remain unimplemented.
 | Media probing, decoding, thumbnails, caches | `media/` | Background work; caches are bounded and regenerable |
 | Audio clock, play/pause/seek | `playback/` | Audio timing drives video, not UI redraws |
 | `wgpu` preview compositor | `preview/` | Present a same-device texture through CreamUI |
-| MP4 encoding and export jobs | `export/` | Read the same timeline semantics as preview; support cancel |
+| MP4 encoding and export jobs | `export.rs` (split as needed) | Read the same timeline semantics as preview; support cancel |
 | Panels, controls, timeline gestures | `ui/` | No decoding or encoding on the UI thread |
 | Window lifecycle and subsystem wiring | `app.rs` (split only if needed) | No clip-edit or codec logic in startup |
 

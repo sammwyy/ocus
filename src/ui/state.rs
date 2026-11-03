@@ -1,11 +1,15 @@
-use crate::media::{Media, MediaProbe, probe};
+use crate::export::{self, ExportControl};
+use crate::media::{Media, MediaKind, MediaProbe, Thumbnail, probe, thumbnail};
 use crate::project::{Command, Editor, Project, store};
+use creamui::core::RgbaImage;
 use creamui::widgets::{ScrollController, TextController};
 use creamui::{AppHandle, Signal};
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Sidebar {
@@ -13,10 +17,13 @@ pub(crate) enum Sidebar {
     Inspector,
 }
 
+const MAX_THUMBNAILS: usize = 256;
+
 #[derive(Clone)]
 pub(crate) struct UiState {
     pub editor: Rc<RefCell<Editor>>,
     pub revision: Signal<u64>,
+    pub ui_revision: Signal<u64>,
     pub selected: Signal<Option<(u64, u64)>>,
     pub playhead: Signal<u64>,
     pub project_path: Signal<Option<PathBuf>>,
@@ -24,12 +31,16 @@ pub(crate) struct UiState {
     pub status: Signal<String>,
     pub dirty: Signal<bool>,
     pub busy: Signal<bool>,
+    pub exporting: Signal<bool>,
+    pub export_total: Signal<u64>,
+    pub thumbnails: Rc<RefCell<HashMap<PathBuf, Arc<RgbaImage>>>>,
     pub media_scroll: ScrollController,
     pub inspector_scroll: ScrollController,
     pub timeline_scroll: ScrollController,
     pub timeline_page: Signal<u64>,
     pub sidebar: Signal<Sidebar>,
     app: Rc<RefCell<Option<AppHandle>>>,
+    export_control: Rc<RefCell<Option<Arc<ExportControl>>>>,
 }
 
 impl UiState {
@@ -37,6 +48,7 @@ impl UiState {
         Self {
             editor: Rc::new(RefCell::new(Editor::new(Project::new("Untitled")))),
             revision: Signal::new(0),
+            ui_revision: Signal::new(0),
             selected: Signal::new(None),
             playhead: Signal::new(0),
             project_path: Signal::new(None),
@@ -44,12 +56,16 @@ impl UiState {
             status: Signal::new("Ready · Project not saved".into()),
             dirty: Signal::new(false),
             busy: Signal::new(false),
+            exporting: Signal::new(false),
+            export_total: Signal::new(0),
+            thumbnails: Rc::new(RefCell::new(HashMap::new())),
             media_scroll: ScrollController::default(),
             inspector_scroll: ScrollController::default(),
             timeline_scroll: ScrollController::default(),
             timeline_page: Signal::new(0),
             sidebar: Signal::new(Sidebar::Media),
             app: Rc::new(RefCell::new(None)),
+            export_control: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -113,6 +129,7 @@ impl UiState {
         }
         *self.editor.borrow_mut() = Editor::new(Project::new("Untitled"));
         self.project_path.set(None);
+        self.thumbnails.borrow_mut().clear();
         self.selected.set(None);
         self.playhead.set(0);
         self.timeline_page.set(0);
@@ -156,7 +173,15 @@ impl UiState {
                 state.busy.set(false);
                 match result {
                     Ok(project) if state.revision.peek() == revision => {
+                        let sources: Vec<_> = project
+                            .media()
+                            .iter()
+                            .filter(|media| media.kind != MediaKind::Audio)
+                            .map(|media| media.path.clone())
+                            .take(MAX_THUMBNAILS)
+                            .collect();
                         *state.editor.borrow_mut() = Editor::new(project);
+                        state.thumbnails.borrow_mut().clear();
                         state.project_path.set(Some(path));
                         state.selected.set(None);
                         state.playhead.set(0);
@@ -165,6 +190,7 @@ impl UiState {
                         state.dirty.set(false);
                         state.sidebar.set(Sidebar::Media);
                         state.status.set("Project opened".into());
+                        state.load_thumbnails(sources);
                     }
                     Ok(_) => state
                         .status
@@ -284,6 +310,100 @@ impl UiState {
         }
     }
 
+    pub fn export_dialog(&self) {
+        if self.busy.peek() {
+            return;
+        }
+        let project = self.editor.borrow().project().clone();
+        if !export::can_render(&project) {
+            self.status.set("MP4 export supports one continuous video track without titles or audio; other sequences are not yet supported".into());
+            return;
+        }
+        let Some(selected) = FileDialog::new()
+            .set_title("Export video-only MP4")
+            .add_filter("MP4 video", &["mp4"])
+            .set_file_name("export")
+            .save_file()
+        else {
+            return;
+        };
+        let path = match selected
+            .extension()
+            .and_then(|extension| extension.to_str())
+        {
+            None => selected.with_extension("mp4"),
+            Some(extension) if extension.eq_ignore_ascii_case("mp4") => {
+                if selected
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(|stem| stem.to_ascii_lowercase().ends_with(".mp4"))
+                {
+                    selected.with_extension("")
+                } else {
+                    selected.clone()
+                }
+            }
+            _ => {
+                self.status
+                    .set("Export destination must be an MP4 file".into());
+                return;
+            }
+        };
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let control = Arc::new(ExportControl::default());
+        self.export_total.set(
+            project
+                .tracks()
+                .iter()
+                .flat_map(|track| &track.clips)
+                .map(|clip| clip.duration_frames)
+                .sum(),
+        );
+        *self.export_control.borrow_mut() = Some(control.clone());
+        self.exporting.set(true);
+        self.busy.set(true);
+        self.status.set("Encoding silent MP4…".into());
+        let state = self.clone();
+        app.spawn_background(
+            move || {
+                if path != selected && path.exists() {
+                    return (
+                        path,
+                        Err(
+                            "Destination exists under the corrected .mp4 name; choose another name"
+                                .into(),
+                        ),
+                    );
+                }
+                let result = export::render_with_control(&project, &path, control);
+                (path, result)
+            },
+            move |(path, result)| {
+                state.exporting.set(false);
+                state.export_control.borrow_mut().take();
+                state.busy.set(false);
+                state.status.set(match result {
+                    Ok(()) => format!("Silent MP4 exported: {}", path.display()),
+                    Err(ref error) if error == "Export cancelled" => error.clone(),
+                    Err(error) => format!("Export failed: {error}"),
+                });
+            },
+        );
+    }
+
+    pub fn cancel_export(&self) {
+        if let Some(control) = self.export_control.borrow().as_ref() {
+            control.cancel();
+            self.status.set("Cancelling export…".into());
+        }
+    }
+
+    pub fn export_control(&self) -> Option<Arc<ExportControl>> {
+        self.export_control.borrow().clone()
+    }
+
     pub fn import_paths(&self, paths: Vec<PathBuf>) {
         let Some(app) = self.app.borrow().clone() else {
             return;
@@ -308,7 +428,7 @@ impl UiState {
                 let mut errors = Vec::new();
                 for result in results {
                     match result {
-                        Ok((path, info)) => {
+                        Ok((path, info, thumb)) => {
                             let existing = state
                                 .editor
                                 .borrow()
@@ -332,13 +452,12 @@ impl UiState {
                             if let Some(id) = id {
                                 let media = Media {
                                     id,
-                                    path,
+                                    path: path.clone(),
                                     kind: info.kind,
                                     duration_us: info.duration_us,
                                     has_audio: info.has_audio,
                                 };
                                 if existing.as_ref() == Some(&media) {
-                                    continue;
                                 } else if state.edit(if existing.is_some() {
                                     Command::ReprobeMedia(media)
                                 } else {
@@ -347,6 +466,26 @@ impl UiState {
                                     imported += 1;
                                 } else {
                                     errors.push("Source rejected by project validation".into());
+                                }
+                                if let Some(thumb) = thumb
+                                    && state
+                                        .editor
+                                        .borrow()
+                                        .project()
+                                        .media()
+                                        .iter()
+                                        .any(|media| media.id == id && media.path == path)
+                                    && let Some(image) =
+                                        RgbaImage::new(thumb.width, thumb.height, thumb.pixels)
+                                {
+                                    let mut thumbnails = state.thumbnails.borrow_mut();
+                                    if thumbnails.len() < MAX_THUMBNAILS
+                                        || thumbnails.contains_key(&path)
+                                    {
+                                        thumbnails.insert(path, Arc::new(image));
+                                        drop(thumbnails);
+                                        state.ui_revision.update(|revision| *revision += 1);
+                                    }
                                 }
                             } else {
                                 errors.push("Media ID limit reached".to_string());
@@ -364,6 +503,39 @@ impl UiState {
                         errors[0]
                     )
                 });
+            },
+        );
+    }
+
+    fn load_thumbnails(&self, sources: Vec<PathBuf>) {
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let state = self.clone();
+        app.spawn_background(
+            move || {
+                sources
+                    .into_iter()
+                    .filter_map(|path| thumbnail(&path).ok().map(|image| (path, image)))
+                    .collect::<Vec<_>>()
+            },
+            move |results| {
+                let editor = state.editor.borrow();
+                let mut thumbnails = state.thumbnails.borrow_mut();
+                for (path, thumb) in results {
+                    if editor
+                        .project()
+                        .media()
+                        .iter()
+                        .any(|media| media.path == path)
+                        && let Some(image) = RgbaImage::new(thumb.width, thumb.height, thumb.pixels)
+                    {
+                        thumbnails.insert(path, Arc::new(image));
+                    }
+                }
+                drop(thumbnails);
+                drop(editor);
+                state.ui_revision.update(|revision| *revision += 1);
             },
         );
     }
@@ -500,12 +672,15 @@ fn project_file(path: PathBuf) -> Result<PathBuf, String> {
     }
 }
 
-fn inspect_source(path: &Path) -> Result<(PathBuf, MediaProbe), String> {
+fn inspect_source(path: &Path) -> Result<(PathBuf, MediaProbe, Option<Thumbnail>), String> {
     let info = probe(path)?;
     let path = path
         .canonicalize()
         .map_err(|error| format!("Cannot resolve source: {error}"))?;
-    Ok((path, info))
+    let thumb = (info.kind != MediaKind::Audio)
+        .then(|| thumbnail(&path).ok())
+        .flatten();
+    Ok((path, info, thumb))
 }
 
 #[cfg(test)]

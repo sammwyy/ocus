@@ -1,10 +1,10 @@
 use super::controls::{
-    ACCENT, AUDIO, BACKGROUND, BORDER, DragOverlay, ExportMeter, FAINT, Glyph, IMAGE, MUTED, PANEL,
-    PANEL_RAISED, PLAYHEAD, STAGE, SURFACE, Scrubber, TEXT, TITLE, Thumb, VIDEO, accent_button,
-    chip, fit, glyph, heading, icon_button, kind_color, media_item, play_button, secondary_button,
-    short_duration, sized_icon_button, text, timecode, tool_button,
+    ACCENT, AUDIO, BACKGROUND, BORDER, DragOverlay, ExportMeter, FAINT, Glyph, IMAGE, Layer, MUTED,
+    PANEL, PANEL_RAISED, PLAYHEAD, STAGE, SURFACE, Scrubber, TEXT, TITLE, Thumb, VIDEO,
+    accent_button, chip, fit, glyph, heading, icon_button, kind_color, media_item, menu_row,
+    play_button, secondary_button, short_duration, sized_icon_button, text, timecode, tool_button,
 };
-use super::interaction::DragPayload;
+use super::interaction::{DragPayload, MenuState};
 use super::state::{MediaView, SourceRange, ZOOM_SECONDS, media_frames};
 use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
 use super::{MediaFilter, Sidebar, UiState};
@@ -601,6 +601,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
     let mut rows: Vec<BoxedWidget> = Vec::new();
     let subtitle;
     let count = state.selected.get().len();
+    let (_, linkable) = state.audio_link_state();
     if count > 1 {
         rows.push(Box::new(
             Flex::column()
@@ -627,7 +628,14 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                             true,
                             state,
                             |s| s.delete_selection(true),
-                        )),
+                        ))
+                        .child(if linkable {
+                            secondary_button(Some(Glyph::Link), "Link", true, state, |s| {
+                                s.link_audio()
+                            })
+                        } else {
+                            Box::new(Flex::row().width(0.0))
+                        }),
                 ))
                 .child(text(
                     "The last clip you picked is shown below.",
@@ -658,6 +666,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
             (ClipContent::Title(_), _) => "Title clip",
             (_, TrackKind::Audio) => "Audio clip",
             _ if media.is_some_and(|media| media.kind == MediaKind::Image) => "Still clip",
+            _ if clip.linked_audio => "Video + linked audio",
             _ => "Video clip",
         };
         let preview: BoxedWidget = match (&clip.content, media) {
@@ -725,7 +734,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 ],
             ));
         }
-        if track_kind == TrackKind::Audio && media.is_some() {
+        if (track_kind == TrackKind::Audio || clip.linked_audio) && media.is_some() {
             let volume = clip.volume;
             rows.push(section(
                 "Audio",
@@ -805,8 +814,31 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         state,
                         |s| set_clip_audio(s, |clip| (clip.volume, !clip.muted)),
                     )),
+                    if clip.linked_audio {
+                        inline(secondary_button(
+                            Some(Glyph::Unlink),
+                            "Detach audio to its own track",
+                            true,
+                            state,
+                            UiState::detach_audio,
+                        ))
+                    } else if linkable {
+                        inline(secondary_button(
+                            Some(Glyph::Link),
+                            "Link to its video",
+                            true,
+                            state,
+                            UiState::link_audio,
+                        ))
+                    } else {
+                        Box::new(Flex::row().height(0.0))
+                    },
                     text(
-                        "Saved with the project; audio playback is pending.",
+                        if clip.linked_audio {
+                            "Cut, moved and trimmed with the picture."
+                        } else {
+                            "Saved with the project; audio playback is pending."
+                        },
                         FAINT,
                         10.0,
                     ),
@@ -1106,6 +1138,12 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
             track_id: track.id,
             kind: track.kind,
             label: label.clone(),
+            removable: project
+                .tracks()
+                .iter()
+                .filter(|other| other.kind == track.kind)
+                .count()
+                > 1,
             clips: track
                 .clips
                 .iter()
@@ -1150,6 +1188,7 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                             .and_then(|media| state.thumbnails.borrow().get(&media.path).cloned()),
                         volume: clip.volume,
                         muted: clip.muted,
+                        linked_audio: clip.linked_audio,
                     }
                 })
                 .collect(),
@@ -1571,6 +1610,13 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                         s.add_title();
                     },
                 ))
+                .child(tool_button(
+                    Some(Glyph::Tracks),
+                    "Tracks",
+                    !busy,
+                    state,
+                    UiState::open_tracks_menu,
+                ))
                 .child(spacer())
                 .child(icon_button(
                     Glyph::ChevronLeft,
@@ -1633,6 +1679,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 Some(DragPayload::Clips { .. })
             ),
             marquee,
+            scroll: state.track_scroll.get(),
             state: state.clone(),
         }));
 
@@ -1761,8 +1808,83 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     size: (viewport.width, viewport.height),
                 }) as BoxedWidget,
                 _ => Box::new(Flex::row().size(0.0, 0.0)),
+            })
+            .child(match state.menu.get() {
+                Some(menu) => context_menu(state, menu, viewport),
+                None => Box::new(Flex::row().size(0.0, 0.0)),
             }),
     )
+}
+
+/// The open context menu over a full-window layer that closes it when
+/// clicked outside.
+fn context_menu(state: &UiState, menu: MenuState, viewport: Size) -> BoxedWidget {
+    const WIDTH: f32 = 244.0;
+    let separators = menu.entries.iter().filter(|e| e.command.is_none()).count() as f32;
+    let rows = menu.entries.len() as f32 - separators;
+    let height = 12.0 + 26.0 + rows * 28.0 + separators * 9.0;
+    let x = menu.anchor.x.min(viewport.width - WIDTH - 8.0).max(8.0);
+    let y = if menu.anchor.y + height > viewport.height - 8.0 {
+        (menu.anchor.y - height).max(8.0)
+    } else {
+        menu.anchor.y
+    };
+    let entries = menu
+        .entries
+        .iter()
+        .map(|entry| match entry.command {
+            Some(command) => menu_row(
+                entry.icon,
+                &entry.label,
+                entry.shortcut,
+                entry.enabled,
+                entry.danger,
+                state,
+                move |s| s.run_menu(command),
+            ),
+            None => Box::new(
+                Flex::row()
+                    .height(9.0)
+                    .align(Align::Center)
+                    .padding_xy(8.0, 0.0)
+                    .child(Box::new(
+                        Flex::row().height(1.0).grow(1.0).background(BORDER),
+                    )),
+            ) as BoxedWidget,
+        })
+        .collect();
+    let close = state.clone();
+    Box::new(Layer {
+        style: Layer::at(0.0, 0.0, viewport.width, viewport.height),
+        on_click: Some(Rc::new(move || close.close_menu())),
+        children: vec![Box::new(Layer {
+            style: Layer::at(x, y, WIDTH, height),
+            on_click: None,
+            children: vec![Box::new(append(
+                Flex::column()
+                    .size(WIDTH, height)
+                    .padding(6.0)
+                    .background(PANEL_RAISED)
+                    .border(SURFACE, 1.0)
+                    .corner_radius(9.0)
+                    .box_shadow(creamui::BoxShadow::new(
+                        0.0,
+                        8.0,
+                        24.0,
+                        0.0,
+                        Color::rgba(0, 0, 0, 150),
+                    ))
+                    .child(Box::new(
+                        Flex::row()
+                            .height(26.0)
+                            .align(Align::Center)
+                            .padding_xy(10.0, 0.0)
+                            .child(heading(fit(&menu.title, WIDTH - 32.0, 11.0), MUTED, 11.0)),
+                    )),
+                entries,
+            ))],
+        })],
+    })
 }
 
 #[cfg(test)]
@@ -1866,6 +1988,7 @@ mod tests {
             ghosts: Vec::new(),
             dragging: false,
             marquee: None,
+            scroll: 0.0,
             state: state.clone(),
         }
     }
@@ -1904,6 +2027,7 @@ mod tests {
                 track_id: 0,
                 kind: TrackKind::Video,
                 label: "V1".into(),
+                removable: false,
                 clips: vec![LaneClip {
                     clip_id: 7,
                     start: 30,
@@ -1914,6 +2038,7 @@ mod tests {
                     fallback: None,
                     volume: 1.0,
                     muted: false,
+                    linked_audio: false,
                 }],
             }],
             ghosts: vec![super::super::timeline_view::Ghost {

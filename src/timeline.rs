@@ -23,6 +23,10 @@ pub struct Clip {
     pub content: ClipContent,
     pub volume: f32,
     pub muted: bool,
+    /// A video clip that also carries its source's audio. The audio is cut,
+    /// moved and trimmed with the picture; `volume` and `muted` apply to it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub linked_audio: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

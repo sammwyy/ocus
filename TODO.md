@@ -10,9 +10,11 @@ clip commands do not complete the corresponding editor workflows.
   checks with linked AV clips and media path migration/repair.
 - [x] Add project file open/save with atomic writes, external media paths,
   useful errors, and round-trip tests; retain explicit schema-version handling.
-- [ ] Link the video and audio clips created from one source so later edits
-  keep them together; today both are selected after insertion and move
-  together only while both stay selected.
+- [x] Keep a video's own sound linked inside its clip so edits apply to both;
+  detach it to an audio track (creating one if needed) or link a matching pair
+  back. Add and delete video and audio tracks.
+- [ ] Name, reorder, lock and hide tracks; the project format does not store
+  track names or flags yet.
 - [ ] Extend ripple delete across overlapping clips that span the removed range;
   existing implementation rejects these instead of silently dropping footage.
 - [ ] Make all video and audio tracks selectable as destinations from the UI;

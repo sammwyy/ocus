@@ -19,9 +19,14 @@ first-frame thumbnails. The media bin offers search, video/audio/still
 filters, grid and list views, and files can also be dropped onto it to import
 them. Each source has a one-click insert action that adds a clip on a video or
 audio track using the probed duration (still images default to three seconds).
-Videos with audio place aligned video and audio clips in a single undoable
-action. Audio clips have editable volume and mute values, but those values do
-not affect playback or export yet. Previously saved references without probe
+A video with sound becomes one clip whose audio is linked to the picture:
+the timeline draws it as an attached audio band under the video, and every
+split, move, trim, delete or ripple applies to both, so cutting a clip in three
+and ripple-deleting the middle keeps picture and sound 1:1. **Detach audio**
+(inspector or right-click) moves that sound to an audio track that is free for
+the same range, creating a new one if needed, and **Link audio** folds a
+matching pair back together. Clip volume and mute are editable and saved, but
+do not affect playback or export yet. Previously saved references without probe
 metadata can be re-imported.
 
 The workspace has two GPU monitors: **Source** shows the selected timeline
@@ -33,6 +38,16 @@ frame, and **Insert** adds the selected bin file. The timeline is one painted
 surface with track headers, a zoomable ruler (2 s to 3 min per view), clip
 filmstrips sampled from their actual trimmed source range, audio volume
 levels and a playhead across every track.
+
+Tracks can be added from the timeline's **Tracks** button, the **Add
+track** button under the track headers or any right-click menu, and deleted
+from a header's hover button or its menu (one video and one audio track always
+remain). With many tracks the lanes scroll: use the wheel over the headers or
+Shift+wheel. Right-click opens a context menu on clips (cut, copy, paste,
+duplicate, split, detach/link audio, mute, delete, ripple delete), on empty
+track space (paste here, add title here, move playhead, track actions), on
+track headers and on media bin items (insert at end or at the playhead, open in
+the source monitor, remove an unused source); Esc or clicking outside closes it.
 
 Editing is direct: drag clips along a track or onto another track of the same
 kind (edges snap to other clips, the playhead and the start), drag sources from

@@ -118,6 +118,15 @@ impl Project {
                         }) => {}
                     _ => return Err("Invalid title or incompatible media on track".into()),
                 }
+                if clip.linked_audio
+                    && !(track.kind == TrackKind::Video
+                        && matches!(clip.content, ClipContent::Media { media_id }
+                            if self.media.iter().any(|media| media.id == media_id
+                                && media.kind == MediaKind::Video
+                                && media.has_audio)))
+                {
+                    return Err("Linked audio needs a video source with sound".into());
+                }
             }
         }
         Ok(())

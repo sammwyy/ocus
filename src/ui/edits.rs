@@ -212,17 +212,20 @@ pub(crate) fn compatible_track(project: &Project, media_id: u64, preferred: u64)
         .map(|track| track.id)
 }
 
-/// A three-second title after the last clip of the first video track.
-pub(crate) fn title_clip(project: &Project) -> Option<(u64, Clip)> {
-    let track = project
-        .tracks()
-        .iter()
-        .find(|track| track.kind == TrackKind::Video)?;
-    let start_frame = track
-        .clips
-        .iter()
-        .map(|clip| clip.start_frame.checked_add(clip.duration_frames))
-        .try_fold(0_u64, |latest, end| Some(latest.max(end?)))?;
+/// A three-second title at `placement` (`track_id`, frame), or after the
+/// last clip of the first video track.
+pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Option<(u64, Clip)> {
+    let track = project.tracks().iter().find(|track| {
+        track.kind == TrackKind::Video && placement.is_none_or(|(id, _)| id == track.id)
+    })?;
+    let start_frame = match placement {
+        Some((_, frame)) => frame,
+        None => track
+            .clips
+            .iter()
+            .map(|clip| clip.start_frame.checked_add(clip.duration_frames))
+            .try_fold(0_u64, |latest, end| Some(latest.max(end?)))?,
+    };
     let id = next_clip_id(project)?;
     let rate = &project.settings().frame_rate;
     Some((
@@ -243,6 +246,7 @@ pub(crate) fn title_clip(project: &Project) -> Option<(u64, Clip)> {
             }),
             volume: 1.0,
             muted: false,
+            linked_audio: false,
         },
     ))
 }
@@ -307,8 +311,8 @@ pub(crate) fn paste_clips(project: &Project, clips: &[(u64, Clip)], at: u64) -> 
 }
 
 /// Plans inserting a source as a clip, at `placement` (`track_id`, frame) or
-/// after the last clip of its first compatible track. Video with audio also
-/// gets an aligned clip on the matching audio track.
+/// after the last clip of its first compatible track. A video's own sound
+/// travels inside the clip as linked audio.
 pub(crate) fn insert_media(
     project: &Project,
     media_id: u64,
@@ -324,7 +328,7 @@ pub(crate) fn insert_media(
     } else {
         TrackKind::Video
     };
-    let primary = match placement {
+    let track = match placement {
         Some((track_id, _)) => {
             let track = project
                 .tracks()
@@ -346,79 +350,205 @@ pub(crate) fn insert_media(
             .find(|track| track.kind == wanted)
             .ok_or("No compatible track for this source")?,
     };
-    let audio = if media.kind == MediaKind::Video && media.has_audio {
-        let lane = project
-            .tracks()
-            .iter()
-            .filter(|track| track.kind == TrackKind::Video)
-            .position(|track| track.id == primary.id)
-            .unwrap_or(0);
-        let audio_tracks: Vec<_> = project
-            .tracks()
-            .iter()
-            .filter(|track| track.kind == TrackKind::Audio)
-            .collect();
-        Some(
-            *audio_tracks
-                .get(lane)
-                .or(audio_tracks.first())
-                .ok_or("Video has audio but no audio track exists")?,
-        )
-    } else {
-        None
-    };
     let rate = &project.settings().frame_rate;
     let duration = media_frames(media, (rate.numerator, rate.denominator))
         .ok_or("Source has no usable duration; import it again to probe")?;
     let start = match placement {
         Some((_, frame)) => frame,
-        None => std::iter::once(primary)
-            .chain(audio)
-            .flat_map(|track| &track.clips)
-            .map(clip_end)
-            .max()
-            .unwrap_or(0),
+        None => track.clips.iter().map(clip_end).max().unwrap_or(0),
     };
-    let clip_id = next_clip_id(project).ok_or("Clip ID limit reached")?;
     let clip = Clip {
-        id: clip_id,
+        id: next_clip_id(project).ok_or("Clip ID limit reached")?,
         start_frame: start,
         source_start_frame: 0,
         duration_frames: duration,
         content: ClipContent::Media { media_id },
         volume: 1.0,
         muted: false,
+        linked_audio: media.kind == MediaKind::Video && media.has_audio,
     };
-    let mut placed = vec![(primary.id, clip.clone())];
-    if let Some(audio) = audio {
-        let linked = clip_id.checked_add(1).ok_or("Clip ID limit reached")?;
-        placed.push((audio.id, Clip { id: linked, ..clip }));
-    }
-    let mut tracks = project.tracks().to_vec();
-    for (track_id, clip) in &placed {
-        if let Some(track) = tracks.iter_mut().find(|track| track.id == *track_id) {
-            track.clips.push(clip.clone());
-        }
-    }
-    let tracks = sorted_without_overlap(tracks).ok_or("That spot on the track is already taken")?;
-    let selection = placed
+    let end = start.checked_add(duration).ok_or("Clip range overflows")?;
+    if track
+        .clips
         .iter()
-        .rev()
-        .map(|(track_id, clip)| (*track_id, clip.id))
-        .collect();
-    let track_ids = placed.iter().map(|(track_id, _)| *track_id).collect();
-    let command = if placed.len() == 1 {
-        let (track_id, clip) = placed.remove(0);
-        Command::InsertClip { track_id, clip }
-    } else {
-        Command::ReplaceTracks(tracks)
-    };
+        .any(|existing| existing.start_frame < end && start < clip_end(existing))
+    {
+        return Err("That spot on the track is already taken".into());
+    }
     Ok(Insertion {
-        command,
-        selection,
+        selection: vec![(track.id, clip.id)],
         start,
         duration,
-        tracks: track_ids,
+        tracks: vec![track.id],
+        command: Command::InsertClip {
+            track_id: track.id,
+            clip,
+        },
+    })
+}
+
+/// Adds an empty track after the last one of its kind, returning its ID.
+fn push_track(tracks: &mut Vec<Track>, kind: TrackKind) -> Option<u64> {
+    let id = tracks
+        .iter()
+        .map(|track| track.id)
+        .max()
+        .map_or(Some(0), |id| id.checked_add(1))?;
+    let index = tracks.iter().rposition(|track| track.kind == kind).map_or(
+        if kind == TrackKind::Video {
+            0
+        } else {
+            tracks.len()
+        },
+        |index| index + 1,
+    );
+    tracks.insert(
+        index,
+        Track {
+            id,
+            kind,
+            clips: Vec::new(),
+        },
+    );
+    Some(id)
+}
+
+pub(crate) fn add_track(project: &Project, kind: TrackKind) -> Option<(Vec<Track>, u64)> {
+    let mut tracks = project.tracks().to_vec();
+    let id = push_track(&mut tracks, kind)?;
+    Some((tracks, id))
+}
+
+/// Removes a track and its clips; the last track of a kind stays.
+pub(crate) fn remove_track(project: &Project, track_id: u64) -> Result<Vec<Track>, String> {
+    let kind = project
+        .tracks()
+        .iter()
+        .find(|track| track.id == track_id)
+        .ok_or("Track no longer exists")?
+        .kind;
+    if project
+        .tracks()
+        .iter()
+        .filter(|track| track.kind == kind)
+        .count()
+        < 2
+    {
+        return Err(if kind == TrackKind::Video {
+            "Keep at least one video track".into()
+        } else {
+            "Keep at least one audio track".into()
+        });
+    }
+    let mut tracks = project.tracks().to_vec();
+    tracks.retain(|track| track.id != track_id);
+    Ok(tracks)
+}
+
+/// Moves the linked audio of the selected video clips onto an audio track
+/// that is free for all of them, creating a new track when none is.
+pub(crate) fn detach_audio(project: &Project, selection: &[ClipRef]) -> Option<Planned> {
+    let mut tracks = project.tracks().to_vec();
+    let mut id = next_clip_id(project)?;
+    let mut detached = Vec::new();
+    let mut kept = Vec::new();
+    for &(track_id, clip_id) in selection {
+        let track = tracks.iter_mut().find(|track| track.id == track_id)?;
+        let Some(clip) = track
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == clip_id && clip.linked_audio)
+        else {
+            continue;
+        };
+        clip.linked_audio = false;
+        detached.push(Clip { id, ..clip.clone() });
+        kept.push((track_id, clip_id));
+        id = id.checked_add(1)?;
+    }
+    if detached.is_empty() {
+        return None;
+    }
+    let fits = |track: &Track| {
+        detached.iter().all(|new| {
+            track
+                .clips
+                .iter()
+                .all(|clip| clip_end(clip) <= new.start_frame || clip_end(new) <= clip.start_frame)
+        })
+    };
+    let target = match tracks
+        .iter()
+        .find(|track| track.kind == TrackKind::Audio && fits(track))
+    {
+        Some(track) => track.id,
+        None => push_track(&mut tracks, TrackKind::Audio)?,
+    };
+    let track = tracks.iter_mut().find(|track| track.id == target)?;
+    kept.extend(detached.iter().map(|clip| (target, clip.id)));
+    track.clips.extend(detached);
+    Some(Planned {
+        tracks: sorted_without_overlap(tracks)?,
+        selection: kept,
+    })
+}
+
+/// Folds selected audio clips back into selected video clips that show the
+/// same source frames, so they edit together again.
+pub(crate) fn link_audio(project: &Project, selection: &[ClipRef]) -> Option<Planned> {
+    let find = |(track_id, clip_id): ClipRef| {
+        let track = project.tracks().iter().find(|track| track.id == track_id)?;
+        Some((
+            track.kind,
+            track.clips.iter().find(|clip| clip.id == clip_id)?,
+        ))
+    };
+    let mut pairs = Vec::new();
+    for &video in selection {
+        let Some((TrackKind::Video, picture)) = find(video) else {
+            continue;
+        };
+        let ClipContent::Media { media_id } = picture.content else {
+            continue;
+        };
+        let sound = selection.iter().copied().find(|&audio| {
+            find(audio).is_some_and(|(kind, clip)| {
+                kind == TrackKind::Audio
+                    && clip.content == ClipContent::Media { media_id }
+                    && clip.start_frame == picture.start_frame
+                    && clip.source_start_frame == picture.source_start_frame
+                    && clip.duration_frames == picture.duration_frames
+            })
+        });
+        let has_audio = project
+            .media()
+            .iter()
+            .any(|media| media.id == media_id && media.has_audio && media.kind == MediaKind::Video);
+        if let Some(sound) = sound.filter(|_| has_audio && !picture.linked_audio) {
+            pairs.push((video, sound));
+        }
+    }
+    if pairs.is_empty() {
+        return None;
+    }
+    let mut tracks = project.tracks().to_vec();
+    for &(video, (audio_track, audio_id)) in &pairs {
+        let track = tracks.iter_mut().find(|track| track.id == audio_track)?;
+        let index = track.clips.iter().position(|clip| clip.id == audio_id)?;
+        let sound = track.clips.remove(index);
+        let clip = tracks
+            .iter_mut()
+            .find(|track| track.id == video.0)?
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == video.1)?;
+        clip.linked_audio = true;
+        clip.volume = sound.volume;
+        clip.muted = sound.muted;
+    }
+    Some(Planned {
+        tracks,
+        selection: pairs.into_iter().map(|(video, _)| video).collect(),
     })
 }
 
@@ -444,6 +574,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            linked_audio: false,
         }
     }
 
@@ -512,23 +643,122 @@ mod tests {
     }
 
     #[test]
-    fn placed_insert_checks_track_kind_overlap_and_links_matching_audio_lane() {
+    fn video_with_sound_inserts_one_linked_clip_that_detaches_and_relinks() {
         let mut editor = Editor::new(Project::new("Film"));
         assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "scene.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(3_000_000),
+            has_audio: true,
+        })));
+        let insertion = insert_media(editor.project(), 1, Some((1, 45))).unwrap();
+        assert_eq!(insertion.tracks, vec![1]);
+        assert_eq!((insertion.start, insertion.duration), (45, 90));
+        assert!(editor.apply(insertion.command));
+        assert!(editor.project().tracks()[1].clips[0].linked_audio);
+        assert!(editor.project().tracks()[2].clips.is_empty());
+        assert!(insert_media(editor.project(), 1, Some((2, 0))).is_err());
+        assert!(insert_media(editor.project(), 1, Some((1, 60))).is_err());
+        assert!(editor.apply(Command::SetClipAudio {
+            track_id: 1,
+            clip_id: 1,
+            volume: 0.5,
+            muted: false,
+        }));
+
+        let split = split_clips(editor.project(), &[(1, 1)], 75).unwrap();
+        assert!(editor.apply(Command::ReplaceTracks(split)));
+        let split = split_clips(editor.project(), &[(1, 2)], 105).unwrap();
+        assert!(editor.apply(Command::ReplaceTracks(split)));
+        let rippled = ripple_remove_clips(editor.project(), &[(1, 2)]).unwrap();
+        assert!(editor.apply(Command::ReplaceTracks(rippled)));
+        let pieces = &editor.project().tracks()[1].clips;
+        assert_eq!(
+            pieces
+                .iter()
+                .map(|c| (
+                    c.start_frame,
+                    c.source_start_frame,
+                    c.duration_frames,
+                    c.linked_audio
+                ))
+                .collect::<Vec<_>>(),
+            vec![(45, 0, 30, true), (75, 60, 30, true)]
+        );
+
+        let detached = detach_audio(editor.project(), &[(1, 1), (1, 3)]).unwrap();
+        assert!(editor.apply(Command::ReplaceTracks(detached.tracks)));
+        let audio = &editor.project().tracks()[2].clips;
+        assert_eq!(
+            audio
+                .iter()
+                .map(|c| (c.start_frame, c.source_start_frame, c.volume))
+                .collect::<Vec<_>>(),
+            vec![(45, 0, 0.5), (75, 60, 0.5)]
+        );
+        assert!(
+            editor.project().tracks()[1]
+                .clips
+                .iter()
+                .all(|c| !c.linked_audio)
+        );
+        assert_eq!(detached.selection.len(), 4);
+
+        let relinked = link_audio(editor.project(), &detached.selection).unwrap();
+        assert!(editor.apply(Command::ReplaceTracks(relinked.tracks)));
+        assert!(editor.project().tracks()[2].clips.is_empty());
+        assert!(
+            editor.project().tracks()[1]
+                .clips
+                .iter()
+                .all(|c| c.linked_audio)
+        );
+    }
+
+    #[test]
+    fn tracks_are_added_beside_their_kind_and_the_last_one_stays() {
+        let project = Project::new("Film");
+        let (tracks, id) = add_track(&project, TrackKind::Video).unwrap();
+        assert_eq!(id, 4);
+        assert_eq!(
+            tracks.iter().map(|t| (t.id, t.kind)).collect::<Vec<_>>(),
+            vec![
+                (0, TrackKind::Video),
+                (1, TrackKind::Video),
+                (4, TrackKind::Video),
+                (2, TrackKind::Audio),
+                (3, TrackKind::Audio),
+            ]
+        );
+        let mut editor = Editor::new(project);
+        assert!(editor.apply(Command::ReplaceTracks(
+            remove_track(editor.project(), 3).unwrap()
+        )));
+        assert!(remove_track(editor.project(), 2).is_err());
+        assert!(editor.apply(Command::ReplaceTracks(
+            remove_track(editor.project(), 1).unwrap()
+        )));
+        assert!(remove_track(editor.project(), 0).is_err());
+
+        let mut full = Editor::new(Project::new("Busy"));
+        assert!(full.apply(Command::ImportMedia(Media {
             id: 1,
             path: "scene.mp4".into(),
             kind: MediaKind::Video,
             duration_us: Some(1_000_000),
             has_audio: true,
         })));
-        let project = editor.project().clone();
-        let insertion = insert_media(&project, 1, Some((1, 45))).unwrap();
-        assert_eq!(insertion.tracks, vec![1, 3]);
-        assert_eq!((insertion.start, insertion.duration), (45, 30));
-        assert_eq!(insertion.selection, vec![(3, 2), (1, 1)]);
-        assert!(editor.apply(insertion.command));
-        assert!(insert_media(editor.project(), 1, Some((2, 0))).is_err());
-        assert!(insert_media(editor.project(), 1, Some((1, 60))).is_err());
-        assert_eq!(insert_media(editor.project(), 1, None).unwrap().start, 0);
+        for (track_id, audio) in [(2, false), (3, false), (0, true)] {
+            let mut clip = title(track_id + 10, 0);
+            clip.content = ClipContent::Media { media_id: 1 };
+            clip.linked_audio = audio;
+            assert!(full.apply(Command::InsertClip { track_id, clip }));
+        }
+        let detached = detach_audio(full.project(), &[(0, 10)]).unwrap();
+        assert_eq!(detached.tracks.len(), 5);
+        assert_eq!(detached.tracks[4].kind, TrackKind::Audio);
+        assert_eq!(detached.tracks[4].clips.len(), 1);
+        assert!(full.apply(Command::ReplaceTracks(detached.tracks)));
     }
 }

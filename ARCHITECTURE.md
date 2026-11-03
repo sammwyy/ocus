@@ -64,9 +64,13 @@ project and applied as one `ReplaceTracks` command, so it undoes in one step
 and the project's own validation still rejects overlaps. Drag previews and
 the rubber band are transient UI state. It does
 not composite simultaneous video/title layers; title edits, split/move/trim/delete,
-audio clip settings, and ripple delete use project commands. Video sources
-with audio add aligned clips to both tracks; later edits to those clips are
-not linked yet. Audio, the preview compositor, title rendering, and full
+audio clip settings, track creation/removal and ripple delete use project
+commands. A video with sound is inserted as one clip with `linked_audio`, an
+optional field that keeps version 1 files readable (absent means false), so
+any edit of the clip also edits its sound; validation only allows it on video
+tracks for video sources with audio. Detaching turns it into an aligned clip on
+an audio track. Context menus and the drag label are UI overlays drawn as
+absolutely positioned layers above the workspace. Audio, the preview compositor, title rendering, and full
 A/V export remain unimplemented.
 
 ## Where new work belongs

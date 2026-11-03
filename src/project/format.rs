@@ -70,6 +70,7 @@ mod tests {
             content: ClipContent::Media { media_id: 4 },
             volume: 1.0,
             muted: false,
+            linked_audio: false,
         }]);
         fixture["tracks"][1]["clips"] = serde_json::json!([Clip {
             id: 9,
@@ -86,6 +87,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            linked_audio: false,
         }]);
         let project = from_json(&fixture.to_string()).unwrap();
         assert_eq!(from_json(&to_json(&project).unwrap()).unwrap(), project);
@@ -130,11 +132,25 @@ mod tests {
             content: ClipContent::Media { media_id: 8 },
             volume: 1.0,
             muted: false,
+            linked_audio: false,
         };
         document["tracks"][0]["clips"] = serde_json::json!([clip.clone()]);
         document["tracks"][2]["clips"] = serde_json::json!([Clip { id: 10, ..clip }]);
         let project = from_json(&document.to_string()).unwrap();
         assert_eq!(from_json(&to_json(&project).unwrap()).unwrap(), project);
+        assert!(!to_json(&project).unwrap().contains("linked_audio"));
+
+        document["tracks"][2]["clips"] = serde_json::json!([]);
+        document["tracks"][0]["clips"][0]["linked_audio"] = serde_json::json!(true);
+        let linked = from_json(&document.to_string()).unwrap();
+        assert!(linked.tracks()[0].clips[0].linked_audio);
+        assert_eq!(from_json(&to_json(&linked).unwrap()).unwrap(), linked);
+        document["media"][0]["has_audio"] = serde_json::json!(false);
+        assert!(from_json(&document.to_string()).is_err());
+        document["media"][0]["has_audio"] = serde_json::json!(true);
+        document["tracks"][2]["clips"] = document["tracks"][0]["clips"].clone();
+        document["tracks"][0]["clips"] = serde_json::json!([]);
+        assert!(from_json(&document.to_string()).is_err());
     }
 
     #[test]

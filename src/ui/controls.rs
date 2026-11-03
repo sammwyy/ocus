@@ -94,7 +94,7 @@ pub(super) fn short_duration(seconds: f64) -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Glyph {
+pub(crate) enum Glyph {
     Play,
     Pause,
     StepBack,
@@ -129,6 +129,10 @@ pub(super) enum Glyph {
     Save,
     Document,
     Locate,
+    Copy,
+    Link,
+    Unlink,
+    Tracks,
 }
 
 struct Pen<'a> {
@@ -426,6 +430,34 @@ pub(super) fn draw_glyph(painter: &mut dyn Painter, glyph: Glyph, rect: Rect, co
             pen.line(&[(2.5, 12.0), (5.5, 12.0)]);
             pen.line(&[(18.5, 12.0), (21.5, 12.0)]);
         }
+        Glyph::Copy => {
+            pen.outline(8.0, 8.0, 12.0, 12.0);
+            pen.line(&[
+                (16.0, 8.0),
+                (16.0, 4.0),
+                (4.0, 4.0),
+                (4.0, 16.0),
+                (8.0, 16.0),
+            ]);
+        }
+        Glyph::Link | Glyph::Unlink => {
+            pen.arc((8.0, 12.0), 4.5, 90.0, 270.0);
+            pen.arc((16.0, 12.0), 4.5, -90.0, 90.0);
+            pen.line(&[(8.0, 7.5), (10.0, 7.5)]);
+            pen.line(&[(8.0, 16.5), (10.0, 16.5)]);
+            pen.line(&[(14.0, 7.5), (16.0, 7.5)]);
+            pen.line(&[(14.0, 16.5), (16.0, 16.5)]);
+            if glyph == Glyph::Link {
+                pen.line(&[(8.5, 12.0), (15.5, 12.0)]);
+            } else {
+                pen.line(&[(11.0, 4.0), (13.0, 20.0)]);
+            }
+        }
+        Glyph::Tracks => {
+            pen.bar(3.0, 5.0, 18.0, 3.5);
+            pen.bar(3.0, 10.5, 12.0, 3.5);
+            pen.bar(3.0, 16.0, 15.0, 3.5);
+        }
         Glyph::Picture | Glyph::Search | Glyph::Folder => {}
     }
 }
@@ -687,6 +719,7 @@ pub(super) fn media_item(
         y: rect.y + position.y,
     };
     let (click, start, drag, end) = (state.clone(), state.clone(), state.clone(), state.clone());
+    let menu = state.clone();
     let background = if selected { SURFACE } else { PANEL_RAISED };
     Box::new(
         RawButton::new(style, move || click.select_media(media_id))
@@ -695,6 +728,7 @@ pub(super) fn media_item(
             })
             .with_drag(move |position, rect| drag.drag_pointer(window(position, rect)))
             .with_drag_end(move || end.end_media_drag())
+            .with_context_menu(move |point| menu.open_media_menu(media_id, point))
             .with_children(children)
             .background(background)
             .border(if selected { ACCENT } else { BORDER }, 1.0)
@@ -937,6 +971,121 @@ impl Widget for DragOverlay {
             TextAlign::Start,
         );
     }
+}
+
+/// A plain container with an explicit style, optionally catching clicks and
+/// blocking the pointer from reaching what is painted underneath it.
+pub(super) struct Layer {
+    pub style: creamui::Style,
+    pub children: Vec<BoxedWidget>,
+    pub on_click: Option<Rc<dyn Fn()>>,
+}
+
+impl Layer {
+    /// A layer at `x`, `y` (window coordinates) with the given size.
+    pub(super) fn at(x: f32, y: f32, width: f32, height: f32) -> creamui::Style {
+        Style {
+            position: Position::Absolute,
+            inset: creamui::core::layout::Rect {
+                left: LengthPercentageAuto::Length(x),
+                top: LengthPercentageAuto::Length(y),
+                right: LengthPercentageAuto::Auto,
+                bottom: LengthPercentageAuto::Auto,
+            },
+            ..Style::default().size(width, height)
+        }
+        .into()
+    }
+}
+
+impl Widget for Layer {
+    fn style(&self) -> creamui::Style {
+        self.style.clone()
+    }
+
+    fn paint(&self, _painter: &mut dyn Painter, _rect: Rect) {}
+
+    fn children(&mut self) -> Vec<BoxedWidget> {
+        std::mem::take(&mut self.children)
+    }
+
+    fn blocks_pointer(&self) -> bool {
+        self.on_click.is_some()
+    }
+
+    fn on_click(&self) -> Option<Rc<dyn Fn()>> {
+        self.on_click.clone()
+    }
+
+    fn on_context_menu(&self) -> Option<Rc<dyn Fn(Point)>> {
+        let close = self.on_click.clone()?;
+        Some(Rc::new(move |_| close()))
+    }
+}
+
+/// One row of a context menu.
+pub(super) fn menu_row(
+    icon: Option<Glyph>,
+    label: &str,
+    shortcut: &str,
+    enabled: bool,
+    danger: bool,
+    state: &UiState,
+    operation: impl Fn(&UiState) + 'static,
+) -> BoxedWidget {
+    let color = match (enabled, danger) {
+        (false, _) => FAINT,
+        (true, true) => PLAYHEAD.mix(TEXT, 0.25),
+        (true, false) => TEXT,
+    };
+    let state = state.clone();
+    let style = Style::default()
+        .flex_row()
+        .align(Align::Center)
+        .gap(10.0)
+        .height(28.0)
+        .padding_xy(10.0, 0.0);
+    let hover = if !enabled {
+        CLEAR
+    } else if danger {
+        Color::rgba(255, 94, 94, 36)
+    } else {
+        Color::rgba(92, 208, 190, 34)
+    };
+    Box::new(
+        RawButton::new(style, move || operation(&state))
+            .with_children(vec![
+                match icon {
+                    Some(icon) => glyph(
+                        icon,
+                        if !enabled {
+                            FAINT
+                        } else if danger {
+                            color
+                        } else {
+                            MUTED
+                        },
+                        15.0,
+                    ),
+                    None => Box::new(GlyphView {
+                        glyph: Glyph::Minus,
+                        color: CLEAR,
+                        size: 15.0,
+                    }),
+                },
+                Box::new(
+                    creamui::widgets::layout::Flex::row()
+                        .grow(1.0)
+                        .child(text(label, color, 12.0)),
+                ),
+                text(shortcut, FAINT, 10.0),
+            ])
+            .disabled(!enabled)
+            .corner_radius(6.0)
+            .hover_style(StateStyle::new().background(hover))
+            .pressed_style(StateStyle::new().background(hover.mix(BACKGROUND, 0.3)))
+            .focus_style(StateStyle::new().background(hover)),
+    )
 }
 
 #[cfg(test)]

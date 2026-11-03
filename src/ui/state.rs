@@ -1,5 +1,5 @@
 use super::edits::{self, ClipRef};
-use super::interaction::{DragState, Gesture};
+use super::interaction::{DragState, Gesture, MenuState};
 use crate::export::{self, ExportControl};
 use crate::media::preview::{
     FrameImage, FrameSource, PreviewEvent, PreviewPlan, StoryboardKey, decode_sequence, storyboard,
@@ -7,7 +7,7 @@ use crate::media::preview::{
 use crate::media::{Media, MediaKind, MediaProbe, Thumbnail, probe, thumbnail};
 use crate::project::{Command, Editor, Project, store};
 use crate::timeline::{Clip, ClipContent, TrackKind};
-use creamui::core::{Modifiers, Rect, RgbaImage};
+use creamui::core::{Modifiers, Point, Rect, RgbaImage};
 use creamui::widgets::{ScrollController, TextController};
 use creamui::{AppHandle, GpuFrame, GpuFrameSlot, Signal, WindowHandle};
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
@@ -109,6 +109,7 @@ pub(crate) struct UiState {
     pub inspector_scroll: ScrollController,
     pub timeline_start: Signal<u64>,
     pub timeline_zoom: Signal<usize>,
+    pub track_scroll: Signal<f32>,
     pub timeline_expanded: Signal<bool>,
     pub gesture: Rc<RefCell<Gesture>>,
     pub drag: Signal<Option<DragState>>,
@@ -116,6 +117,8 @@ pub(crate) struct UiState {
     pub timeline_rect: Rc<Cell<Rect>>,
     pub modifiers: Rc<Cell<Modifiers>>,
     pub clipboard: Rc<RefCell<Vec<(u64, Clip)>>>,
+    pub menu: Signal<Option<MenuState>>,
+    pub pointer: Rc<Cell<Point>>,
     pub sidebar: Signal<Sidebar>,
     app: Rc<RefCell<Option<AppHandle>>>,
     window: Rc<RefCell<Option<WindowHandle>>>,
@@ -151,6 +154,7 @@ impl UiState {
             inspector_scroll: ScrollController::default(),
             timeline_start: Signal::new(0),
             timeline_zoom: Signal::new(DEFAULT_ZOOM),
+            track_scroll: Signal::new(0.0),
             timeline_expanded: Signal::new(false),
             gesture: Rc::new(RefCell::new(Gesture::Idle)),
             drag: Signal::new(None),
@@ -158,6 +162,8 @@ impl UiState {
             timeline_rect: Rc::new(Cell::new(Rect::default())),
             modifiers: Rc::new(Cell::new(Modifiers::default())),
             clipboard: Rc::new(RefCell::new(Vec::new())),
+            menu: Signal::new(None),
+            pointer: Rc::new(Cell::new(Point::default())),
             sidebar: Signal::new(Sidebar::Media),
             app: Rc::new(RefCell::new(None)),
             window: Rc::new(RefCell::new(None)),
@@ -180,6 +186,23 @@ impl UiState {
     }
 
     fn refresh_after_edit(&self, status: &str) {
+        let existing: HashSet<_> = self
+            .editor
+            .borrow()
+            .project()
+            .tracks()
+            .iter()
+            .flat_map(|track| track.clips.iter().map(|clip| (track.id, clip.id)))
+            .collect();
+        let selection = self.selected.peek();
+        if selection.iter().any(|clip| !existing.contains(clip)) {
+            self.select_clips(
+                selection
+                    .into_iter()
+                    .filter(|clip| existing.contains(clip))
+                    .collect(),
+            );
+        }
         self.revision.update(|revision| *revision += 1);
         self.dirty.set(true);
         self.status.set(status.into());
@@ -1359,7 +1382,7 @@ mod tests {
     }
 
     #[test]
-    fn inserting_video_with_audio_aligns_tracks_and_undoes_together() {
+    fn inserting_video_with_audio_links_its_sound_and_undoes_in_one_step() {
         let state = UiState::new();
         assert!(state.edit(Command::ImportMedia(Media {
             id: 4,
@@ -1371,16 +1394,22 @@ mod tests {
         state.insert_media(4);
         let editor = state.editor.borrow();
         let video = &editor.project().tracks()[0].clips;
-        let audio = &editor.project().tracks()[2].clips;
         assert_eq!(video.len(), 1);
-        assert_eq!(audio.len(), 1);
-        assert_eq!(video[0].start_frame, audio[0].start_frame);
-        assert_eq!(video[0].duration_frames, audio[0].duration_frames);
-        assert_ne!(video[0].id, audio[0].id);
+        assert!(video[0].linked_audio);
+        assert!(editor.project().tracks()[2].clips.is_empty());
         drop(editor);
+        state.detach_audio();
+        let editor = state.editor.borrow();
+        assert!(!editor.project().tracks()[0].clips[0].linked_audio);
+        assert_eq!(editor.project().tracks()[2].clips[0].duration_frames, 60);
+        drop(editor);
+        assert_eq!(state.selected.peek().len(), 2);
+        state.link_audio();
+        assert!(state.editor.borrow().project().tracks()[0].clips[0].linked_audio);
+        state.undo();
+        state.undo();
         state.undo();
         assert!(state.editor.borrow().project().tracks()[0].clips.is_empty());
-        assert!(state.editor.borrow().project().tracks()[2].clips.is_empty());
     }
 
     #[test]

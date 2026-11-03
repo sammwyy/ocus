@@ -422,6 +422,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                linked_audio: false,
             },
         }));
         let progress = std::sync::Arc::new(super::ExportControl::default());
@@ -532,6 +533,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                linked_audio: false,
             },
         }));
         super::render(editor.project(), &target).unwrap();

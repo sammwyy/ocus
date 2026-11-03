@@ -288,10 +288,11 @@ impl Editor {
                     .tracks
                     .iter_mut()
                     .find(|track| track.id == track_id)?;
-                if track.kind != TrackKind::Audio {
+                let audio_track = track.kind == TrackKind::Audio;
+                let clip = track.clips.iter_mut().find(|clip| clip.id == clip_id)?;
+                if !audio_track && !clip.linked_audio {
                     return None;
                 }
-                let clip = track.clips.iter_mut().find(|clip| clip.id == clip_id)?;
                 if clip.volume == volume && clip.muted == muted {
                     return None;
                 }
@@ -418,6 +419,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            linked_audio: false,
         };
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
@@ -464,6 +466,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            linked_audio: false,
         };
         let insert =
             |editor: &mut Editor, clip| editor.apply(Command::InsertClip { track_id: 0, clip });
@@ -526,6 +529,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            linked_audio: false,
         };
         for (id, start_frame, track_id) in [(1, 0, 0), (2, 30, 0), (3, 30, 1)] {
             assert!(editor.apply(Command::InsertClip {
@@ -609,6 +613,7 @@ mod tests {
                     }),
                     volume: 1.0,
                     muted: false,
+                    linked_audio: false,
                 },
             }));
         }
@@ -638,6 +643,7 @@ mod tests {
             content: ClipContent::Media { media_id: 1 },
             volume: 1.0,
             muted: false,
+            linked_audio: false,
         };
         assert!(!editor.apply(Command::InsertClip {
             track_id: 2,
@@ -676,6 +682,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                linked_audio: false,
             },
         }));
         let known = Media {
@@ -693,6 +700,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                linked_audio: false,
             },
         }));
         assert!(!editor.apply(Command::ReprobeMedia(Media {
@@ -725,6 +733,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                linked_audio: false,
             },
         }));
         assert!(!editor.apply(Command::SetClipAudio {

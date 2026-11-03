@@ -3,11 +3,12 @@
 //! still go through [`UiState::edit`].
 
 use super::UiState;
+use super::controls::Glyph;
 use super::edits::{self, ClipRef};
-use super::timeline_view::{Geometry, Ghost};
+use super::timeline_view::{Geometry, Ghost, lane_weight};
 use crate::media::MediaKind;
 use crate::project::Command;
-use crate::timeline::TrackKind;
+use crate::timeline::{ClipContent, TrackKind};
 use creamui::core::{Key, Modifiers, Point};
 use creamui::platform::Key as PlatformKey;
 use creamui::{Shortcut, ShortcutScope, WindowHandle};
@@ -183,6 +184,8 @@ impl UiState {
         let state = self.clone();
         window.on_files_dropped_at(move |paths, point| state.drop_files(paths, point));
         let state = self.clone();
+        window.on_pointer_moved(move |point| state.pointer.set(point));
+        let state = self.clone();
         window.on_keyboard_input(move |event, held| {
             let mut modifiers = Modifiers {
                 ctrl: held.ctrl,
@@ -221,7 +224,9 @@ impl UiState {
             Action::RippleDelete => self.delete_selection(true),
             Action::SelectAll => self.select_all(),
             Action::Escape => {
-                if self.drag.peek().is_some() {
+                if self.menu.peek().is_some() {
+                    self.close_menu();
+                } else if self.drag.peek().is_some() {
                     self.cancel_drag();
                 } else {
                     self.select_clip(None);
@@ -281,7 +286,12 @@ impl UiState {
     }
 
     pub fn add_title(&self) -> bool {
-        let Some((track_id, clip)) = edits::title_clip(self.editor.borrow().project()) else {
+        self.add_title_at(None)
+    }
+
+    pub fn add_title_at(&self, placement: Option<(u64, u64)>) -> bool {
+        let title = edits::title_clip(self.editor.borrow().project(), placement);
+        let Some((track_id, clip)) = title else {
             return false;
         };
         let (id, start) = (clip.id, clip.start_frame);
@@ -479,19 +489,20 @@ impl UiState {
     }
 
     fn timeline_geometry(&self) -> Geometry {
-        let kinds: Vec<_> = self
+        let weights: Vec<_> = self
             .editor
             .borrow()
             .project()
             .tracks()
             .iter()
-            .map(|track| track.kind)
+            .map(|track| lane_weight(track.kind, track.clips.iter().any(|clip| clip.linked_audio)))
             .collect();
         Geometry::new(
             self.timeline_rect.get(),
-            &kinds,
+            &weights,
             self.timeline_start.peek(),
             self.visible_frames(),
+            self.track_scroll.peek(),
         )
     }
 
@@ -702,6 +713,566 @@ impl UiState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum MenuCommand {
+    Action(Action),
+    Seek(u64),
+    PasteAt(u64),
+    TitleAt(u64, u64),
+    DetachAudio,
+    LinkAudio,
+    ToggleMute,
+    AddTrack(TrackKind),
+    RemoveTrack(u64),
+    SelectTrack(u64),
+    InsertMedia(u64),
+    InsertMediaAt(u64, u64),
+    ShowMedia(u64),
+    RemoveMedia(u64),
+}
+
+/// One row of a context menu; `command: None` draws a separator.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MenuEntry {
+    pub label: String,
+    pub icon: Option<Glyph>,
+    pub shortcut: &'static str,
+    pub enabled: bool,
+    pub danger: bool,
+    pub command: Option<MenuCommand>,
+}
+
+impl MenuEntry {
+    fn new(
+        label: impl Into<String>,
+        icon: Glyph,
+        shortcut: &'static str,
+        command: MenuCommand,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            icon: Some(icon),
+            shortcut,
+            enabled: true,
+            danger: false,
+            command: Some(command),
+        }
+    }
+
+    fn separator() -> Self {
+        Self {
+            label: String::new(),
+            icon: None,
+            shortcut: "",
+            enabled: false,
+            danger: false,
+            command: None,
+        }
+    }
+
+    fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    fn danger(mut self) -> Self {
+        self.danger = true;
+        self
+    }
+}
+
+/// An open context menu; `anchor` is in window coordinates.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MenuState {
+    pub anchor: Point,
+    pub title: String,
+    pub entries: Vec<MenuEntry>,
+}
+
+impl UiState {
+    pub fn close_menu(&self) {
+        if self.menu.peek().is_some() {
+            self.menu.set(None);
+        }
+    }
+
+    fn open_menu(&self, anchor: Point, title: impl Into<String>, entries: Vec<MenuEntry>) {
+        self.cancel_drag();
+        self.menu.set(Some(MenuState {
+            anchor,
+            title: title.into(),
+            entries,
+        }));
+    }
+
+    pub fn run_menu(&self, command: MenuCommand) {
+        self.close_menu();
+        match command {
+            MenuCommand::Action(action) => self.run(action),
+            MenuCommand::Seek(frame) => self.seek(frame),
+            MenuCommand::PasteAt(frame) => self.paste(Some(frame)),
+            MenuCommand::TitleAt(track_id, frame) => {
+                if !self.add_title_at(Some((track_id, frame))) {
+                    self.status.set("There is no room for a title here".into());
+                }
+            }
+            MenuCommand::DetachAudio => self.detach_audio(),
+            MenuCommand::LinkAudio => self.link_audio(),
+            MenuCommand::ToggleMute => self.toggle_mute(),
+            MenuCommand::AddTrack(kind) => self.add_track(kind),
+            MenuCommand::RemoveTrack(track_id) => self.remove_track(track_id),
+            MenuCommand::SelectTrack(track_id) => {
+                let clips = self
+                    .editor
+                    .borrow()
+                    .project()
+                    .tracks()
+                    .iter()
+                    .filter(|track| track.id == track_id)
+                    .flat_map(|track| track.clips.iter().map(|clip| (track.id, clip.id)))
+                    .collect();
+                self.select_clips(clips);
+            }
+            MenuCommand::InsertMedia(media_id) => self.insert_media(media_id),
+            MenuCommand::InsertMediaAt(media_id, frame) => {
+                let track = self
+                    .editor
+                    .borrow()
+                    .project()
+                    .tracks()
+                    .iter()
+                    .find_map(|track| {
+                        edits::compatible_track(self.editor.borrow().project(), media_id, track.id)
+                    });
+                if let Some(track) = track {
+                    self.insert_media_at(media_id, Some((track, frame)));
+                }
+            }
+            MenuCommand::ShowMedia(media_id) => self.select_media(media_id),
+            MenuCommand::RemoveMedia(media_id) => {
+                if self.edit(Command::RemoveMedia(media_id)) {
+                    self.selected_media.set(None);
+                    self.status.set("Source removed from the project".into());
+                }
+            }
+        }
+    }
+
+    pub fn add_track(&self, kind: TrackKind) {
+        let planned = edits::add_track(self.editor.borrow().project(), kind);
+        if let Some((tracks, _)) = planned {
+            self.edit(Command::ReplaceTracks(tracks));
+        }
+    }
+
+    pub fn remove_track(&self, track_id: u64) {
+        let planned = edits::remove_track(self.editor.borrow().project(), track_id);
+        match planned {
+            Ok(tracks) => {
+                self.edit(Command::ReplaceTracks(tracks));
+            }
+            Err(error) => self.status.set(error),
+        }
+    }
+
+    pub fn detach_audio(&self) {
+        let planned = edits::detach_audio(self.editor.borrow().project(), &self.selected.peek());
+        match planned {
+            Some(planned) => {
+                if self.edit(Command::ReplaceTracks(planned.tracks)) {
+                    self.select_clips(planned.selection);
+                    self.status.set("Audio detached onto its own track".into());
+                }
+            }
+            None => self
+                .status
+                .set("Select a video clip with sound to detach its audio".into()),
+        }
+    }
+
+    pub fn link_audio(&self) {
+        let planned = edits::link_audio(self.editor.borrow().project(), &self.selected.peek());
+        match planned {
+            Some(planned) => {
+                if self.edit(Command::ReplaceTracks(planned.tracks)) {
+                    self.select_clips(planned.selection);
+                    self.status.set("Audio linked to its video again".into());
+                }
+            }
+            None => self
+                .status
+                .set("Select a video clip and its matching audio clip to link them".into()),
+        }
+    }
+
+    /// Whether the selection contains a video clip with linked audio, and a
+    /// pair that could be linked.
+    pub fn audio_link_state(&self) -> (bool, bool) {
+        let editor = self.editor.borrow();
+        let selection = self.selected.peek();
+        let detachable = selection.iter().any(|&(track_id, clip_id)| {
+            editor.project().tracks().iter().any(|track| {
+                track.id == track_id
+                    && track
+                        .clips
+                        .iter()
+                        .any(|clip| clip.id == clip_id && clip.linked_audio)
+            })
+        });
+        (
+            detachable,
+            edits::link_audio(editor.project(), &selection).is_some(),
+        )
+    }
+
+    /// Selected clips that make sound, and whether all of them are muted.
+    fn audible_selection(&self) -> (Vec<ClipRef>, bool) {
+        let editor = self.editor.borrow();
+        let selection = self.selected.peek();
+        let clips: Vec<_> = editor
+            .project()
+            .tracks()
+            .iter()
+            .flat_map(|track| {
+                track
+                    .clips
+                    .iter()
+                    .filter(move |clip| {
+                        matches!(clip.content, ClipContent::Media { .. })
+                            && (track.kind == TrackKind::Audio || clip.linked_audio)
+                    })
+                    .map(move |clip| ((track.id, clip.id), clip.muted))
+            })
+            .filter(|(clip, _)| selection.contains(clip))
+            .collect();
+        let all_muted = !clips.is_empty() && clips.iter().all(|(_, muted)| *muted);
+        (clips.into_iter().map(|(clip, _)| clip).collect(), all_muted)
+    }
+
+    pub fn toggle_mute(&self) {
+        let (clips, all_muted) = self.audible_selection();
+        if clips.is_empty() {
+            return;
+        }
+        let mut tracks = self.editor.borrow().project().tracks().to_vec();
+        for track in &mut tracks {
+            let id = track.id;
+            for clip in &mut track.clips {
+                if clips.contains(&(id, clip.id)) {
+                    clip.muted = !all_muted;
+                }
+            }
+        }
+        self.edit(Command::ReplaceTracks(tracks));
+    }
+
+    fn track_entries(&self, track: Option<(u64, String)>) -> Vec<MenuEntry> {
+        let mut entries = vec![
+            MenuEntry::new(
+                "Add video track",
+                Glyph::Film,
+                "",
+                MenuCommand::AddTrack(TrackKind::Video),
+            ),
+            MenuEntry::new(
+                "Add audio track",
+                Glyph::Music,
+                "",
+                MenuCommand::AddTrack(TrackKind::Audio),
+            ),
+        ];
+        if let Some((track_id, label)) = track {
+            let removable = edits::remove_track(self.editor.borrow().project(), track_id).is_ok();
+            entries.push(MenuEntry::new(
+                format!("Select all on {label}"),
+                Glyph::List,
+                "",
+                MenuCommand::SelectTrack(track_id),
+            ));
+            entries.push(MenuEntry::separator());
+            entries.push(
+                MenuEntry::new(
+                    format!("Delete track {label}"),
+                    Glyph::Trash,
+                    "",
+                    MenuCommand::RemoveTrack(track_id),
+                )
+                .enabled(removable)
+                .danger(),
+            );
+        }
+        entries
+    }
+
+    /// Opens the track menu at the pointer, for toolbar buttons.
+    pub fn open_tracks_menu(&self) {
+        let entries = self.track_entries(None);
+        self.open_menu(self.pointer.get(), "Tracks", entries);
+    }
+
+    /// Opens the right-click menu for whatever is under `point` (window
+    /// coordinates) on the timeline: a clip, a gap, or a track header.
+    pub fn open_timeline_menu(&self, point: Point) {
+        let geometry = self.timeline_geometry();
+        let Some(lane) = geometry
+            .lane_at(point.y)
+            .filter(|_| point.y >= geometry.top())
+        else {
+            return;
+        };
+        let (track_id, kind, label, hit) = {
+            let editor = self.editor.borrow();
+            let tracks = editor.project().tracks();
+            let Some(track) = tracks.get(lane) else {
+                return;
+            };
+            let number = tracks[..=lane]
+                .iter()
+                .filter(|t| t.kind == track.kind)
+                .count();
+            let label = format!(
+                "{}{number}",
+                if track.kind == TrackKind::Video {
+                    "V"
+                } else {
+                    "A"
+                }
+            );
+            let frame = geometry.frame_at(point.x).max(0.0) as u64;
+            let hit = (point.x >= geometry.left())
+                .then(|| {
+                    track
+                        .clips
+                        .iter()
+                        .find(|clip| {
+                            clip.start_frame <= frame
+                                && frame - clip.start_frame < clip.duration_frames
+                        })
+                        .map(|clip| (track.id, clip.id))
+                })
+                .flatten();
+            (track.id, track.kind, label, hit)
+        };
+        if point.x < geometry.left() {
+            let entries = self.track_entries(Some((track_id, label.clone())));
+            self.open_menu(point, format!("Track {label}"), entries);
+            return;
+        }
+        let frame = geometry.frame_at(point.x).max(0.0).round() as u64;
+        let can_paste = !self.clipboard.borrow().is_empty();
+        let Some(clip) = hit else {
+            let mut entries = vec![
+                MenuEntry::new("Paste here", Glyph::Import, "", MenuCommand::PasteAt(frame))
+                    .enabled(can_paste),
+            ];
+            if kind == TrackKind::Video {
+                entries.push(MenuEntry::new(
+                    "Add title here",
+                    Glyph::Title,
+                    "",
+                    MenuCommand::TitleAt(track_id, frame),
+                ));
+            }
+            entries.push(MenuEntry::new(
+                "Move playhead here",
+                Glyph::Locate,
+                "",
+                MenuCommand::Seek(frame),
+            ));
+            entries.push(MenuEntry::new(
+                "Select all",
+                Glyph::Grid,
+                "Ctrl A",
+                MenuCommand::Action(Action::SelectAll),
+            ));
+            entries.push(MenuEntry::separator());
+            entries.extend(self.track_entries(Some((track_id, label.clone()))));
+            self.open_menu(point, format!("Track {label}"), entries);
+            return;
+        };
+        if !self.selected.peek().contains(&clip) {
+            self.select_clip(Some(clip));
+        }
+        let count = self.selected.peek().len();
+        let (detachable, linkable) = self.audio_link_state();
+        let (audible, all_muted) = self.audible_selection();
+        let mut entries = vec![
+            MenuEntry::new(
+                "Cut",
+                Glyph::Split,
+                "Ctrl X",
+                MenuCommand::Action(Action::Cut),
+            ),
+            MenuEntry::new(
+                "Copy",
+                Glyph::Copy,
+                "Ctrl C",
+                MenuCommand::Action(Action::Copy),
+            ),
+            MenuEntry::new(
+                "Paste at playhead",
+                Glyph::Import,
+                "Ctrl V",
+                MenuCommand::Action(Action::Paste),
+            )
+            .enabled(can_paste),
+            MenuEntry::new(
+                "Duplicate",
+                Glyph::Copy,
+                "Ctrl D",
+                MenuCommand::Action(Action::Duplicate),
+            ),
+            MenuEntry::separator(),
+            MenuEntry::new(
+                "Split at playhead",
+                Glyph::Split,
+                "S",
+                MenuCommand::Action(Action::Split),
+            )
+            .enabled(!self.split_targets().is_empty()),
+        ];
+        if detachable {
+            entries.push(MenuEntry::new(
+                "Detach audio",
+                Glyph::Unlink,
+                "",
+                MenuCommand::DetachAudio,
+            ));
+        }
+        if linkable {
+            entries.push(MenuEntry::new(
+                "Link audio",
+                Glyph::Link,
+                "",
+                MenuCommand::LinkAudio,
+            ));
+        }
+        if !audible.is_empty() {
+            entries.push(MenuEntry::new(
+                if all_muted {
+                    "Unmute audio"
+                } else {
+                    "Mute audio"
+                },
+                if all_muted {
+                    Glyph::Volume
+                } else {
+                    Glyph::Mute
+                },
+                "",
+                MenuCommand::ToggleMute,
+            ));
+        }
+        entries.push(MenuEntry::separator());
+        entries.push(
+            MenuEntry::new(
+                "Delete",
+                Glyph::Trash,
+                "Del",
+                MenuCommand::Action(Action::Delete),
+            )
+            .danger(),
+        );
+        entries.push(
+            MenuEntry::new(
+                "Ripple delete",
+                Glyph::Ripple,
+                "Shift Del",
+                MenuCommand::Action(Action::RippleDelete),
+            )
+            .danger(),
+        );
+        let title = if count == 1 {
+            label_of_clip(self, clip)
+        } else {
+            format!("{count} clips")
+        };
+        self.open_menu(point, title, entries);
+    }
+
+    pub fn open_media_menu(&self, media_id: u64, point: Point) {
+        let editor = self.editor.borrow();
+        let project = editor.project();
+        let Some(media) = project.media().iter().find(|media| media.id == media_id) else {
+            return;
+        };
+        let name = media.path.file_name().map_or_else(
+            || "Source".into(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let insertable = super::state::media_frames(
+            media,
+            (
+                project.settings().frame_rate.numerator,
+                project.settings().frame_rate.denominator,
+            ),
+        )
+        .is_some();
+        let used = project
+            .tracks()
+            .iter()
+            .flat_map(|track| &track.clips)
+            .any(|clip| clip.content == ClipContent::Media { media_id });
+        drop(editor);
+        let playhead = self.program.position.peek();
+        self.open_menu(
+            point,
+            name,
+            vec![
+                MenuEntry::new(
+                    "Insert at end",
+                    Glyph::Plus,
+                    "",
+                    MenuCommand::InsertMedia(media_id),
+                )
+                .enabled(insertable),
+                MenuEntry::new(
+                    "Insert at playhead",
+                    Glyph::Locate,
+                    "",
+                    MenuCommand::InsertMediaAt(media_id, playhead),
+                )
+                .enabled(insertable),
+                MenuEntry::new(
+                    "Open in source monitor",
+                    Glyph::Play,
+                    "",
+                    MenuCommand::ShowMedia(media_id),
+                ),
+                MenuEntry::separator(),
+                MenuEntry::new(
+                    "Remove from project",
+                    Glyph::Trash,
+                    "",
+                    MenuCommand::RemoveMedia(media_id),
+                )
+                .enabled(!used)
+                .danger(),
+            ],
+        );
+    }
+}
+
+fn label_of_clip(state: &UiState, (track_id, clip_id): ClipRef) -> String {
+    let editor = state.editor.borrow();
+    let project = editor.project();
+    let clip = project
+        .tracks()
+        .iter()
+        .find(|track| track.id == track_id)
+        .and_then(|track| track.clips.iter().find(|clip| clip.id == clip_id));
+    match clip.map(|clip| &clip.content) {
+        Some(ClipContent::Title(title)) => title.text.clone(),
+        Some(ClipContent::Media { media_id }) => project
+            .media()
+            .iter()
+            .find(|media| media.id == *media_id)
+            .and_then(|media| media.path.file_name())
+            .map_or_else(|| "Clip".into(), |name| name.to_string_lossy().into_owned()),
+        None => "Clip".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -754,8 +1325,9 @@ mod tests {
         assert_eq!(starts(&state, 0), vec![0, 90, 300, 390]);
         state.run(Action::Undo);
         assert_eq!(starts(&state, 0), vec![0, 90]);
+        assert!(state.selected.peek().is_empty());
         state.run(Action::Redo);
-        assert_eq!(state.selected.peek().len(), 2);
+        state.select_clips(vec![(0, 3), (0, 4)]);
         state.run(Action::NudgeRight);
         assert_eq!(starts(&state, 0), vec![0, 90, 301, 391]);
         state.run(Action::Cut);
@@ -773,5 +1345,80 @@ mod tests {
         state.run(Action::ToEnd);
         state.run(Action::StepBack);
         assert_eq!(state.program.position.peek(), 0);
+    }
+
+    #[test]
+    fn right_click_menus_offer_clip_gap_and_track_actions() {
+        use crate::media::Media;
+        use creamui::core::Rect;
+        let state = UiState::new();
+        state.timeline_rect.set(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1128.0,
+            height: 300.0,
+        });
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "scene.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: true,
+        })));
+        state.insert_media(1);
+        state.select_clip(None);
+        let labels = |state: &UiState| {
+            state
+                .menu
+                .peek()
+                .map(|menu| {
+                    menu.entries
+                        .iter()
+                        .filter(|entry| entry.command.is_some())
+                        .map(|entry| entry.label.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        let clip_point = Point {
+            x: 128.0 + 50.0,
+            y: 50.0,
+        };
+        state.open_timeline_menu(clip_point);
+        assert_eq!(state.selected.peek(), vec![(0, 1)]);
+        assert!(labels(&state).contains(&"Detach audio".to_string()));
+        assert!(labels(&state).contains(&"Mute audio".to_string()));
+        state.run_menu(MenuCommand::ToggleMute);
+        assert!(state.editor.borrow().project().tracks()[0].clips[0].muted);
+        state.run_menu(MenuCommand::DetachAudio);
+        assert!(state.menu.peek().is_none());
+        assert_eq!(starts(&state, 2), vec![0]);
+        assert!(state.editor.borrow().project().tracks()[2].clips[0].muted);
+
+        state.open_timeline_menu(Point {
+            x: 128.0 + 900.0,
+            y: 50.0,
+        });
+        let gap = labels(&state);
+        assert!(gap.contains(&"Add title here".to_string()));
+        assert!(gap.contains(&"Delete track V1".to_string()));
+        state.run(Action::Escape);
+        assert!(state.menu.peek().is_none());
+
+        state.run_menu(MenuCommand::AddTrack(TrackKind::Audio));
+        assert_eq!(state.editor.borrow().project().tracks().len(), 5);
+        state.run_menu(MenuCommand::RemoveTrack(2));
+        assert_eq!(state.editor.borrow().project().tracks().len(), 4);
+        assert!(state.selected.peek().iter().all(|(track, _)| *track != 2));
+        state.run(Action::Undo);
+        assert_eq!(state.editor.borrow().project().tracks().len(), 5);
+
+        state.open_media_menu(1, Point::default());
+        let media = labels(&state);
+        assert_eq!(media[0], "Insert at end");
+        assert!(
+            !state.menu.peek().unwrap().entries.last().unwrap().enabled,
+            "a source in use cannot be removed"
+        );
     }
 }

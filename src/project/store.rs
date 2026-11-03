@@ -126,6 +126,7 @@ mod tests {
                 }),
                 volume: 1.0,
                 muted: false,
+                linked_audio: false,
             },
         }));
         save(&path, editor.project()).unwrap();

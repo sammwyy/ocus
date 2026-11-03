@@ -10,8 +10,9 @@ clip commands do not complete the corresponding editor workflows.
   checks with linked AV clips and media path migration/repair.
 - [x] Add project file open/save with atomic writes, external media paths,
   useful errors, and round-trip tests; retain explicit schema-version handling.
-- [ ] Extend existing insert/split/move/trim/delete and probed media
-  import commands with proper drag/drop gestures and linked audio.
+- [ ] Link the video and audio clips created from one source so later edits
+  keep them together; today both are selected after insertion and move
+  together only while both stay selected.
 - [ ] Extend ripple delete across overlapping clips that span the removed range;
   existing implementation rejects these instead of silently dropping footage.
 - [ ] Make all video and audio tracks selectable as destinations from the UI;
@@ -25,8 +26,10 @@ clip commands do not complete the corresponding editor workflows.
   bin without blocking the UI.
 - [x] Render sampled filmstrips for video clips and let clicks seek and select
   clips; add search and source-type filters to the media bin.
-- [ ] Connect direct timeline gestures for moving and trimming clips to
-  project commands; split and ripple delete currently use inspector buttons.
+- [x] Drag clips (one or a multi-selection) along and across tracks with
+  snapping, drag sources from the bin onto a track, and drop files on the
+  window or a track; each drop is one undoable command.
+- [ ] Trim clips by dragging their edges; trimming still uses the inspector.
 - [ ] Generate filmstrips lazily for clips beyond the bounded first 64
   cached source ranges in large projects.
 - [x] Decode video on a worker with a bounded frame buffer; support
@@ -56,8 +59,8 @@ clip commands do not complete the corresponding editor workflows.
 
 - [ ] Wire import, playback, editing, project open/save, and export into the
   window with clear empty, loading, and error states.
-- [ ] Add keyboard shortcuts for the main actions without stealing text
-  input; test scope and focus behavior.
+- [x] Add keyboard shortcuts for the main actions without stealing text
+  input (they are inactive while a text field has focus).
 - [ ] Exercise the roadmap's complete workflow with mixed media, a title,
   volume changes, project reload, and a watchable MP4 export.
 

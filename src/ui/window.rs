@@ -1,16 +1,17 @@
 use super::controls::{
-    ACCENT, AUDIO, BACKGROUND, BORDER, DropZone, ExportMeter, FAINT, Glyph, IMAGE, MUTED, PANEL,
+    ACCENT, AUDIO, BACKGROUND, BORDER, DragOverlay, ExportMeter, FAINT, Glyph, IMAGE, MUTED, PANEL,
     PANEL_RAISED, PLAYHEAD, STAGE, SURFACE, Scrubber, TEXT, TITLE, Thumb, VIDEO, accent_button,
-    chip, fit, glyph, heading, icon_button, kind_color, play_button, secondary_button, selectable,
+    chip, fit, glyph, heading, icon_button, kind_color, media_item, play_button, secondary_button,
     short_duration, sized_icon_button, text, timecode, tool_button,
 };
+use super::interaction::DragPayload;
 use super::state::{MediaView, SourceRange, ZOOM_SECONDS, media_frames};
 use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
 use super::{MediaFilter, Sidebar, UiState};
 use crate::media::preview::StoryboardKey;
 use crate::media::{Media, MediaKind};
 use crate::project::{Command, Project};
-use crate::timeline::{Clip, ClipContent, Title, TrackKind};
+use crate::timeline::{Clip, ClipContent, TrackKind};
 use creamui::core::layout::{Dimension, Style};
 use creamui::widgets::layout::Flex;
 use creamui::widgets::layout::{Align, Grid, Justify, StyleExt};
@@ -18,64 +19,8 @@ use creamui::widgets::{AppTitlebar, RawScrollView, TextController, TextInput};
 use creamui::{BoxedWidget, Color, GpuFrameSlot, GpuViewport, Size, Styled};
 use std::rc::Rc;
 
-fn add_title(state: &UiState) -> bool {
-    let editor = state.editor.borrow();
-    let project = editor.project();
-    let Some(track) = project.tracks().iter().find(|t| t.kind == TrackKind::Video) else {
-        return false;
-    };
-    let track_id = track.id;
-    let Some(start_frame) = track
-        .clips
-        .iter()
-        .map(|clip| clip.start_frame.checked_add(clip.duration_frames))
-        .try_fold(0_u64, |latest, end| Some(latest.max(end?)))
-    else {
-        return false;
-    };
-    let Some(id) = project
-        .tracks()
-        .iter()
-        .flat_map(|track| &track.clips)
-        .map(|clip| clip.id)
-        .max()
-        .unwrap_or(0)
-        .checked_add(1)
-    else {
-        return false;
-    };
-    let command = Command::InsertClip {
-        track_id,
-        clip: Clip {
-            id,
-            start_frame,
-            source_start_frame: 0,
-            duration_frames: (project.settings().frame_rate.numerator as u64).saturating_mul(3)
-                / project.settings().frame_rate.denominator as u64,
-            content: ClipContent::Title(Title {
-                text: format!("Title {id}"),
-                font_family: "Sans".into(),
-                font_size: 64.0,
-                color: [255, 255, 255, 255],
-                x: 0.5,
-                y: 0.5,
-            }),
-            volume: 1.0,
-            muted: false,
-        },
-    };
-    drop(editor);
-    if state.edit(command) {
-        state.select_clip(Some((track_id, id)));
-        state.focus_frame(start_frame);
-        true
-    } else {
-        false
-    }
-}
-
 fn selected_clip(state: &UiState) -> Option<(u64, Clip)> {
-    let (track_id, clip_id) = state.selected.get()?;
+    let (track_id, clip_id) = state.selected.get().last().copied()?;
     state
         .editor
         .borrow()
@@ -120,29 +65,6 @@ fn set_title_text(state: &UiState) {
     {
         title.text = state.title_text.peek();
         state.edit(Command::ReplaceTracks(tracks));
-    }
-}
-
-fn split_selection(state: &UiState) {
-    edit_selection(state, |clip, track_id, next_id| Command::Split {
-        track_id,
-        clip_id: clip.id,
-        at_frame: state.program.position.peek(),
-        new_id: next_id,
-    });
-}
-
-fn delete_selection(state: &UiState, ripple: bool) {
-    if let Some((track_id, clip)) = selected_clip(state) {
-        let clip_id = clip.id;
-        let command = if ripple {
-            Command::RippleDelete { track_id, clip_id }
-        } else {
-            Command::RemoveClip { track_id, clip_id }
-        };
-        if state.edit(command) {
-            state.select_clip(None);
-        }
     }
 }
 
@@ -452,7 +374,7 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
     let selected = state
         .selected_media
         .get()
-        .filter(|_| state.selected.get().is_none());
+        .filter(|_| state.selected.get().is_empty());
     let inner = width - 20.0;
     let items: Vec<BoxedWidget> = project
         .media()
@@ -478,7 +400,7 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 .map(|duration| short_duration(duration as f64 / 1_000_000.0));
             if view == MediaView::Grid {
                 let tile = (inner - 8.0) / 2.0;
-                selectable(
+                media_item(
                     Style::default().flex_column().gap(6.0).padding_all(5.0),
                     selected == Some(id),
                     vec![
@@ -515,10 +437,10 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         ),
                     ],
                     state,
-                    move |s| s.select_media(id),
+                    id,
                 )
             } else {
-                selectable(
+                media_item(
                     Style::default()
                         .flex_row()
                         .align(Align::Center)
@@ -543,7 +465,7 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         insert,
                     ],
                     state,
-                    move |s| s.select_media(id),
+                    id,
                 )
             }
         })
@@ -596,19 +518,14 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         })
     })
     .collect();
-    let drop_state = state.clone();
-    Box::new(DropZone {
-        style: creamui::Style::from(
-            Style::default()
-                .flex_column()
-                .gap(8.0)
-                .padding_all(10.0)
-                .width(width),
-        )
-        .background(PANEL)
-        .corner_radius(10.0),
-        on_drop: Rc::new(move |paths| drop_state.import_paths(paths)),
-        children: vec![
+    Box::new(append(
+        Flex::column()
+            .gap(8.0)
+            .padding(10.0)
+            .width(width)
+            .background(PANEL)
+            .corner_radius(10.0),
+        vec![
             panel_header(
                 "Media",
                 text(
@@ -659,9 +576,9 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
             Box::new(
                 RawScrollView::controlled(fill_style(), state.media_scroll.clone()).child(content),
             ),
-            text("Drop files here · sources stay on disk", FAINT, 10.0),
+            text("Drag into the timeline · drop files anywhere", FAINT, 10.0),
         ],
-    })
+    ))
 }
 
 fn input(controller: &TextController, width: f32) -> BoxedWidget {
@@ -683,6 +600,42 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
     };
     let mut rows: Vec<BoxedWidget> = Vec::new();
     let subtitle;
+    let count = state.selected.get().len();
+    if count > 1 {
+        rows.push(Box::new(
+            Flex::column()
+                .gap(8.0)
+                .padding(12.0)
+                .background(PANEL_RAISED)
+                .border(ACCENT, 1.0)
+                .corner_radius(8.0)
+                .child(heading(format!("{count} clips selected"), TEXT, 13.0))
+                .child(text("Drag any of them to move them together.", MUTED, 11.0))
+                .child(Box::new(
+                    Flex::row()
+                        .gap(6.0)
+                        .child(secondary_button(
+                            Some(Glyph::Trash),
+                            "Delete",
+                            true,
+                            state,
+                            |s| s.delete_selection(false),
+                        ))
+                        .child(secondary_button(
+                            Some(Glyph::Ripple),
+                            "Ripple",
+                            true,
+                            state,
+                            |s| s.delete_selection(true),
+                        )),
+                ))
+                .child(text(
+                    "The last clip you picked is shown below.",
+                    FAINT,
+                    10.0,
+                )),
+        ));
+    }
     if let Some((track_id, clip)) = selected_clip(state) {
         let track_kind = project
             .tracks()
@@ -981,21 +934,21 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         "Split",
                         splittable,
                         state,
-                        split_selection,
+                        UiState::split_at_playhead,
                     ))
                     .child(secondary_button(
                         Some(Glyph::Trash),
                         "Delete",
                         true,
                         state,
-                        |s| delete_selection(s, false),
+                        |s| s.delete_selection(false),
                     ))
                     .child(secondary_button(
                         Some(Glyph::Ripple),
                         "Ripple",
                         true,
                         state,
-                        |s| delete_selection(s, true),
+                        |s| s.delete_selection(true),
                     )),
             )],
         ));
@@ -1096,6 +1049,33 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 11.0,
             )],
         ));
+        rows.push(section(
+            "Shortcuts",
+            [
+                ("Space", "Play / pause"),
+                ("← →", "Step a frame (Shift: 1 s)"),
+                ("Ctrl Z / Ctrl Shift Z", "Undo / redo"),
+                ("Delete", "Remove (Shift: ripple)"),
+                ("Ctrl C / X / V / D", "Copy, cut, paste, duplicate"),
+                ("S · Ctrl K", "Split at playhead"),
+                ("Ctrl A · Esc", "Select all · clear"),
+                ("Alt ← →", "Nudge selection"),
+                ("Ctrl + wheel · + −", "Zoom timeline"),
+            ]
+            .into_iter()
+            .map(|(keys, action)| {
+                Box::new(
+                    Flex::row()
+                        .gap(8.0)
+                        .align(Align::Center)
+                        .child(Box::new(
+                            Flex::row().width(112.0).child(text(keys, TEXT, 10.0)),
+                        ))
+                        .child(text(action, MUTED, 10.0)),
+                ) as BoxedWidget
+            })
+            .collect(),
+        ));
     }
     Box::new(
         Flex::column()
@@ -1114,6 +1094,67 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     .child(Box::new(Flex::column().gap(10.0).with_children(rows))),
             )),
     )
+}
+
+fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<Lane> {
+    let labels = track_labels(project);
+    project
+        .tracks()
+        .iter()
+        .zip(&labels)
+        .map(|(track, (_, label))| Lane {
+            track_id: track.id,
+            kind: track.kind,
+            label: label.clone(),
+            clips: track
+                .clips
+                .iter()
+                .map(|clip| {
+                    let media = match clip.content {
+                        ClipContent::Media { media_id } => {
+                            project.media().iter().find(|media| media.id == media_id)
+                        }
+                        ClipContent::Title(_) => None,
+                    };
+                    let video = track.kind == TrackKind::Video;
+                    LaneClip {
+                        clip_id: clip.id,
+                        start: clip.start_frame,
+                        duration: clip.duration_frames,
+                        name: match (&clip.content, media) {
+                            (ClipContent::Title(title), _) => title.text.clone(),
+                            (_, Some(media)) => media_name(media),
+                            _ => "Missing source".into(),
+                        },
+                        look: match (&clip.content, media) {
+                            (ClipContent::Title(_), _) => ClipLook::Title,
+                            _ if !video => ClipLook::Audio,
+                            (_, Some(media)) if media.kind == MediaKind::Image => ClipLook::Image,
+                            _ => ClipLook::Video,
+                        },
+                        images: media.filter(|_| video).and_then(|media| {
+                            state
+                                .storyboards
+                                .borrow()
+                                .get(&StoryboardKey {
+                                    path: media.path.clone(),
+                                    kind: media.kind,
+                                    source_start: clip.source_start_frame,
+                                    duration: clip.duration_frames,
+                                    fps,
+                                })
+                                .cloned()
+                        }),
+                        fallback: media
+                            .filter(|_| video)
+                            .and_then(|media| state.thumbnails.borrow().get(&media.path).cloned()),
+                        volume: clip.volume,
+                        muted: clip.muted,
+                    }
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
@@ -1359,13 +1400,14 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
     );
 
     let selection = state.selected.get();
+    let primary = selection.last().copied();
     let selected_media = state.selected_media.get();
     let range: Option<SourceRange> = state.source_range();
     let selected_title = selected_clip(state).and_then(|(_, clip)| match clip.content {
         ClipContent::Title(title) => Some(title.text),
         ClipContent::Media { .. } => None,
     });
-    let source_name = match (selection, selected_media) {
+    let source_name = match (primary, selected_media) {
         (Some(_), _) => selected_clip(state).map(|(_, clip)| match &clip.content {
             ClipContent::Title(title) => title.text.clone(),
             ClipContent::Media { media_id } => project
@@ -1404,7 +1446,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         ),
     };
     let source_end = range.as_ref().map_or(0, |range| range.duration);
-    let source_actions: Vec<BoxedWidget> = match (selection, selected_media) {
+    let source_actions: Vec<BoxedWidget> = match (primary, selected_media) {
         (Some(_), _) => selected_clip(state)
             .filter(|_| range.is_some())
             .map(|(_, clip)| {
@@ -1463,70 +1505,14 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         ),
     );
 
-    let labels = track_labels(project);
-    let lanes = project
-        .tracks()
-        .iter()
-        .zip(&labels)
-        .map(|(track, (_, label))| Lane {
-            track_id: track.id,
-            kind: track.kind,
-            label: label.clone(),
-            clips: track
-                .clips
-                .iter()
-                .map(|clip| {
-                    let media = match clip.content {
-                        ClipContent::Media { media_id } => {
-                            project.media().iter().find(|media| media.id == media_id)
-                        }
-                        ClipContent::Title(_) => None,
-                    };
-                    let video = track.kind == TrackKind::Video;
-                    LaneClip {
-                        clip_id: clip.id,
-                        start: clip.start_frame,
-                        duration: clip.duration_frames,
-                        name: match (&clip.content, media) {
-                            (ClipContent::Title(title), _) => title.text.clone(),
-                            (_, Some(media)) => media_name(media),
-                            _ => "Missing source".into(),
-                        },
-                        look: match (&clip.content, media) {
-                            (ClipContent::Title(_), _) => ClipLook::Title,
-                            _ if !video => ClipLook::Audio,
-                            (_, Some(media)) if media.kind == MediaKind::Image => ClipLook::Image,
-                            _ => ClipLook::Video,
-                        },
-                        images: media.filter(|_| video).and_then(|media| {
-                            state
-                                .storyboards
-                                .borrow()
-                                .get(&StoryboardKey {
-                                    path: media.path.clone(),
-                                    kind: media.kind,
-                                    source_start: clip.source_start_frame,
-                                    duration: clip.duration_frames,
-                                    fps,
-                                })
-                                .cloned()
-                        }),
-                        fallback: media
-                            .filter(|_| video)
-                            .and_then(|media| state.thumbnails.borrow().get(&media.path).cloned()),
-                        volume: clip.volume,
-                        muted: clip.muted,
-                    }
-                })
-                .collect(),
-        })
-        .collect();
+    let lanes = timeline_lanes(state, project, fps);
     let zoom = state.timeline_zoom.get();
     let span = state.visible_frames();
-    let selected = selected_clip(state);
-    let splittable = selected.as_ref().is_some_and(|(_, clip)| {
-        frame > clip.start_frame && frame < clip.start_frame.saturating_add(clip.duration_frames)
-    });
+    let selected = !selection.is_empty();
+    let splittable = !state.split_targets().is_empty();
+    let drag = state.drag.get();
+    let marquee = state.marquee.get();
+    let plan = drag.and_then(|_| state.drop_plan());
     let expanded_timeline = state.timeline_expanded.get();
     let timeline_height = if expanded_timeline {
         (viewport.height * 0.46).clamp(260.0, 430.0)
@@ -1559,21 +1545,21 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     "Split",
                     splittable,
                     state,
-                    split_selection,
+                    UiState::split_at_playhead,
                 ))
                 .child(tool_button(
                     Some(Glyph::Trash),
                     "Delete",
-                    selected.is_some(),
+                    selected,
                     state,
-                    |s| delete_selection(s, false),
+                    |s| s.delete_selection(false),
                 ))
                 .child(tool_button(
                     Some(Glyph::Ripple),
                     "Ripple",
-                    selected.is_some(),
+                    selected,
                     state,
-                    |s| delete_selection(s, true),
+                    |s| s.delete_selection(true),
                 ))
                 .child(divider())
                 .child(tool_button(
@@ -1582,7 +1568,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     !busy,
                     state,
                     |s| {
-                        add_title(s);
+                        s.add_title();
                     },
                 ))
                 .child(spacer())
@@ -1638,7 +1624,15 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             end: timeline_end,
             fps,
             playhead: frame,
-            selected: selection,
+            selected: selection.clone(),
+            ghosts: plan
+                .as_ref()
+                .map_or_else(Vec::new, |plan| plan.ghosts.clone()),
+            dragging: matches!(
+                drag.map(|drag| drag.payload),
+                Some(DragPayload::Clips { .. })
+            ),
+            marquee,
             state: state.clone(),
         }));
 
@@ -1758,13 +1752,23 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     .child(workspace)
                     .child(Box::new(timeline)),
             ))
-            .child(Box::new(status)),
+            .child(Box::new(status))
+            .child(match (drag, plan) {
+                (Some(drag), Some(plan)) => Box::new(DragOverlay {
+                    pointer: drag.pointer,
+                    label: plan.label,
+                    valid: plan.valid,
+                    size: (viewport.width, viewport.height),
+                }) as BoxedWidget,
+                _ => Box::new(Flex::row().size(0.0, 0.0)),
+            }),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::interaction::Action;
     use creamui::core::{Painter, Point, Rect, Renderer, RgbaImage, TextAlign, Widget};
     use std::sync::Arc;
 
@@ -1849,8 +1853,50 @@ mod tests {
         );
     }
 
+    fn view(state: &UiState) -> TimelineView {
+        let editor = state.editor.borrow();
+        TimelineView {
+            lanes: timeline_lanes(state, editor.project(), (30, 1)),
+            start: 0,
+            span: 300,
+            end: 300,
+            fps: (30, 1),
+            playhead: 0,
+            selected: state.selected.peek(),
+            ghosts: Vec::new(),
+            dragging: false,
+            marquee: None,
+            state: state.clone(),
+        }
+    }
+
+    const TIMELINE: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1128.0,
+        height: 240.0,
+    };
+
+    /// The timeline x for `frame` with a 1000 px wide, 300 frame view.
+    fn at(frame: f32) -> f32 {
+        128.0 + frame * 1000.0 / 300.0
+    }
+
+    fn press(view: &TimelineView, x: f32, y: f32) {
+        view.on_drag_start().unwrap()(Point { x, y }, TIMELINE);
+        view.on_drag().unwrap()(Point { x, y }, TIMELINE);
+    }
+
+    fn drag_to(view: &TimelineView, x: f32, y: f32) {
+        view.on_drag().unwrap()(Point { x, y }, TIMELINE);
+    }
+
+    fn release(view: &TimelineView) {
+        view.on_drag_end().unwrap()();
+    }
+
     #[test]
-    fn timeline_draws_filmstrips_selects_clips_and_scrubs() {
+    fn timeline_draws_filmstrips_and_scrubs_from_the_ruler() {
         let state = UiState::new();
         let image = Arc::new(RgbaImage::new(16, 9, vec![255; 16 * 9 * 4]).unwrap());
         let view = TimelineView {
@@ -1870,37 +1916,112 @@ mod tests {
                     muted: false,
                 }],
             }],
-            start: 0,
-            span: 300,
-            end: 300,
-            fps: (30, 1),
-            playhead: 0,
-            selected: None,
-            state: state.clone(),
-        };
-        let rect = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 1128.0,
-            height: 120.0,
+            ghosts: vec![super::super::timeline_view::Ghost {
+                track_id: 0,
+                start: 200,
+                duration: 30,
+                valid: false,
+            }],
+            ..view(&state)
         };
         let mut painter = TestPainter::default();
-        view.paint(&mut painter, rect);
+        view.paint(&mut painter, TIMELINE);
         assert!(painter.images.len() >= 3);
         assert!(painter.labels.iter().any(|label| label == "Source"));
         assert!(painter.labels.iter().any(|label| label == "00:02"));
-        let press = Point { x: 628.0, y: 60.0 };
-        view.on_drag_start().unwrap()(press, rect);
-        view.on_drag().unwrap()(press, rect);
-        assert_eq!(state.selected.peek(), Some((0, 7)));
+        press(&view, at(150.0), 10.0);
         assert_eq!(state.program.position.peek(), 150);
-        view.on_drag().unwrap()(Point { x: 2000.0, y: 60.0 }, rect);
+        drag_to(&view, 2000.0, 10.0);
         assert_eq!(state.program.position.peek(), 299);
-        view.on_drag_start().unwrap()(Point { x: 200.0, y: 60.0 }, rect);
-        assert_eq!(state.selected.peek(), None);
-        view.on_drag_start().unwrap()(Point { x: 40.0, y: 60.0 }, rect);
-        view.on_drag().unwrap()(Point { x: 40.0, y: 60.0 }, rect);
+        release(&view);
+        press(&view, 40.0, 60.0);
+        drag_to(&view, at(10.0), 60.0);
         assert_eq!(state.program.position.peek(), 299);
+    }
+
+    #[test]
+    fn timeline_selects_drags_clips_between_tracks_and_rubber_bands() {
+        let state = UiState::new();
+        state.timeline_rect.set(TIMELINE);
+        assert!(state.add_title());
+        assert!(state.add_title());
+        state.select_clip(None);
+        let timeline = view(&state);
+        press(&timeline, at(30.0), 50.0);
+        release(&timeline);
+        assert_eq!(state.selected.peek(), vec![(0, 1)]);
+        assert_eq!(state.program.position.peek(), 30);
+
+        state.modifiers.set(creamui::core::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        });
+        press(&timeline, at(120.0), 50.0);
+        release(&timeline);
+        assert_eq!(state.selected.peek(), vec![(0, 1), (0, 2)]);
+        state.modifiers.set(Default::default());
+
+        press(&timeline, at(120.0), 50.0);
+        drag_to(&timeline, at(150.0), 110.0);
+        assert!(state.drag.peek().is_some());
+        assert_eq!(state.drop_plan().unwrap().ghosts.len(), 2);
+        release(&timeline);
+        assert!(state.drag.peek().is_none());
+        let starts = |track: usize| {
+            state.editor.borrow().project().tracks()[track]
+                .clips
+                .iter()
+                .map(|clip| clip.start_frame)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(starts(1), vec![30, 120]);
+        assert!(starts(0).is_empty());
+        assert_eq!(state.selected.peek().len(), 2);
+        state.run(Action::Undo);
+        assert_eq!(starts(0), vec![0, 90]);
+
+        state.select_clip(None);
+        let timeline = view(&state);
+        press(&timeline, at(250.0), 50.0);
+        drag_to(&timeline, at(5.0), 60.0);
+        assert!(state.marquee.peek().is_some());
+        assert_eq!(state.selected.peek(), vec![(0, 1), (0, 2)]);
+        release(&timeline);
+        assert!(state.marquee.peek().is_none());
+        state.run(Action::Delete);
+        assert!(starts(0).is_empty());
+        state.run(Action::Undo);
+        assert_eq!(starts(0), vec![0, 90]);
+
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 9,
+            path: "/tmp/shot.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(1_000_000),
+            has_audio: false,
+        })));
+        state.begin_media_drag(9, Point { x: 10.0, y: 10.0 });
+        state.drag_pointer(Point {
+            x: at(200.0),
+            y: 120.0,
+        });
+        let plan = state.drop_plan().unwrap();
+        assert!(plan.valid);
+        assert_eq!(plan.ghosts[0].track_id, 1);
+        state.end_media_drag();
+        assert_eq!(starts(1), vec![200]);
+        assert_eq!(state.selected.peek().len(), 1);
+
+        state.begin_media_drag(9, Point { x: 10.0, y: 10.0 });
+        state.drag_pointer(Point {
+            x: at(30.0),
+            y: 50.0,
+        });
+        assert!(!state.drop_plan().unwrap().valid);
+        state.run(Action::Escape);
+        assert!(state.drag.peek().is_none());
+        state.end_media_drag();
+        assert_eq!(starts(0), vec![0, 90]);
     }
 
     #[test]
@@ -1922,7 +2043,7 @@ mod tests {
                 assert!(painter.labels.iter().any(|text| text == label));
             }
         }
-        assert!(add_title(&state));
+        assert!(state.add_title());
         let painter = render(&state, 1440.0, 900.0);
         assert!(painter.labels.iter().any(|text| text == "Title 1"));
         assert!(painter.labels.iter().any(|text| text == "Title clip"));
@@ -1977,8 +2098,8 @@ mod tests {
     #[test]
     fn timeline_places_clips_by_start_frame_and_follows_later_footage() {
         let state = UiState::new();
-        assert!(add_title(&state));
-        assert!(add_title(&state));
+        assert!(state.add_title());
+        assert!(state.add_title());
         assert!(state.edit(Command::Move {
             track_id: 0,
             target_track_id: 0,
@@ -1991,8 +2112,8 @@ mod tests {
         let second = x_of(&painter, "Title 2").unwrap();
         assert!(second - first > 300.0);
 
-        assert!(add_title(&state));
-        assert!(add_title(&state));
+        assert!(state.add_title());
+        assert!(state.add_title());
         assert_eq!(state.timeline_start.peek(), 300);
         let painter = render(&state, 900.0, 760.0);
         assert!(painter.labels.iter().any(|label| label == "Title 4"));

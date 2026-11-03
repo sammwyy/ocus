@@ -3,10 +3,12 @@ use super::controls::{
     ACCENT, AUDIO, BORDER, FAINT, Glyph, IMAGE, MUTED, PANEL, PANEL_RAISED, PLAYHEAD, STAGE,
     SURFACE, TEXT, TITLE, VIDEO, draw_glyph, fit,
 };
+use super::edits::ClipRef;
+use super::interaction::Gesture;
 use super::state::Storyboard;
 use crate::timeline::TrackKind;
 use creamui::core::layout::{Dimension, Style};
-use creamui::core::{Painter, Point, Rect, RgbaImage, TextAlign, Widget};
+use creamui::core::{Modifiers, Painter, Point, Rect, RgbaImage, TextAlign, Widget};
 use creamui::{Color, WheelInput};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -63,12 +65,27 @@ pub(super) struct TimelineView {
     pub end: u64,
     pub fps: (u32, u32),
     pub playhead: u64,
-    pub selected: Option<(u64, u64)>,
+    pub selected: Vec<ClipRef>,
+    /// Where a drag would place clips, and whether that drop is allowed.
+    pub ghosts: Vec<Ghost>,
+    /// Selected clips are being dragged, so they are drawn faded in place.
+    pub dragging: bool,
+    /// Rubber-band selection rectangle, relative to this widget.
+    pub marquee: Option<Rect>,
     pub state: UiState,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Ghost {
+    pub track_id: u64,
+    pub start: u64,
+    pub duration: u64,
+    pub valid: bool,
+}
+
+/// Lane and time layout shared by painting, hit-testing and drop targeting.
 #[derive(Clone)]
-struct Geometry {
+pub(super) struct Geometry {
     left: f32,
     width: f32,
     start: u64,
@@ -77,7 +94,7 @@ struct Geometry {
 }
 
 impl Geometry {
-    fn new(rect: Rect, kinds: &[TrackKind], start: u64, span: u64) -> Self {
+    pub(super) fn new(rect: Rect, kinds: &[TrackKind], start: u64, span: u64) -> Self {
         let weight = |kind: &TrackKind| if *kind == TrackKind::Video { 1.3 } else { 1.0 };
         let total: f32 = kinds.iter().map(weight).sum::<f32>().max(1.0);
         let available =
@@ -117,8 +134,41 @@ impl Geometry {
             .saturating_add((f64::from(progress) * self.span as f64).floor() as u64)
     }
 
+    /// The (possibly negative) frame under `x`, without clamping to the view.
+    pub(super) fn frame_at(&self, x: f32) -> f64 {
+        self.start as f64 + f64::from(x - self.left) * self.span as f64 / f64::from(self.width)
+    }
+
+    pub(super) fn pixels_per_frame(&self) -> f32 {
+        self.width / self.span as f32
+    }
+
     fn right(&self) -> f32 {
         self.left + self.width
+    }
+
+    /// The lane under `y`, if any.
+    pub(super) fn lane_at(&self, y: f32) -> Option<usize> {
+        self.lanes
+            .iter()
+            .position(|lane| y >= lane.y && y < lane.y + lane.height + LANE_GAP)
+    }
+
+    /// The lane whose center is closest to `y`.
+    pub(super) fn nearest_lane(&self, y: f32, accept: impl Fn(usize) -> bool) -> Option<usize> {
+        (0..self.lanes.len())
+            .filter(|index| accept(*index))
+            .min_by(|a, b| {
+                let distance = |index: usize| {
+                    let lane = self.lanes[index];
+                    (lane.y + lane.height / 2.0 - y).abs()
+                };
+                distance(*a).total_cmp(&distance(*b))
+            })
+    }
+
+    pub(super) fn in_lanes(&self, point: Point) -> bool {
+        point.x >= self.left && point.x <= self.right() && self.lane_at(point.y).is_some()
     }
 }
 
@@ -160,7 +210,7 @@ fn ruler_label(seconds: f64) -> String {
 type HitLane = (u64, Vec<(u64, u64, u64)>);
 
 /// The clip under `point`: `None` outside the lanes, `Some(None)` on a gap.
-fn hit(geometry: &Geometry, lanes: &[HitLane], point: Point) -> Option<Option<(u64, u64)>> {
+fn hit(geometry: &Geometry, lanes: &[HitLane], point: Point) -> Option<Option<ClipRef>> {
     if point.x < geometry.left {
         return None;
     }
@@ -175,6 +225,30 @@ fn hit(geometry: &Geometry, lanes: &[HitLane], point: Point) -> Option<Option<(u
             .find(|(_, start, duration)| frame >= *start && frame - start < *duration)
             .map(|(clip_id, _, _)| (*track_id, *clip_id)),
     )
+}
+
+/// Clips overlapping `area` (in the geometry's coordinates).
+fn clips_in(geometry: &Geometry, lanes: &[HitLane], area: Rect) -> Vec<ClipRef> {
+    let (first, last) = (geometry.frame(area.x), geometry.frame(area.x + area.width));
+    lanes
+        .iter()
+        .zip(&geometry.lanes)
+        .filter(|(_, lane)| lane.y < area.y + area.height && area.y < lane.y + lane.height)
+        .flat_map(|((track_id, clips), _)| {
+            clips
+                .iter()
+                .filter(move |(_, start, duration)| *start <= last && first < start + duration)
+                .map(move |(clip_id, _, _)| (*track_id, *clip_id))
+        })
+        .collect()
+}
+
+fn local(rect: Rect) -> Rect {
+    Rect {
+        x: 0.0,
+        y: 0.0,
+        ..rect
+    }
 }
 
 impl TimelineView {
@@ -542,6 +616,52 @@ impl TimelineView {
         );
     }
 
+    fn paint_ghosts(&self, painter: &mut dyn Painter, geometry: &Geometry) {
+        for ghost in &self.ghosts {
+            let Some(lane) = self
+                .lanes
+                .iter()
+                .position(|lane| lane.track_id == ghost.track_id)
+                .map(|index| geometry.lanes[index])
+            else {
+                continue;
+            };
+            let x = geometry.x(ghost.start).max(geometry.left);
+            let right = geometry
+                .x(ghost.start.saturating_add(ghost.duration))
+                .min(geometry.right());
+            if right <= x {
+                continue;
+            }
+            let color = if ghost.valid { ACCENT } else { PLAYHEAD };
+            let body = Rect {
+                x,
+                y: lane.y + 2.0,
+                width: right - x,
+                height: lane.height - 4.0,
+            };
+            painter.fill_rect(body, Color::rgba(color.r, color.g, color.b, 46), 4.0);
+            painter.stroke_rect(body, color, 2.0, 4.0);
+        }
+        if let Some(ghost) = self.ghosts.iter().min_by_key(|ghost| ghost.start)
+            && ghost.start >= self.start
+            && let Some(first) = geometry.lanes.first()
+            && let Some(last) = geometry.lanes.last()
+        {
+            let x = snap(painter, geometry.x(ghost.start));
+            painter.fill_rect(
+                Rect {
+                    x,
+                    y: first.y,
+                    width: 1.0,
+                    height: last.y + last.height - first.y,
+                },
+                Color::rgba(255, 255, 255, 90),
+                0.0,
+            );
+        }
+    }
+
     fn paint_playhead(&self, painter: &mut dyn Painter, rect: Rect, geometry: &Geometry) {
         if self.playhead < self.start || self.playhead >= self.start.saturating_add(self.span) {
             return;
@@ -661,14 +781,37 @@ impl Widget for TimelineView {
                 );
             }
             for clip in &lane.clips {
-                self.paint_clip(
-                    painter,
-                    clip,
-                    *lane_rect,
-                    &geometry,
-                    self.selected == Some((lane.track_id, clip.clip_id)),
-                );
+                let selected = self.selected.contains(&(lane.track_id, clip.clip_id));
+                self.paint_clip(painter, clip, *lane_rect, &geometry, selected);
+                if selected && self.dragging {
+                    let x = geometry.x(clip.start).max(geometry.left);
+                    let right = geometry
+                        .x(clip.start.saturating_add(clip.duration))
+                        .min(geometry.right());
+                    if right > x {
+                        painter.fill_rect(
+                            Rect {
+                                x,
+                                y: lane_rect.y + 2.0,
+                                width: right - x,
+                                height: lane_rect.height - 4.0,
+                            },
+                            Color::rgba(10, 12, 15, 160),
+                            4.0,
+                        );
+                    }
+                }
             }
+        }
+        self.paint_ghosts(painter, &geometry);
+        if let Some(marquee) = self.marquee {
+            let area = Rect {
+                x: rect.x + marquee.x,
+                y: rect.y + marquee.y,
+                ..marquee
+            };
+            painter.fill_rect(area, Color::rgba(92, 208, 190, 28), 2.0);
+            painter.stroke_rect(area, ACCENT, 1.0, 2.0);
         }
         self.paint_playhead(painter, rect, &geometry);
         painter.fill_rect(
@@ -684,51 +827,158 @@ impl Widget for TimelineView {
         painter.pop_clip();
     }
 
+    fn reports_layout(&self) -> bool {
+        true
+    }
+
+    fn on_layout(&self, rect: Rect) -> bool {
+        self.state.timeline_rect.set(rect);
+        false
+    }
+
+    fn on_pointer_move(&self) -> Option<Rc<dyn Fn(Point, Modifiers)>> {
+        let state = self.state.clone();
+        Some(Rc::new(move |_, modifiers| state.modifiers.set(modifiers)))
+    }
+
     fn on_drag_start(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
         let state = self.state.clone();
         let kinds: Vec<_> = self.lanes.iter().map(|lane| lane.kind).collect();
         let lanes = self.hit_lanes();
         let (start, span) = (self.start, self.span);
         Some(Rc::new(move |position, rect| {
-            let local = Rect {
-                x: 0.0,
-                y: 0.0,
-                ..rect
+            let geometry = Geometry::new(local(rect), &kinds, start, span);
+            let window = Point {
+                x: rect.x + position.x,
+                y: rect.y + position.y,
             };
-            let geometry = Geometry::new(local, &kinds, start, span);
-            state.timeline_scrub.set(position.x >= geometry.left);
-            if position.y >= RULER_HEIGHT
-                && let Some(selection) = hit(&geometry, &lanes, position)
-            {
-                state.select_clip(selection);
-            }
+            let gesture = if position.x < geometry.left {
+                Gesture::Idle
+            } else if position.y < RULER_HEIGHT {
+                Gesture::Scrub
+            } else {
+                match hit(&geometry, &lanes, position) {
+                    Some(Some(clip)) => {
+                        let modifiers = state.modifiers.get();
+                        if modifiers.ctrl {
+                            state.toggle_clip(clip);
+                        } else if modifiers.shift {
+                            state.extend_selection(clip);
+                        } else if state.selected.peek().contains(&clip) {
+                            let mut selection = state.selected.peek();
+                            selection.retain(|item| *item != clip);
+                            selection.push(clip);
+                            state.select_clips(selection);
+                        } else {
+                            state.select_clip(Some(clip));
+                        }
+                        if state.selected.peek().contains(&clip) {
+                            Gesture::Clip {
+                                anchor: clip,
+                                grab: geometry.frame_at(position.x),
+                                origin: window,
+                                click: (!modifiers.ctrl && !modifiers.shift)
+                                    .then(|| geometry.frame(position.x)),
+                            }
+                        } else {
+                            Gesture::Idle
+                        }
+                    }
+                    Some(None) => {
+                        let modifiers = state.modifiers.get();
+                        Gesture::Marquee {
+                            origin: position,
+                            base: if modifiers.ctrl || modifiers.shift {
+                                state.selected.peek()
+                            } else {
+                                Vec::new()
+                            },
+                            frame: geometry.frame(position.x),
+                        }
+                    }
+                    None => Gesture::Idle,
+                }
+            };
+            *state.gesture.borrow_mut() = gesture;
         }))
     }
 
     fn on_drag(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
         let state = self.state.clone();
         let kinds: Vec<_> = self.lanes.iter().map(|lane| lane.kind).collect();
+        let lanes = self.hit_lanes();
         let (start, span, end) = (self.start, self.span, self.end);
         Some(Rc::new(move |position, rect| {
-            if end == 0 || !state.timeline_scrub.get() {
-                return;
-            }
-            let geometry = Geometry::new(
-                Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    ..rect
-                },
-                &kinds,
-                start,
-                span,
-            );
-            let frame = geometry.frame(position.x).min(end - 1);
-            if state.program.position.peek() != frame {
-                if state.program.playing.peek() {
-                    state.pause();
+            let geometry = Geometry::new(local(rect), &kinds, start, span);
+            let gesture = state.gesture.borrow().clone();
+            match gesture {
+                Gesture::Scrub if end > 0 => {
+                    let frame = geometry.frame(position.x).min(end - 1);
+                    if state.program.position.peek() != frame {
+                        if state.program.playing.peek() {
+                            state.pause();
+                        }
+                        state.focus_frame(frame);
+                    }
                 }
-                state.focus_frame(frame);
+                Gesture::Clip { .. } => {
+                    state.drag_pointer(Point {
+                        x: rect.x + position.x,
+                        y: rect.y + position.y,
+                    });
+                    if state.drag.peek().is_some() {
+                        if position.x > rect.width - 24.0 {
+                            state.scroll_timeline(1);
+                        } else if position.x < geometry.left + 24.0 {
+                            state.scroll_timeline(-1);
+                        }
+                    }
+                }
+                Gesture::Marquee { origin, base, .. } => {
+                    if state.marquee.peek().is_none()
+                        && (position.x - origin.x).hypot(position.y - origin.y) < 4.0
+                    {
+                        return;
+                    }
+                    let x = origin.x.min(position.x).max(geometry.left);
+                    let y = origin.y.min(position.y).max(RULER_HEIGHT);
+                    let area = Rect {
+                        x,
+                        y,
+                        width: (origin.x.max(position.x).min(rect.width) - x).max(0.0),
+                        height: (origin.y.max(position.y).min(rect.height) - y).max(0.0),
+                    };
+                    state.marquee.set(Some(area));
+                    let mut selection = base;
+                    selection.extend(clips_in(&geometry, &lanes, area));
+                    state.select_clips(selection);
+                }
+                _ => {}
+            }
+        }))
+    }
+
+    fn on_drag_end(&self) -> Option<Rc<dyn Fn()>> {
+        let state = self.state.clone();
+        Some(Rc::new(move || {
+            let gesture = std::mem::take(&mut *state.gesture.borrow_mut());
+            match gesture {
+                Gesture::Clip { click, .. } => {
+                    if state.drag.peek().is_some() {
+                        state.finish_drag();
+                    } else if let Some(frame) = click {
+                        state.seek(frame);
+                    }
+                }
+                Gesture::Marquee { base, frame, .. } => {
+                    if state.marquee.peek().is_some() {
+                        state.marquee.set(None);
+                    } else if base.is_empty() {
+                        state.select_clip(None);
+                        state.seek(frame);
+                    }
+                }
+                _ => {}
             }
         }))
     }

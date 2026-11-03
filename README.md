@@ -32,9 +32,23 @@ other. **Match frame** moves the program playhead to the source monitor's
 frame, and **Insert** adds the selected bin file. The timeline is one painted
 surface with track headers, a zoomable ruler (2 s to 3 min per view), clip
 filmstrips sampled from their actual trimmed source range, audio volume
-levels and a playhead across every track. Pressing a clip selects it, pressing
-empty track space clears the selection, and dragging scrubs; the mouse wheel
-scrolls through time and Ctrl+wheel zooms. Filmstrips regenerate in the
+levels and a playhead across every track.
+
+Editing is direct: drag clips along a track or onto another track of the same
+kind (edges snap to other clips, the playhead and the start), drag sources from
+the media bin onto a track, or drop files from the desktop anywhere on the
+window to import them (over a track they are also placed there). Ctrl+click
+and Shift+click add to the selection and dragging over empty track space draws
+a selection rectangle; a multi-selection moves, copies and deletes together.
+Keyboard shortcuts work whenever a text field is not focused: Ctrl+Z /
+Ctrl+Shift+Z (or Ctrl+Y) undo and redo, Delete or Backspace removes the
+selection (Shift ripple-deletes), Ctrl+C/X/V/D copy, cut, paste at the playhead
+and duplicate, S or Ctrl+K splits at the playhead, Ctrl+A selects all, Esc
+clears the selection or cancels a drag, Space or K plays and pauses, the
+arrows step a frame (Shift: one second, Alt: nudge the selection), Home/End
+jump, +/− zoom, T adds a title, and Ctrl+N/O/S/Shift+S/I/E run the file
+actions. Every edit is one undoable step. The mouse wheel scrolls through time
+and Ctrl+wheel zooms. Filmstrips regenerate in the
 background and do not change the project file. The timeline can expand to give
 tracks more room. Video decoding happens on workers and frames are presented
 on the same GPU device as CreamUI. On a CPU-only window the monitors instead

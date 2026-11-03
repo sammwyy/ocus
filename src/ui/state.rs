@@ -1,11 +1,13 @@
+use super::edits::{self, ClipRef};
+use super::interaction::{DragState, Gesture};
 use crate::export::{self, ExportControl};
 use crate::media::preview::{
     FrameImage, FrameSource, PreviewEvent, PreviewPlan, StoryboardKey, decode_sequence, storyboard,
 };
 use crate::media::{Media, MediaKind, MediaProbe, Thumbnail, probe, thumbnail};
 use crate::project::{Command, Editor, Project, store};
-use crate::timeline::{ClipContent, TrackKind};
-use creamui::core::RgbaImage;
+use crate::timeline::{Clip, ClipContent, TrackKind};
+use creamui::core::{Modifiers, Rect, RgbaImage};
 use creamui::widgets::{ScrollController, TextController};
 use creamui::{AppHandle, GpuFrame, GpuFrameSlot, Signal, WindowHandle};
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
@@ -86,7 +88,7 @@ pub(crate) struct UiState {
     pub editor: Rc<RefCell<Editor>>,
     pub revision: Signal<u64>,
     pub ui_revision: Signal<u64>,
-    pub selected: Signal<Option<(u64, u64)>>,
+    pub selected: Signal<Vec<ClipRef>>,
     pub selected_media: Signal<Option<u64>>,
     pub program: Monitor,
     pub source: Monitor,
@@ -108,7 +110,12 @@ pub(crate) struct UiState {
     pub timeline_start: Signal<u64>,
     pub timeline_zoom: Signal<usize>,
     pub timeline_expanded: Signal<bool>,
-    pub timeline_scrub: Rc<Cell<bool>>,
+    pub gesture: Rc<RefCell<Gesture>>,
+    pub drag: Signal<Option<DragState>>,
+    pub marquee: Signal<Option<Rect>>,
+    pub timeline_rect: Rc<Cell<Rect>>,
+    pub modifiers: Rc<Cell<Modifiers>>,
+    pub clipboard: Rc<RefCell<Vec<(u64, Clip)>>>,
     pub sidebar: Signal<Sidebar>,
     app: Rc<RefCell<Option<AppHandle>>>,
     window: Rc<RefCell<Option<WindowHandle>>>,
@@ -123,7 +130,7 @@ impl UiState {
             editor: Rc::new(RefCell::new(Editor::new(Project::new("Untitled")))),
             revision: Signal::new(0),
             ui_revision: Signal::new(0),
-            selected: Signal::new(None),
+            selected: Signal::new(Vec::new()),
             selected_media: Signal::new(None),
             program: Monitor::new(),
             source: Monitor::new(),
@@ -145,7 +152,12 @@ impl UiState {
             timeline_start: Signal::new(0),
             timeline_zoom: Signal::new(DEFAULT_ZOOM),
             timeline_expanded: Signal::new(false),
-            timeline_scrub: Rc::new(Cell::new(false)),
+            gesture: Rc::new(RefCell::new(Gesture::Idle)),
+            drag: Signal::new(None),
+            marquee: Signal::new(None),
+            timeline_rect: Rc::new(Cell::new(Rect::default())),
+            modifiers: Rc::new(Cell::new(Modifiers::default())),
+            clipboard: Rc::new(RefCell::new(Vec::new())),
             sidebar: Signal::new(Sidebar::Media),
             app: Rc::new(RefCell::new(None)),
             window: Rc::new(RefCell::new(None)),
@@ -161,6 +173,7 @@ impl UiState {
 
     pub fn connect_window(&self, window: WindowHandle) {
         self.preview_available.set(window.gpu_device().is_some());
+        self.install_input(&window);
         *self.window.borrow_mut() = Some(window);
         self.request_preview();
         self.request_source_preview();
@@ -306,7 +319,7 @@ impl UiState {
     pub fn source_range(&self) -> Option<SourceRange> {
         let editor = self.editor.borrow();
         let project = editor.project();
-        if let Some((track_id, clip_id)) = self.selected.peek() {
+        if let Some((track_id, clip_id)) = self.primary_clip() {
             let clip = project
                 .tracks()
                 .iter()
@@ -336,12 +349,29 @@ impl UiState {
         })
     }
 
-    pub fn select_clip(&self, selection: Option<(u64, u64)>) {
+    /// The most recently selected clip, shown in the inspector and source
+    /// monitor.
+    pub fn primary_clip(&self) -> Option<ClipRef> {
+        self.selected.peek().last().copied()
+    }
+
+    pub fn select_clip(&self, selection: Option<ClipRef>) {
+        self.select_clips(selection.into_iter().collect());
+    }
+
+    /// Replaces the clip selection; the last entry becomes the primary clip.
+    pub fn select_clips(&self, mut selection: Vec<ClipRef>) {
+        let mut seen = HashSet::new();
+        selection.reverse();
+        selection.retain(|clip| seen.insert(*clip));
+        selection.reverse();
+        let previous = self.primary_clip();
         if self.selected.peek() == selection {
             return;
         }
         self.selected.set(selection);
-        if let Some((track_id, clip_id)) = selection {
+        let primary = self.primary_clip();
+        if let Some((track_id, clip_id)) = primary {
             self.selected_media.set(None);
             self.sidebar.set(Sidebar::Inspector);
             let title = self
@@ -360,14 +390,72 @@ impl UiState {
                 self.title_text.set_value(title);
             }
         }
-        self.reset_source();
+        if previous.map(|(_, clip)| clip) != primary.map(|(_, clip)| clip) {
+            self.reset_source();
+        }
+    }
+
+    /// Adds or removes a clip, as with Ctrl+click.
+    pub fn toggle_clip(&self, clip: ClipRef) {
+        let mut selection = self.selected.peek();
+        if let Some(index) = selection.iter().position(|item| *item == clip) {
+            selection.remove(index);
+        } else {
+            selection.push(clip);
+        }
+        self.select_clips(selection);
+    }
+
+    /// Adds every clip on the primary clip's track between it and `clip`, as
+    /// with Shift+click; other tracks just add the clip.
+    pub fn extend_selection(&self, clip: ClipRef) {
+        let mut selection = self.selected.peek();
+        let range = self
+            .primary_clip()
+            .filter(|primary| primary.0 == clip.0)
+            .and_then(|primary| {
+                let editor = self.editor.borrow();
+                let track = editor.project().tracks().iter().find(|t| t.id == clip.0)?;
+                let start_of = |id| {
+                    track
+                        .clips
+                        .iter()
+                        .find(|c| c.id == id)
+                        .map(|c| c.start_frame)
+                };
+                let (a, b) = (start_of(primary.1)?, start_of(clip.1)?);
+                let (low, high) = (a.min(b), a.max(b));
+                Some(
+                    track
+                        .clips
+                        .iter()
+                        .filter(|c| c.start_frame >= low && c.start_frame <= high && c.id != clip.1)
+                        .map(|c| (track.id, c.id))
+                        .collect::<Vec<_>>(),
+                )
+            });
+        selection.extend(range.unwrap_or_default());
+        selection.push(clip);
+        self.select_clips(selection);
+    }
+
+    pub fn select_all(&self) {
+        let all = self
+            .editor
+            .borrow()
+            .project()
+            .tracks()
+            .iter()
+            .flat_map(|track| track.clips.iter().map(|clip| (track.id, clip.id)))
+            .collect();
+        self.select_clips(all);
     }
 
     pub fn select_media(&self, media_id: u64) {
-        if self.selected_media.peek() == Some(media_id) && self.selected.peek().is_none() {
+        if self.selected_media.peek() == Some(media_id) && self.selected.peek().is_empty() {
             return;
         }
-        self.selected.set(None);
+        self.selected.set(Vec::new());
         self.selected_media.set(Some(media_id));
         self.reset_source();
     }
@@ -566,7 +654,7 @@ impl UiState {
             self.program.slot.clear(window);
             self.source.slot.clear(window);
         }
-        self.selected.set(None);
+        self.selected.set(Vec::new());
         self.selected_media.set(None);
         self.program.position.set(0);
         self.source.position.set(0);
@@ -864,7 +952,7 @@ impl UiState {
             return;
         }
         if let Some(paths) = FileDialog::new().set_title("Import media").pick_files() {
-            self.import_paths(paths);
+            self.import_paths(paths, None);
         }
     }
 
@@ -962,7 +1050,9 @@ impl UiState {
         self.export_control.borrow().clone()
     }
 
-    pub fn import_paths(&self, paths: Vec<PathBuf>) {
+    /// Imports files on a worker; with a placement (`track_id`, frame) the
+    /// imported sources are then laid out one after another from there.
+    pub fn import_paths(&self, paths: Vec<PathBuf>, placement: Option<(u64, u64)>) {
         let Some(app) = self.app.borrow().clone() else {
             return;
         };
@@ -983,6 +1073,7 @@ impl UiState {
                 state.busy.set(false);
                 let total = results.len();
                 let mut imported = 0;
+                let mut ready = Vec::new();
                 let mut errors = Vec::new();
                 for result in results {
                     match result {
@@ -1016,12 +1107,14 @@ impl UiState {
                                     has_audio: info.has_audio,
                                 };
                                 if existing.as_ref() == Some(&media) {
+                                    ready.push(id);
                                 } else if state.edit(if existing.is_some() {
                                     Command::ReprobeMedia(media)
                                 } else {
                                     Command::ImportMedia(media)
                                 }) {
                                     imported += 1;
+                                    ready.push(id);
                                 } else {
                                     errors.push("Source rejected by project validation".into());
                                 }
@@ -1061,6 +1154,19 @@ impl UiState {
                         errors[0]
                     )
                 });
+                if let Some((track_id, mut frame)) = placement {
+                    for id in ready {
+                        let track =
+                            edits::compatible_track(state.editor.borrow().project(), id, track_id);
+                        let Some(track) = track else {
+                            continue;
+                        };
+                        match state.insert_media_at(id, Some((track, frame))) {
+                            Some(next) => frame = next,
+                            None => break,
+                        }
+                    }
+                }
             },
         );
     }
@@ -1099,108 +1205,28 @@ impl UiState {
     }
 
     pub fn insert_media(&self, media_id: u64) {
-        let editor = self.editor.borrow();
-        let project = editor.project();
-        let Some(media) = project.media().iter().find(|media| media.id == media_id) else {
-            return;
-        };
-        let primary_kind = match media.kind {
-            crate::media::MediaKind::Audio => crate::timeline::TrackKind::Audio,
-            _ => crate::timeline::TrackKind::Video,
-        };
-        let Some(primary) = project
-            .tracks()
-            .iter()
-            .find(|track| track.kind == primary_kind)
-        else {
-            self.status
-                .set("No compatible track for this source".into());
-            return;
-        };
-        let audio = if media.kind == crate::media::MediaKind::Video && media.has_audio {
-            match project
-                .tracks()
-                .iter()
-                .find(|track| track.kind == crate::timeline::TrackKind::Audio)
-            {
-                Some(track) => Some(track),
-                None => {
-                    self.status
-                        .set("Video has audio but no audio track exists".into());
-                    return;
-                }
+        self.insert_media_at(media_id, None);
+    }
+
+    /// Inserts a source at `placement` (`track_id`, frame), or after the last
+    /// clip of its first compatible track, returning the frame after it.
+    pub fn insert_media_at(&self, media_id: u64, placement: Option<(u64, u64)>) -> Option<u64> {
+        let plan = edits::insert_media(self.editor.borrow().project(), media_id, placement);
+        let insertion = match plan {
+            Ok(insertion) => insertion,
+            Err(error) => {
+                self.status.set(error);
+                return None;
             }
-        } else {
-            None
         };
-        let frame_rate = &project.settings().frame_rate;
-        let Some(duration_frames) =
-            media_frames(media, (frame_rate.numerator, frame_rate.denominator))
-        else {
-            self.status
-                .set("Source has no usable duration; import it again to probe".into());
-            return;
-        };
-        let Some(start_frame) = std::iter::once(primary)
-            .chain(audio)
-            .flat_map(|track| &track.clips)
-            .map(|clip| clip.start_frame.checked_add(clip.duration_frames))
-            .try_fold(0_u64, |latest, end| Some(latest.max(end?)))
-        else {
-            return;
-        };
-        let Some(clip_id) = project
-            .tracks()
-            .iter()
-            .flat_map(|track| &track.clips)
-            .map(|clip| clip.id)
-            .max()
-            .unwrap_or(0)
-            .checked_add(1)
-        else {
-            return;
-        };
-        let track_id = primary.id;
-        let audio_track_id = audio.map(|track| track.id);
-        let clip = crate::timeline::Clip {
-            id: clip_id,
-            start_frame,
-            source_start_frame: 0,
-            duration_frames,
-            content: crate::timeline::ClipContent::Media { media_id },
-            volume: 1.0,
-            muted: false,
-        };
-        let command = if let Some(audio_id) = audio_track_id {
-            let Some(linked_id) = clip_id.checked_add(1) else {
-                self.status.set("Clip ID limit reached".into());
-                return;
-            };
-            let mut tracks = project.tracks().to_vec();
-            for (id, clip) in [
-                (track_id, clip.clone()),
-                (
-                    audio_id,
-                    crate::timeline::Clip {
-                        id: linked_id,
-                        ..clip
-                    },
-                ),
-            ] {
-                let Some(track) = tracks.iter_mut().find(|track| track.id == id) else {
-                    return;
-                };
-                track.clips.push(clip);
-            }
-            Command::ReplaceTracks(tracks)
-        } else {
-            Command::InsertClip { track_id, clip }
-        };
-        drop(editor);
-        if self.edit(command) {
-            self.select_clip(Some((track_id, clip_id)));
-            self.focus_frame(start_frame);
+        if !self.edit(insertion.command) {
+            return None;
         }
+        self.select_clips(insertion.selection);
+        if placement.is_none() {
+            self.focus_frame(insertion.start);
+        }
+        insertion.start.checked_add(insertion.duration)
     }
 }
 
@@ -1406,7 +1432,7 @@ mod tests {
         assert_eq!((range.source_start, range.duration), (0, 60));
         state.insert_media(4);
         assert_eq!(state.selected_media.peek(), None);
-        let (track_id, clip_id) = state.selected.peek().unwrap();
+        let (track_id, clip_id) = state.primary_clip().unwrap();
         assert!(state.edit(Command::Trim {
             track_id,
             clip_id,
@@ -1421,7 +1447,7 @@ mod tests {
         state.edit(Command::RemoveClip { track_id, clip_id });
         assert_eq!(state.source_range(), None);
         state.select_media(4);
-        assert_eq!(state.selected.peek(), None);
+        assert!(state.selected.peek().is_empty());
         assert_eq!(state.source.position.peek(), 0);
     }
 

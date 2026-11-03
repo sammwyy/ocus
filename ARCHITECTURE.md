@@ -22,7 +22,9 @@ src/
   ui/
     window.rs       integrated titlebar, editor layout, and clip controls
     controls.rs     palette, vector glyphs, buttons, scrubber, thumbnails
-    timeline_view.rs  painted ruler, track lanes, clips and playhead
+    timeline_view.rs  painted ruler, track lanes, clips, playhead and gestures
+    interaction.rs  drag and drop, shortcuts and the actions they trigger
+    edits.rs        multi-clip move, snap, split, delete and paste planning
     state.rs        transient selection, monitors, file dialogs, background jobs
 ```
 
@@ -55,7 +57,12 @@ titles, gaps, and multiple active tracks rather than dropping them silently.
 The UI has independent source and program monitors, each with its own
 decode stream, position and GPU frame slot; only one plays at a time. It
 supports video play/pause, frame stepping, monitor and timeline scrubbing,
-timeline zoom, source filtering, filmstrip clips and title text display. It does
+timeline zoom, source filtering, filmstrip clips and title text display.
+Clip selection may hold several clips; dragging, pasting, nudging, splitting
+and deleting a selection is planned in `ui/edits.rs` against the current
+project and applied as one `ReplaceTracks` command, so it undoes in one step
+and the project's own validation still rejects overlaps. Drag previews and
+the rubber band are transient UI state. It does
 not composite simultaneous video/title layers; title edits, split/move/trim/delete,
 audio clip settings, and ripple delete use project commands. Video sources
 with audio add aligned clips to both tracks; later edits to those clips are

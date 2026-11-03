@@ -1,14 +1,11 @@
 use super::UiState;
 use crate::export::ExportControl;
 use crate::media::MediaKind;
-use creamui::core::layout::{Dimension, Style};
-use creamui::core::{
-    CursorIcon, FileDropTarget, Painter, Point, Rect, RgbaImage, TextAlign, Widget,
-};
+use creamui::core::layout::{Dimension, LengthPercentageAuto, Position, Style};
+use creamui::core::{CursorIcon, Painter, Point, Rect, RgbaImage, TextAlign, Widget};
 use creamui::widgets::layout::{Align, Justify, StyleExt};
 use creamui::widgets::{Icon, RawButton, RawText, Symbol};
 use creamui::{BoxedWidget, Color, StateStyle, Styled};
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -677,18 +674,27 @@ pub(super) fn chip(
     )
 }
 
-/// A clickable container, used for selectable media bin items.
-pub(super) fn selectable(
+/// A media bin item: click selects it, dragging carries it to the timeline.
+pub(super) fn media_item(
     style: Style,
     selected: bool,
     children: Vec<BoxedWidget>,
     state: &UiState,
-    operation: impl Fn(&UiState) + 'static,
+    media_id: u64,
 ) -> BoxedWidget {
-    let state = state.clone();
+    let window = |position: Point, rect: Rect| Point {
+        x: rect.x + position.x,
+        y: rect.y + position.y,
+    };
+    let (click, start, drag, end) = (state.clone(), state.clone(), state.clone(), state.clone());
     let background = if selected { SURFACE } else { PANEL_RAISED };
     Box::new(
-        RawButton::new(style, move || operation(&state))
+        RawButton::new(style, move || click.select_media(media_id))
+            .with_drag_start(move |position, rect| {
+                start.begin_media_drag(media_id, window(position, rect))
+            })
+            .with_drag(move |position, rect| drag.drag_pointer(window(position, rect)))
+            .with_drag_end(move || end.end_media_drag())
             .with_children(children)
             .background(background)
             .border(if selected { ACCENT } else { BORDER }, 1.0)
@@ -873,38 +879,63 @@ impl Widget for ExportMeter {
     }
 }
 
-/// A container that imports files dropped onto it from the desktop.
-pub(super) struct DropZone {
-    pub style: creamui::Style,
-    pub children: Vec<BoxedWidget>,
-    pub on_drop: Rc<dyn Fn(Vec<PathBuf>)>,
+/// A floating label that follows the pointer while something is dragged.
+/// It spans the window, is painted last and takes no input.
+pub(super) struct DragOverlay {
+    pub pointer: Point,
+    pub label: String,
+    pub valid: bool,
+    pub size: (f32, f32),
 }
 
-impl Widget for DropZone {
+impl Widget for DragOverlay {
     fn style(&self) -> creamui::Style {
-        self.style.clone()
+        Style {
+            position: Position::Absolute,
+            inset: creamui::core::layout::Rect {
+                left: LengthPercentageAuto::Length(0.0),
+                top: LengthPercentageAuto::Length(0.0),
+                right: LengthPercentageAuto::Auto,
+                bottom: LengthPercentageAuto::Auto,
+            },
+            ..Style::default().size(self.size.0, self.size.1)
+        }
+        .into()
     }
 
-    fn paint(&self, _painter: &mut dyn Painter, _rect: Rect) {}
-
-    fn children(&mut self) -> Vec<BoxedWidget> {
-        std::mem::take(&mut self.children)
-    }
-
-    fn clips_children(&self) -> bool {
-        true
-    }
-
-    fn clip_corner_radius(&self) -> f32 {
-        self.style.paint.corner_radius.unwrap_or(0.0)
-    }
-
-    fn file_drop_target(&self) -> Option<FileDropTarget> {
-        let on_drop = self.on_drop.clone();
-        Some(FileDropTarget {
-            accepts: Rc::new(|_| true),
-            on_drop: Rc::new(move |paths| on_drop(paths)),
-        })
+    fn paint(&self, painter: &mut dyn Painter, rect: Rect) {
+        let width = (self.label.chars().count() as f32 * 6.6 + 34.0).min(rect.width - 8.0);
+        let chip = Rect {
+            x: (self.pointer.x + 16.0).min(rect.x + rect.width - width - 4.0),
+            y: (self.pointer.y + 14.0).min(rect.y + rect.height - 30.0),
+            width,
+            height: 26.0,
+        };
+        let color = if self.valid { ACCENT } else { PLAYHEAD };
+        painter.draw_box_shadow(chip, Color::rgba(0, 0, 0, 140), 0.0, 4.0, 12.0, 0.0, 7.0);
+        painter.fill_rect(chip, SURFACE, 7.0);
+        painter.stroke_rect(chip, color, 1.0, 7.0);
+        painter.fill_rect(
+            Rect {
+                x: chip.x + 10.0,
+                y: chip.y + 10.0,
+                width: 6.0,
+                height: 6.0,
+            },
+            color,
+            3.0,
+        );
+        painter.fill_text(
+            Rect {
+                x: chip.x + 22.0,
+                width: chip.width - 28.0,
+                ..chip
+            },
+            &fit(&self.label, chip.width - 28.0, 11.0),
+            TEXT,
+            11.0,
+            TextAlign::Start,
+        );
     }
 }
 

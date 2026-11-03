@@ -1,4 +1,6 @@
 mod controls;
+mod edits;
+mod interaction;
 mod state;
 mod timeline_view;
 mod window;

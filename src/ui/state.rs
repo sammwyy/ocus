@@ -1,15 +1,18 @@
 use crate::export::{self, ExportControl};
+use crate::media::preview::{FrameImage, FrameSource, PreviewEvent, PreviewPlan, decode_sequence};
 use crate::media::{Media, MediaKind, MediaProbe, Thumbnail, probe, thumbnail};
 use crate::project::{Command, Editor, Project, store};
+use crate::timeline::{ClipContent, TrackKind};
 use creamui::core::RgbaImage;
 use creamui::widgets::{ScrollController, TextController};
-use creamui::{AppHandle, Signal};
+use creamui::{AppHandle, GpuFrame, GpuFrameSlot, Signal, WindowHandle};
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Sidebar {
@@ -26,6 +29,9 @@ pub(crate) struct UiState {
     pub ui_revision: Signal<u64>,
     pub selected: Signal<Option<(u64, u64)>>,
     pub playhead: Signal<u64>,
+    pub playing: Signal<bool>,
+    pub preview_available: Signal<bool>,
+    pub preview_slot: GpuFrameSlot,
     pub project_path: Signal<Option<PathBuf>>,
     pub title_text: TextController,
     pub status: Signal<String>,
@@ -40,6 +46,9 @@ pub(crate) struct UiState {
     pub timeline_page: Signal<u64>,
     pub sidebar: Signal<Sidebar>,
     app: Rc<RefCell<Option<AppHandle>>>,
+    window: Rc<RefCell<Option<WindowHandle>>>,
+    preview_cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
+    preview_serial: Rc<Cell<u64>>,
     export_control: Rc<RefCell<Option<Arc<ExportControl>>>>,
 }
 
@@ -51,6 +60,9 @@ impl UiState {
             ui_revision: Signal::new(0),
             selected: Signal::new(None),
             playhead: Signal::new(0),
+            playing: Signal::new(false),
+            preview_available: Signal::new(false),
+            preview_slot: GpuFrameSlot::new(),
             project_path: Signal::new(None),
             title_text: TextController::default(),
             status: Signal::new("Ready · Project not saved".into()),
@@ -65,6 +77,9 @@ impl UiState {
             timeline_page: Signal::new(0),
             sidebar: Signal::new(Sidebar::Media),
             app: Rc::new(RefCell::new(None)),
+            window: Rc::new(RefCell::new(None)),
+            preview_cancel: Rc::new(RefCell::new(None)),
+            preview_serial: Rc::new(Cell::new(0)),
             export_control: Rc::new(RefCell::new(None)),
         }
     }
@@ -73,12 +88,19 @@ impl UiState {
         *self.app.borrow_mut() = Some(app);
     }
 
+    pub fn connect_window(&self, window: WindowHandle) {
+        self.preview_available.set(window.gpu_device().is_some());
+        *self.window.borrow_mut() = Some(window);
+        self.request_preview();
+    }
+
     pub fn edit(&self, command: Command) -> bool {
         let changed = self.editor.borrow_mut().apply(command);
         if changed {
             self.revision.update(|revision| *revision += 1);
             self.dirty.set(true);
             self.status.set("Unsaved changes".into());
+            self.request_preview();
         } else {
             self.status
                 .set("Edit rejected: check range, track and clip".into());
@@ -91,6 +113,7 @@ impl UiState {
             self.revision.update(|revision| *revision += 1);
             self.dirty.set(true);
             self.status.set("Undid edit · Unsaved changes".into());
+            self.request_preview();
         }
     }
 
@@ -99,6 +122,7 @@ impl UiState {
             self.revision.update(|revision| *revision += 1);
             self.dirty.set(true);
             self.status.set("Redid edit · Unsaved changes".into());
+            self.request_preview();
         }
     }
 
@@ -109,6 +133,179 @@ impl UiState {
             (u64::from(frame_rate.numerator) * 10 / u64::from(frame_rate.denominator)).max(1);
         drop(editor);
         self.playhead.set(frame);
+        self.timeline_page.set(frame / page_frames);
+        self.request_preview();
+    }
+
+    pub fn play(&self) {
+        if !self.preview_available.peek() {
+            self.status
+                .set("GPU preview is not available on this display".into());
+            return;
+        }
+        let project = self.editor.borrow();
+        let has_video = project.project().tracks().iter().any(|track| {
+            track.kind == TrackKind::Video && track.clips.iter().any(|clip| {
+                matches!(clip.content, ClipContent::Media { media_id }
+                    if project.project().media().iter().any(|media| media.id == media_id && media.kind != MediaKind::Audio))
+            })
+        });
+        let end = project
+            .project()
+            .tracks()
+            .iter()
+            .flat_map(|track| &track.clips)
+            .filter_map(|clip| clip.start_frame.checked_add(clip.duration_frames))
+            .max()
+            .unwrap_or(0);
+        drop(project);
+        if !has_video || end == 0 {
+            self.status
+                .set("Add video or an image to the timeline to preview".into());
+            return;
+        }
+        self.playing.set(true);
+        if self.playhead.peek() >= end.saturating_sub(1) {
+            self.focus_frame(0);
+        } else {
+            self.request_preview();
+        }
+    }
+
+    pub fn pause(&self) {
+        self.playing.set(false);
+        self.cancel_preview();
+    }
+
+    fn cancel_preview(&self) {
+        if let Some(cancel) = self.preview_cancel.borrow_mut().take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.preview_serial
+            .set(self.preview_serial.get().wrapping_add(1));
+    }
+
+    fn request_preview(&self) {
+        self.cancel_preview();
+        let Some(window) = self.window.borrow().clone() else {
+            return;
+        };
+        if !self.preview_available.peek() || window.is_closed() {
+            return;
+        }
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let editor = self.editor.borrow();
+        let project = editor.project();
+        let mut sources = Vec::new();
+        for track in project
+            .tracks()
+            .iter()
+            .filter(|track| track.kind == TrackKind::Video)
+        {
+            for clip in &track.clips {
+                if let ClipContent::Media { media_id } = clip.content
+                    && let Some(media) = project.media().iter().find(|media| media.id == media_id)
+                {
+                    sources.push(FrameSource {
+                        clip_id: clip.id,
+                        path: media.path.clone(),
+                        kind: media.kind,
+                        start: clip.start_frame,
+                        source_start: clip.source_start_frame,
+                        duration: clip.duration_frames,
+                    });
+                }
+            }
+        }
+        let plan = PreviewPlan {
+            sources,
+            end: project
+                .tracks()
+                .iter()
+                .flat_map(|track| &track.clips)
+                .filter_map(|clip| clip.start_frame.checked_add(clip.duration_frames))
+                .max()
+                .unwrap_or(0),
+            fps: (
+                project.settings().frame_rate.numerator,
+                project.settings().frame_rate.denominator,
+            ),
+            resolution: (project.settings().width, project.settings().height),
+        };
+        drop(editor);
+        window.request_repaint();
+        if plan.end == 0 || (!self.playing.peek() && self.playhead.peek() >= plan.end) {
+            self.preview_slot.clear(&window);
+            return;
+        }
+        let serial = self.preview_serial.get();
+        let start = self.playhead.peek();
+        let playing = self.playing.peek();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        *self.preview_cancel.borrow_mut() = Some(cancelled.clone());
+        let state = self.clone();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let worker_pending = pending.clone();
+        app.spawn_stream(
+            move |emit| {
+                if let Err(error) = decode_sequence(&plan, start, playing, cancelled, |event| {
+                    if matches!(event, PreviewEvent::Frame(..))
+                        && worker_pending
+                            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                                (count < 2).then_some(count + 1)
+                            })
+                            .is_err()
+                    {
+                        return;
+                    }
+                    emit(event);
+                }) {
+                    emit(PreviewEvent::Failed(error));
+                }
+            },
+            move |event| {
+                if matches!(event, PreviewEvent::Frame(..)) {
+                    pending.fetch_sub(1, Ordering::Relaxed);
+                }
+                if state.preview_serial.get() != serial {
+                    return;
+                }
+                match event {
+                    PreviewEvent::Frame(frame, Some(image)) => {
+                        match upload_preview_frame(&window, image) {
+                            Ok(texture) => {
+                                state.preview_slot.publish(texture, &window);
+                                state.playhead.set(frame);
+                                state.update_timeline_page(frame);
+                            }
+                            Err(error) => {
+                                state.pause();
+                                state.status.set(format!("Preview failed: {error}"));
+                            }
+                        }
+                    }
+                    PreviewEvent::Frame(frame, None) => {
+                        state.preview_slot.clear(&window);
+                        state.playhead.set(frame);
+                        state.update_timeline_page(frame);
+                    }
+                    PreviewEvent::Finished => state.pause(),
+                    PreviewEvent::Failed(error) => {
+                        state.pause();
+                        state.status.set(format!("Preview failed: {error}"));
+                    }
+                }
+            },
+        );
+    }
+
+    fn update_timeline_page(&self, frame: u64) {
+        let editor = self.editor.borrow();
+        let rate = &editor.project().settings().frame_rate;
+        let page_frames = (u64::from(rate.numerator) * 10 / u64::from(rate.denominator)).max(1);
+        drop(editor);
         self.timeline_page.set(frame / page_frames);
     }
 
@@ -130,6 +327,10 @@ impl UiState {
         *self.editor.borrow_mut() = Editor::new(Project::new("Untitled"));
         self.project_path.set(None);
         self.thumbnails.borrow_mut().clear();
+        self.pause();
+        if let Some(window) = self.window.borrow().as_ref() {
+            self.preview_slot.clear(window);
+        }
         self.selected.set(None);
         self.playhead.set(0);
         self.timeline_page.set(0);
@@ -191,6 +392,8 @@ impl UiState {
                         state.sidebar.set(Sidebar::Media);
                         state.status.set("Project opened".into());
                         state.load_thumbnails(sources);
+                        state.pause();
+                        state.request_preview();
                     }
                     Ok(_) => state
                         .status
@@ -652,6 +855,59 @@ impl UiState {
             self.focus_frame(start_frame);
         }
     }
+}
+
+fn upload_preview_frame(window: &WindowHandle, image: FrameImage) -> Result<GpuFrame, String> {
+    let row_bytes = image
+        .width
+        .checked_mul(4)
+        .ok_or("Preview image is too wide")?;
+    if image.width == 0
+        || image.height == 0
+        || image.pixels.len()
+            != usize::try_from(row_bytes)
+                .ok()
+                .and_then(|row| row.checked_mul(image.height as usize))
+                .ok_or("Preview image is too large")?
+    {
+        return Err("Invalid preview image data".into());
+    }
+    let (device, queue) = window
+        .gpu_device()
+        .ok_or("GPU device is not available for preview")?;
+    let size = wgpu::Extent3d {
+        width: image.width,
+        height: image.height,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("ocus-preview-frame"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::ImageCopyTexture {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &image.pixels,
+        wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(row_bytes),
+            rows_per_image: Some(image.height),
+        },
+        size,
+    );
+    Ok(GpuFrame::new(
+        texture.create_view(&wgpu::TextureViewDescriptor::default()),
+    ))
 }
 
 fn project_file(path: PathBuf) -> Result<PathBuf, String> {

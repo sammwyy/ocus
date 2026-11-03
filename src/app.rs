@@ -7,6 +7,7 @@ pub fn run_app() {
         .on_started(move |app| {
             state.connect(app.clone());
             let close = state.clone();
+            let preview = state.clone();
             app.append_window(
                 WindowOptions {
                     title: "Ocus".into(),
@@ -18,6 +19,7 @@ pub fn run_app() {
                 },
                 BACKGROUND,
                 move |window| {
+                    preview.connect_window(window.clone());
                     window.on_close_requested(move || {
                         if close.busy.peek() {
                             close
@@ -25,7 +27,12 @@ pub fn run_app() {
                                 .set("Wait for the current operation before closing".into());
                             return false;
                         }
-                        close.confirm_discard()
+                        if close.confirm_discard() {
+                            close.pause();
+                            true
+                        } else {
+                            false
+                        }
                     });
                 },
                 move |viewport| build(&state, viewport),

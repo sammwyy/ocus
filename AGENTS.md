@@ -13,10 +13,10 @@ edits must go through commands, not direct UI mutation. Keep decoding,
 encoding, and filesystem work off the UI thread. Add modules only when they
 have working code and tests; see [ARCHITECTURE.md](ARCHITECTURE.md).
 
-Use the published `creamui` crate from crates.io, never a sibling path
-dependency. The pinned 0.3.0 release does not yet expose the GPU viewport and
-split-pane APIs available in the neighboring checkout; do not use those APIs
-until they are published. See [TODO.md](TODO.md) for that release dependency.
+Use the pinned GitHub revision of `creamui` in `Cargo.toml`, never a sibling
+path dependency. The published GPU viewport and background stream APIs are
+required for video preview; update the pinned commit only after verifying it
+is available on GitHub and running the checks in both repositories.
 
 From the repository root, run `cargo fmt --all --check`,
 `cargo test --all-targets --locked`, and

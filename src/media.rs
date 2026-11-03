@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 use ffmpeg_next as ffmpeg;
 use serde::{Deserialize, Serialize};
 
+pub mod preview;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Media {
     pub id: u64,

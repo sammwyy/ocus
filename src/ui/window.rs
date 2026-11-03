@@ -10,7 +10,8 @@ use creamui::widgets::{
     AppTitlebar, Button, ButtonSize, ButtonState, ButtonVariant, RawScrollView, RawText,
     TextController, TextInput,
 };
-use creamui::{BoxedWidget, Color, Size, Styled};
+use creamui::{BoxedWidget, Color, GpuViewport, Size, Styled};
+use std::rc::Rc;
 use std::sync::Arc;
 
 pub(crate) const BACKGROUND: Color = Color::rgb(10, 13, 17);
@@ -25,8 +26,10 @@ const AUDIO: Color = Color::rgb(226, 167, 110);
 struct TimelineRuler {
     start: u64,
     span: u64,
+    end: u64,
     fps: f64,
     playhead: u64,
+    state: UiState,
 }
 
 impl Widget for TimelineRuler {
@@ -88,6 +91,26 @@ impl Widget for TimelineRuler {
                 1.0,
             );
         }
+    }
+
+    fn on_drag(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
+        let state = self.state.clone();
+        let (start, span, end) = (self.start, self.span, self.end);
+        Some(Rc::new(move |position, rect| {
+            if end == 0 {
+                return;
+            }
+            let progress = ((position.x - 100.0) / (rect.width - 112.0).max(1.0)).clamp(0.0, 1.0);
+            let frame = start
+                .saturating_add((progress * span as f32).round() as u64)
+                .min(end - 1);
+            if state.playhead.peek() != frame {
+                if state.playing.peek() {
+                    state.pause();
+                }
+                state.focus_frame(frame);
+            }
+        }))
     }
 }
 
@@ -518,87 +541,126 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
     });
     let empty_timeline = project.tracks().iter().all(|track| track.clips.is_empty());
     let first_media = project.media().first();
+    let gpu_preview = state.preview_available.get();
+    let stage: BoxedWidget = if media_at_frame && gpu_preview {
+        Box::new(
+            GpuViewport::new(
+                Style {
+                    size: creamui::core::layout::Size {
+                        width: Dimension::Percent(1.0),
+                        height: Dimension::Percent(1.0),
+                    },
+                    flex_grow: 1.0,
+                    ..Default::default()
+                },
+                state.preview_slot.clone(),
+            )
+            .aspect_ratio(project.settings().width as f32 / project.settings().height as f32),
+        )
+    } else {
+        Box::new(
+            Flex::column()
+                .grow(1.0)
+                .align(Align::Center)
+                .gap(12.0)
+                .padding(22.0)
+                .background(STAGE)
+                .corner_radius(8.0)
+                .child(text(
+                    if media_at_frame {
+                        "GPU PREVIEW"
+                    } else {
+                        "OCUS  /  MONITOR"
+                    },
+                    MUTED,
+                    10.0,
+                ))
+                .child(text(
+                    title_at_frame.unwrap_or(if media_at_frame {
+                        "GPU preview unavailable"
+                    } else if empty_timeline && first_media.is_some() {
+                        "Footage is ready"
+                    } else if empty_timeline {
+                        "Start your edit"
+                    } else {
+                        "No clip at this frame"
+                    }),
+                    TEXT,
+                    23.0,
+                ))
+                .child(text(
+                    if empty_timeline {
+                        if first_media.is_some() {
+                            "Add a source to the timeline to start editing."
+                        } else {
+                            "Import footage, then add it to the timeline."
+                        }
+                    } else if media_at_frame {
+                        "A GPU rendering backend is required to show video."
+                    } else {
+                        "Title text is shown here; audio playback is not available."
+                    },
+                    MUTED,
+                    11.0,
+                ))
+                .child(
+                    if let Some(media) = first_media.filter(|_| empty_timeline) {
+                        styled_action(
+                            "Add first source",
+                            ButtonVariant::Primary,
+                            !busy
+                                && (media.duration_us.is_some() || media.kind == MediaKind::Image),
+                            state,
+                            {
+                                let id = media.id;
+                                move |state| state.insert_media(id)
+                            },
+                        )
+                    } else if empty_timeline {
+                        styled_action(
+                            "Import media",
+                            ButtonVariant::Primary,
+                            !busy,
+                            state,
+                            UiState::import_dialog,
+                        )
+                    } else {
+                        Box::new(Flex::row().height(0.0))
+                    },
+                ),
+        )
+    };
     let preview = panel(
         "Program monitor",
-        "TEXT PREVIEW",
+        if gpu_preview {
+            "GPU PREVIEW"
+        } else {
+            "GPU UNAVAILABLE"
+        },
         Box::new(
             Flex::column()
                 .gap(8.0)
                 .grow(1.0)
-                .child(Box::new(
-                    Flex::column()
-                        .grow(1.0)
-                        .align(Align::Center)
-                        .gap(12.0)
-                        .padding(22.0)
-                        .background(STAGE)
-                        .corner_radius(8.0)
-                        .child(text(
-                            if media_at_frame {
-                                "SOURCE PREVIEW"
-                            } else {
-                                "OCUS  /  MONITOR"
-                            },
-                            MUTED,
-                            10.0,
-                        ))
-                        .child(text(
-                            title_at_frame.unwrap_or(if media_at_frame {
-                                "Video preview is not available"
-                            } else if empty_timeline && first_media.is_some() {
-                                "Footage is ready"
-                            } else if empty_timeline {
-                                "Start your edit"
-                            } else {
-                                "No clip at this frame"
-                            }),
-                            TEXT,
-                            23.0,
-                        ))
-                        .child(text(
-                            if empty_timeline {
-                                if first_media.is_some() {
-                                    "Add a source to the timeline to start editing."
-                                } else {
-                                    "Import footage, then add it to the timeline."
-                                }
-                            } else {
-                                "Titles are text-only. Video playback is not available yet."
-                            },
-                            MUTED,
-                            11.0,
-                        ))
-                        .child(
-                            if let Some(media) = first_media.filter(|_| empty_timeline) {
-                                styled_action(
-                                    "Add first source",
-                                    ButtonVariant::Primary,
-                                    !busy
-                                        && (media.duration_us.is_some()
-                                            || media.kind == MediaKind::Image),
-                                    state,
-                                    {
-                                        let id = media.id;
-                                        move |state| state.insert_media(id)
-                                    },
-                                )
-                            } else if empty_timeline {
-                                styled_action(
-                                    "Import media",
-                                    ButtonVariant::Primary,
-                                    !busy,
-                                    state,
-                                    UiState::import_dialog,
-                                )
-                            } else {
-                                Box::new(Flex::row().height(0.0))
-                            },
-                        ),
-                ))
+                .child(stage)
                 .child(Box::new(
                     Flex::row()
                         .gap(8.0)
                         .align(Align::Center)
+                        .child(if gpu_preview {
+                            if state.playing.get() {
+                                action("Pause", true, state, UiState::pause)
+                            } else {
+                                styled_action(
+                                    "Play",
+                                    ButtonVariant::Primary,
+                                    timeline_end > 0,
+                                    state,
+                                    UiState::play,
+                                )
+                            }
+                        } else {
+                            Box::new(Flex::row().height(0.0))
+                        })
                         .child(action("Previous frame", frame > 0, state, |s| {
                             s.focus_frame(s.playhead.peek().saturating_sub(1));
                         }))
@@ -848,7 +910,11 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     11.0,
                 ))
                 .child(text(
-                    "Preview of video frames is not available yet.",
+                    if gpu_preview {
+                        "Video preview is available; audio playback is pending."
+                    } else {
+                        "A GPU rendering backend is required for video preview."
+                    },
                     MUTED,
                     10.0,
                 ))
@@ -1047,8 +1113,10 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         .child(Box::new(TimelineRuler {
             start: visible_start,
             span: page_span,
+            end: timeline_end,
             fps,
             playhead: frame,
+            state: state.clone(),
         }))
         .child(Box::new(
             RawScrollView::controlled(
@@ -1349,6 +1417,30 @@ mod tests {
                 .iter()
                 .any(|label| label == "Add to timeline")
         );
+    }
+
+    #[test]
+    fn timeline_ruler_scrubs_and_clamps_to_the_last_frame() {
+        let state = UiState::new();
+        let ruler = TimelineRuler {
+            start: 0,
+            span: 300,
+            end: 300,
+            fps: 30.0,
+            playhead: 0,
+            state: state.clone(),
+        };
+        let drag = ruler.on_drag().unwrap();
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1120.0,
+            height: 25.0,
+        };
+        drag(Point { x: 604.0, y: 12.0 }, rect);
+        assert_eq!(state.playhead.peek(), 150);
+        drag(Point { x: 1500.0, y: 12.0 }, rect);
+        assert_eq!(state.playhead.peek(), 299);
     }
 
     #[test]

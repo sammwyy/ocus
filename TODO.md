@@ -25,10 +25,11 @@ clip commands do not complete the corresponding editor workflows.
   bin without blocking the UI.
 - [ ] Build timeline clip rendering and interactions for selection, split,
   move, trim, delete, and ripple delete; connect gestures to commands.
-- [ ] Implement video decoding, a bounded frame cache, and play/pause/seek
-  with frame-accurate scrubbing.
-- [ ] Connect the video compositor to CreamUI's GPU presentation path and
-  keep the UI responsive during decoding and seeks.
+- [x] Decode video on a worker with a bounded frame buffer; support
+  play/pause, frame stepping and frame-accurate timeline ruler seeks.
+- [x] Present video and still-image frames through CreamUI's GPU viewport.
+- [ ] Composite overlapping video layers and titles consistently between
+  preview and export; support transition effects.
 
 ## Audio, titles, and export
 
@@ -56,9 +57,8 @@ clip commands do not complete the corresponding editor workflows.
 
 ## External prerequisite
 
-- [ ] Publish the CreamUI GPU viewport, split-pane, and related input APIs
-  to crates.io, then upgrade Ocus's pinned `creamui = "=0.3.0"` dependency
-  before using them. Do not add a sibling path dependency.
+- [x] Pin CreamUI to a published GitHub commit with GPU viewport and
+  background stream APIs. Do not add a sibling path dependency.
 - [x] Integrate FFmpeg library bindings for background probing, thumbnails,
-  and limited H.264 export; see [DEVELOPMENT.md](DEVELOPMENT.md). Playback
-  decoding, audio processing, and full A/V encoding remain open.
+  and limited H.264 export; see [DEVELOPMENT.md](DEVELOPMENT.md). Audio
+  processing and full A/V encoding remain open.

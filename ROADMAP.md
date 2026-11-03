@@ -40,7 +40,7 @@ They add a lot of complexity and are not needed by the target audience. They can
 | Noise reduction | `nnnoiseless` |
 | Speech-to-text | `whisper-rs` (local, optional) |
 | Stabilization | `vid.stab` via FFmpeg |
-| UI toolkit | `creamui` crate (crates.io) |
+| UI toolkit | `creamui` (pinned GitHub revision for GPU preview) |
 
 FFmpeg covers most of the codec and filter work. Where it falls short, the project pulls in focused Rust crates instead of reimplementing things.
 

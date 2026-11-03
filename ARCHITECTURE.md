@@ -16,6 +16,7 @@ src/
     edit.rs         project commands and undo/redo history
     format.rs       versioned JSON string format
   media.rs          source references, probing and thumbnail decoding
+  media/preview.rs  background video decoding and frame-accurate seek
   export.rs         silent H.264 MP4 encoding with cancellation
   timeline.rs       tracks, clips, and title data
   ui/
@@ -39,11 +40,15 @@ background jobs, with same-directory temporary files, sync, and rename for
 atomic writes. Imported media paths are absolute. Format migrations do not
 exist yet; optional probe metadata keeps version 1 files readable. Media
 probing and bounded first-frame thumbnails use the `ffmpeg-next` library on
-workers; `media.rs` does not provide a playback decoder. `export.rs` decodes
+workers. `media/preview.rs` decodes and scales frames off the UI thread,
+maintaining a small frame buffer during playback and seeking to source frames
+after an edit. The UI transfers decoded frames to textures on CreamUI's own
+GPU device and presents them through its viewport. `export.rs` decodes
 video and still-image clips sequentially with bounded frame storage and
 encodes a silent H.264 MP4 from one continuous video track. It refuses audio,
 titles, gaps, and multiple active tracks rather than dropping them silently.
-The UI supports frame stepping and title text display, not rendered video;
+The UI supports video play/pause, frame stepping, timeline ruler scrubbing and
+title text display. It does not composite simultaneous video/title layers;
 title edits, split/move/trim/delete, audio clip settings, and ripple delete
 use project commands. Video sources with audio add aligned clips to both
 tracks; later edits to those clips are not linked yet. Audio, the preview
@@ -68,11 +73,10 @@ event loop. Use frame counts for timeline positions and durations; audio samples
 and UI pixels are different units. Imported media is referenced, never copied
 or modified; thumbnails, waveforms, and proxies can be regenerated.
 
-CreamUI is a pinned crates.io dependency, not a sibling path checkout. Its
-published 0.3.0 release supports the shell but does not yet include the GPU
-viewport and split-pane APIs in the neighboring repository; see
-[TODO.md](TODO.md). Do not build a preview around avoidable per-frame CPU
-uploads just to use an unpublished widget API.
+CreamUI is pinned to an immutable commit from its GitHub repository, not a
+sibling path checkout. The GPU viewport and background-stream APIs are
+available at that revision. Video decoding and pixel conversion stay on a
+worker; the UI uploads frames to the window's existing GPU device.
 
 Test project edits and format round trips without a window; test UI layout
 with a headless CreamUI painter. Add codec/device integration tests and measure

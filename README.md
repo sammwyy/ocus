@@ -22,9 +22,13 @@ action. Audio clips have editable volume and mute values, but those values do
 not affect playback or export yet. Previously saved references without probe
 metadata can be re-imported.
 
-The workspace shows a time-scaled, paged timeline, a text-only monitor, and
-an inspector that scrolls through clip controls. On narrower windows the
-media library and inspector share a tabbed sidebar.
+The workspace shows a time-scaled, paged timeline, a GPU video monitor, and
+an inspector that scrolls through clip controls. Play/Pause, single-frame
+stepping and dragging the timeline ruler seek video and still-image clips;
+decoding happens on a worker and the current frame is presented on the same
+GPU device as CreamUI. On a CPU-only window the monitor instead explains why
+video cannot be displayed. On narrower windows the media library and
+inspector share a tabbed sidebar.
 
 **Export silent MP4** encodes H.264 from a continuous sequence of video-only
 clips and still images on one video track. Cuts and trims are honored; export
@@ -33,11 +37,11 @@ completed file atomically. The button reports unsupported sequences rather
 than silently omitting content. Audio, titles, gaps and multiple active tracks
 are **not** exported, and output has no AAC audio stream.
 
-This is not a completed v0.1 video editor. There is no video-frame preview,
-audio playback, or compositor. The pinned CreamUI 0.3.0 does not publish the
-GPU viewport API required by the planned preview. Building now requires FFmpeg
-development libraries (available on the Fedora development machine); there
-is no fake play control.
+This is not a completed v0.1 video editor. Preview renders a single active
+video layer or still image without audio; it does not yet composite overlapping
+tracks or titles onto video. Audio playback and audio-synchronized timing are
+not implemented. Building requires FFmpeg development libraries (available
+on the Fedora development machine) and a GPU-capable CreamUI window.
 
 ## Run and check
 
@@ -51,16 +55,17 @@ cargo fmt --all --check
 cargo clippy --all-targets --locked -- -D warnings
 ```
 
-The app needs a graphical desktop session; tests run headlessly. Dependencies
-come from crates.io, including the pinned `creamui` 0.3.0 release. No local
-CreamUI checkout is needed.
+The app needs a graphical desktop session; tests run headlessly. CreamUI is
+pinned to a commit on its GitHub repository, while other dependencies come
+from crates.io. No local CreamUI checkout is needed.
 
 ## Code map
 
 - `src/app.rs`: window startup and wiring.
 - `src/project/`: saved project, JSON format, and edit history/undo-redo.
 - `src/timeline.rs`: tracks, clips, and titles.
-- `src/media.rs`: source references, FFmpeg probing and still thumbnails.
+- `src/media.rs` and `src/media/preview.rs`: source references, FFmpeg probing,
+  thumbnails and background video decoding.
 - `src/export.rs`: limited H.264 MP4 encoding and cancellation.
 - `src/ui/`: compact CreamUI workspace and background file workflow.
 - `src/main.rs`: executable entry point.

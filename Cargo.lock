@@ -443,8 +443,7 @@ dependencies = [
 [[package]]
 name = "creamui"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49a4aa847fe899f5d7ff7123fc91f9f52e7eb4aeb69ff0f69ec47e112128cf92"
+source = "git+https://github.com/sammwyy/creamui.git?rev=a20e43ebe5940c01151c76d3b89cb1e36b3e9379#a20e43ebe5940c01151c76d3b89cb1e36b3e9379"
 dependencies = [
  "creamui-core",
  "creamui-fonts",
@@ -458,8 +457,7 @@ dependencies = [
 [[package]]
 name = "creamui-core"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e418ca042772f1bc6cef17729969ddff213af522f84035c6ce5d9fcf7558b85"
+source = "git+https://github.com/sammwyy/creamui.git?rev=a20e43ebe5940c01151c76d3b89cb1e36b3e9379#a20e43ebe5940c01151c76d3b89cb1e36b3e9379"
 dependencies = [
  "bitflags 2.13.2",
  "creamui-reactive",
@@ -470,8 +468,7 @@ dependencies = [
 [[package]]
 name = "creamui-fonts"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c6b49ef9c1444d4ffbaa4d84434d6f42e2522d434739329d6a57d8acd2e92df"
+source = "git+https://github.com/sammwyy/creamui.git?rev=a20e43ebe5940c01151c76d3b89cb1e36b3e9379#a20e43ebe5940c01151c76d3b89cb1e36b3e9379"
 dependencies = [
  "creamui-reactive",
  "log",
@@ -483,8 +480,7 @@ dependencies = [
 [[package]]
 name = "creamui-platform"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05da1b99a5daca2bf7d708465a0f0c257bd9dc6e43f88d0a4bf7631f37bde983"
+source = "git+https://github.com/sammwyy/creamui.git?rev=a20e43ebe5940c01151c76d3b89cb1e36b3e9379#a20e43ebe5940c01151c76d3b89cb1e36b3e9379"
 dependencies = [
  "jni",
  "libc",
@@ -500,14 +496,12 @@ dependencies = [
 [[package]]
 name = "creamui-reactive"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ac932490982a12f329a2c3d8e00ac91c8e92d7002a9e405cdbf2e4d132de161"
+source = "git+https://github.com/sammwyy/creamui.git?rev=a20e43ebe5940c01151c76d3b89cb1e36b3e9379#a20e43ebe5940c01151c76d3b89cb1e36b3e9379"
 
 [[package]]
 name = "creamui-render"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c4ac2ecf15b2283caf95043ee6c2231669c67a9833b4b022a9cd51718160526"
+source = "git+https://github.com/sammwyy/creamui.git?rev=a20e43ebe5940c01151c76d3b89cb1e36b3e9379#a20e43ebe5940c01151c76d3b89cb1e36b3e9379"
 dependencies = [
  "bytemuck",
  "creamui-core",
@@ -534,8 +528,7 @@ dependencies = [
 [[package]]
 name = "creamui-theme"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a99a07314c94c73e7277199a3de4f8cfee1fce238f26eb9c19f9d5e5824e499"
+source = "git+https://github.com/sammwyy/creamui.git?rev=a20e43ebe5940c01151c76d3b89cb1e36b3e9379#a20e43ebe5940c01151c76d3b89cb1e36b3e9379"
 dependencies = [
  "creamui-fonts",
  "creamui-reactive",
@@ -544,8 +537,7 @@ dependencies = [
 [[package]]
 name = "creamui-widgets"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0978f0a39dfcb873669aa648107684ee4c8092b5fdfe5d9e80113204799fd254"
+source = "git+https://github.com/sammwyy/creamui.git?rev=a20e43ebe5940c01151c76d3b89cb1e36b3e9379#a20e43ebe5940c01151c76d3b89cb1e36b3e9379"
 dependencies = [
  "arboard",
  "creamui-core",
@@ -1732,6 +1724,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "wgpu",
 ]
 
 [[package]]

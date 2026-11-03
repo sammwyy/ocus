@@ -1,16 +1,15 @@
 # Building and developing Ocus
 
 These instructions build the **current** Ocus desktop application. The [roadmap](ROADMAP.md)
-describes a video editor in progress, not features already available. Media files can
-currently be probed and imported using FFmpeg, but video decoding, playback and
-MP4 export are not yet implemented. The current `Cargo.toml` uses the
+describes a video editor in progress, not features already available. Media files
+are probed with FFmpeg; a single video layer can be previewed through CreamUI's
+GPU viewport and a limited silent H.264 MP4 can be exported. Audio playback
+and audio export are not yet implemented. The current `Cargo.toml` uses the
 `ffmpeg-next = "=7.1.0"` bindings, so FFmpeg development headers and shared
 libraries **are required** to build, even when running headless tests.
 
-The repository pins the published `creamui = "=0.3.0"` crate. This version can
-build the window, but does not expose the GPU viewport and split-pane APIs
-needed for the planned compositor. Do not replace it with a sibling checkout;
-upgrade to a published release when those APIs become available.
+The repository pins a GitHub commit of CreamUI exposing a GPU viewport and
+worker stream API. Do not replace it with a sibling checkout.
 
 ## Common prerequisites
 
@@ -20,7 +19,8 @@ upgrade to a published release when those APIs become available.
 - Install your platform's native C/C++ build tools, `pkg-config` and FFmpeg
   development libraries as described below. `ffmpeg-sys-next` also runs
   `bindgen`, so provide a compatible `libclang`.
-- Allow Cargo to download dependencies from crates.io on the first build.
+- Allow Cargo to download crates.io dependencies and the pinned CreamUI commit
+  from GitHub on the first build.
 - Use a graphical desktop session for `cargo run`; build and tests can run
   headlessly.
 
@@ -34,7 +34,7 @@ cargo run --locked
 ```
 
 `--locked` uses the checked-in `Cargo.lock`. Do not substitute a local CreamUI
-path dependency to work around a missing published feature.
+path dependency for the pinned GitHub commit.
 
 ## Linux
 
@@ -78,9 +78,10 @@ an appropriate portal implementation is running; `zenity` provides a fallback
 for file and confirmation dialogs on desktops without that backend.
 
 The limited silent MP4 exporter also needs an H.264 encoder enabled in the
-installed FFmpeg build (such as `libx264`). Preview and audio export are not
-available yet; installing more FFmpeg packages does not provide CreamUI's
-unpublished GPU viewport API.
+installed FFmpeg build (such as `libx264`). Video preview requires a GPU
+rendering backend; audio playback and audio export are not available yet.
+CreamUI is pinned to a tested GitHub commit for the GPU viewport and worker
+stream APIs, rather than to the older crates.io release.
 
 ## macOS
 

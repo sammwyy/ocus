@@ -20,8 +20,8 @@ describes the intended releases; the README describes what runs today.
    commands, or architecture changes. Put concrete deferred work in
    [TODO.md](TODO.md); keep milestones in [ROADMAP.md](ROADMAP.md).
 
-Use Rust and Cargo. The desktop shell depends on the published
-`creamui = "=0.3.0"` crate, not a local path dependency. Media probing uses
+Use Rust and Cargo. The desktop shell depends on a pinned CreamUI GitHub
+revision with GPU viewport support, not a local path dependency. Media probing uses
 `ffmpeg-next`; building requires FFmpeg development libraries and `libclang`:
 
 ```sh
@@ -33,9 +33,8 @@ cargo clippy --all-targets --locked -- -D warnings
 
 `cargo run` needs a graphical desktop session. The model and UI rendering tests
 run headlessly but still link FFmpeg. Add dependencies with `cargo add`, commit
-`Cargo.lock`, and enable only the features an implemented workflow uses. An
-unreleased CreamUI feature must not be substituted with a sibling checkout
-to make Ocus build.
+`Cargo.lock`, and enable only the features an implemented workflow uses.
+Use the committed GitHub revision of CreamUI, not a sibling checkout.
 
 ## Review boundaries
 

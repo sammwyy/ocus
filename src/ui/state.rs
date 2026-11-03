@@ -30,10 +30,56 @@ pub(crate) enum MediaFilter {
     Image,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaView {
+    Grid,
+    List,
+}
+
 const MAX_THUMBNAILS: usize = 256;
 const MAX_STORYBOARDS: usize = 64;
+pub(crate) const ZOOM_SECONDS: [u64; 6] = [2, 5, 10, 30, 60, 180];
+const DEFAULT_ZOOM: usize = 2;
 
 pub(crate) type Storyboard = Arc<Vec<Arc<RgbaImage>>>;
+
+/// One GPU preview surface with its own position and decode stream.
+#[derive(Clone)]
+pub(crate) struct Monitor {
+    pub slot: GpuFrameSlot,
+    pub playing: Signal<bool>,
+    pub position: Signal<u64>,
+    cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
+    serial: Rc<Cell<u64>>,
+}
+
+impl Monitor {
+    fn new() -> Self {
+        Self {
+            slot: GpuFrameSlot::new(),
+            playing: Signal::new(false),
+            position: Signal::new(0),
+            cancel: Rc::new(RefCell::new(None)),
+            serial: Rc::new(Cell::new(0)),
+        }
+    }
+
+    fn cancel(&self) {
+        if let Some(cancel) = self.cancel.borrow_mut().take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.serial.set(self.serial.get().wrapping_add(1));
+    }
+}
+
+/// The source frames shown by the source monitor, in project frames.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SourceRange {
+    pub path: PathBuf,
+    pub kind: MediaKind,
+    pub source_start: u64,
+    pub duration: u64,
+}
 
 #[derive(Clone)]
 pub(crate) struct UiState {
@@ -41,14 +87,15 @@ pub(crate) struct UiState {
     pub revision: Signal<u64>,
     pub ui_revision: Signal<u64>,
     pub selected: Signal<Option<(u64, u64)>>,
-    pub playhead: Signal<u64>,
-    pub playing: Signal<bool>,
+    pub selected_media: Signal<Option<u64>>,
+    pub program: Monitor,
+    pub source: Monitor,
     pub preview_available: Signal<bool>,
-    pub preview_slot: GpuFrameSlot,
     pub project_path: Signal<Option<PathBuf>>,
     pub title_text: TextController,
     pub media_query: TextController,
     pub media_filter: Signal<MediaFilter>,
+    pub media_view: Signal<MediaView>,
     pub status: Signal<String>,
     pub dirty: Signal<bool>,
     pub busy: Signal<bool>,
@@ -58,14 +105,13 @@ pub(crate) struct UiState {
     pub storyboards: Rc<RefCell<HashMap<StoryboardKey, Storyboard>>>,
     pub media_scroll: ScrollController,
     pub inspector_scroll: ScrollController,
-    pub timeline_scroll: ScrollController,
-    pub timeline_page: Signal<u64>,
+    pub timeline_start: Signal<u64>,
+    pub timeline_zoom: Signal<usize>,
     pub timeline_expanded: Signal<bool>,
+    pub timeline_scrub: Rc<Cell<bool>>,
     pub sidebar: Signal<Sidebar>,
     app: Rc<RefCell<Option<AppHandle>>>,
     window: Rc<RefCell<Option<WindowHandle>>>,
-    preview_cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
-    preview_serial: Rc<Cell<u64>>,
     storyboard_cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
     storyboard_serial: Rc<Cell<u64>>,
     export_control: Rc<RefCell<Option<Arc<ExportControl>>>>,
@@ -78,14 +124,15 @@ impl UiState {
             revision: Signal::new(0),
             ui_revision: Signal::new(0),
             selected: Signal::new(None),
-            playhead: Signal::new(0),
-            playing: Signal::new(false),
+            selected_media: Signal::new(None),
+            program: Monitor::new(),
+            source: Monitor::new(),
             preview_available: Signal::new(false),
-            preview_slot: GpuFrameSlot::new(),
             project_path: Signal::new(None),
             title_text: TextController::default(),
             media_query: TextController::default(),
             media_filter: Signal::new(MediaFilter::All),
+            media_view: Signal::new(MediaView::Grid),
             status: Signal::new("Ready · Project not saved".into()),
             dirty: Signal::new(false),
             busy: Signal::new(false),
@@ -95,14 +142,13 @@ impl UiState {
             storyboards: Rc::new(RefCell::new(HashMap::new())),
             media_scroll: ScrollController::default(),
             inspector_scroll: ScrollController::default(),
-            timeline_scroll: ScrollController::default(),
-            timeline_page: Signal::new(0),
+            timeline_start: Signal::new(0),
+            timeline_zoom: Signal::new(DEFAULT_ZOOM),
             timeline_expanded: Signal::new(false),
+            timeline_scrub: Rc::new(Cell::new(false)),
             sidebar: Signal::new(Sidebar::Media),
             app: Rc::new(RefCell::new(None)),
             window: Rc::new(RefCell::new(None)),
-            preview_cancel: Rc::new(RefCell::new(None)),
-            preview_serial: Rc::new(Cell::new(0)),
             storyboard_cancel: Rc::new(RefCell::new(None)),
             storyboard_serial: Rc::new(Cell::new(0)),
             export_control: Rc::new(RefCell::new(None)),
@@ -117,16 +163,22 @@ impl UiState {
         self.preview_available.set(window.gpu_device().is_some());
         *self.window.borrow_mut() = Some(window);
         self.request_preview();
+        self.request_source_preview();
+    }
+
+    fn refresh_after_edit(&self, status: &str) {
+        self.revision.update(|revision| *revision += 1);
+        self.dirty.set(true);
+        self.status.set(status.into());
+        self.request_preview();
+        self.request_source_preview();
+        self.queue_storyboards();
     }
 
     pub fn edit(&self, command: Command) -> bool {
         let changed = self.editor.borrow_mut().apply(command);
         if changed {
-            self.revision.update(|revision| *revision += 1);
-            self.dirty.set(true);
-            self.status.set("Unsaved changes".into());
-            self.request_preview();
-            self.queue_storyboards();
+            self.refresh_after_edit("Unsaved changes");
         } else {
             self.status
                 .set("Edit rejected: check range, track and clip".into());
@@ -136,32 +188,78 @@ impl UiState {
 
     pub fn undo(&self) {
         if self.editor.borrow_mut().undo() {
-            self.revision.update(|revision| *revision += 1);
-            self.dirty.set(true);
-            self.status.set("Undid edit · Unsaved changes".into());
-            self.request_preview();
-            self.queue_storyboards();
+            self.refresh_after_edit("Undid edit · Unsaved changes");
         }
     }
 
     pub fn redo(&self) {
         if self.editor.borrow_mut().redo() {
-            self.revision.update(|revision| *revision += 1);
-            self.dirty.set(true);
-            self.status.set("Redid edit · Unsaved changes".into());
-            self.request_preview();
-            self.queue_storyboards();
+            self.refresh_after_edit("Redid edit · Unsaved changes");
+        }
+    }
+
+    pub fn frame_rate(&self) -> (u32, u32) {
+        let editor = self.editor.borrow();
+        let rate = &editor.project().settings().frame_rate;
+        (rate.numerator, rate.denominator)
+    }
+
+    pub fn sequence_end(&self) -> u64 {
+        self.editor
+            .borrow()
+            .project()
+            .tracks()
+            .iter()
+            .flat_map(|track| &track.clips)
+            .filter_map(|clip| clip.start_frame.checked_add(clip.duration_frames))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Frames shown across the timeline at the current zoom level.
+    pub fn visible_frames(&self) -> u64 {
+        let (numerator, denominator) = self.frame_rate();
+        let seconds = ZOOM_SECONDS[self.timeline_zoom.peek().min(ZOOM_SECONDS.len() - 1)];
+        (u64::from(numerator) * seconds / u64::from(denominator.max(1))).max(1)
+    }
+
+    fn follow_playhead(&self, frame: u64) {
+        let span = self.visible_frames();
+        let start = self.timeline_start.peek();
+        if frame < start || frame >= start.saturating_add(span) {
+            self.timeline_start.set(frame / span * span);
+        }
+    }
+
+    pub fn zoom_timeline(&self, zoom: usize) {
+        let zoom = zoom.min(ZOOM_SECONDS.len() - 1);
+        if zoom == self.timeline_zoom.peek() {
+            return;
+        }
+        self.timeline_zoom.set(zoom);
+        let span = self.visible_frames();
+        self.timeline_start
+            .set(self.program.position.peek().saturating_sub(span / 4));
+    }
+
+    pub fn scroll_timeline(&self, steps: i64) {
+        let step = (self.visible_frames() / 8).max(1);
+        let start = self.timeline_start.peek();
+        let distance = step.saturating_mul(steps.unsigned_abs());
+        let next = if steps < 0 {
+            start.saturating_sub(distance)
+        } else {
+            start.saturating_add(distance)
+        };
+        let next = next.min(self.sequence_end().saturating_sub(1));
+        if next != start {
+            self.timeline_start.set(next);
         }
     }
 
     pub fn focus_frame(&self, frame: u64) {
-        let editor = self.editor.borrow();
-        let frame_rate = &editor.project().settings().frame_rate;
-        let page_frames =
-            (u64::from(frame_rate.numerator) * 10 / u64::from(frame_rate.denominator)).max(1);
-        drop(editor);
-        self.playhead.set(frame);
-        self.timeline_page.set(frame / page_frames);
+        self.program.position.set(frame);
+        self.follow_playhead(frame);
         self.request_preview();
     }
 
@@ -178,22 +276,16 @@ impl UiState {
                     if project.project().media().iter().any(|media| media.id == media_id && media.kind != MediaKind::Audio))
             })
         });
-        let end = project
-            .project()
-            .tracks()
-            .iter()
-            .flat_map(|track| &track.clips)
-            .filter_map(|clip| clip.start_frame.checked_add(clip.duration_frames))
-            .max()
-            .unwrap_or(0);
         drop(project);
+        let end = self.sequence_end();
         if !has_video || end == 0 {
             self.status
                 .set("Add video or an image to the timeline to preview".into());
             return;
         }
-        self.playing.set(true);
-        if self.playhead.peek() >= end.saturating_sub(1) {
+        self.pause_source();
+        self.program.playing.set(true);
+        if self.program.position.peek() >= end.saturating_sub(1) {
             self.focus_frame(0);
         } else {
             self.request_preview();
@@ -201,29 +293,123 @@ impl UiState {
     }
 
     pub fn pause(&self) {
-        self.playing.set(false);
-        self.cancel_preview();
+        self.stop(&self.program);
     }
 
-    fn cancel_preview(&self) {
-        if let Some(cancel) = self.preview_cancel.borrow_mut().take() {
-            cancel.store(true, Ordering::Relaxed);
+    fn stop(&self, monitor: &Monitor) {
+        monitor.playing.set(false);
+        monitor.cancel();
+    }
+
+    /// The selected timeline clip's source range, or else the whole selected
+    /// media-bin source.
+    pub fn source_range(&self) -> Option<SourceRange> {
+        let editor = self.editor.borrow();
+        let project = editor.project();
+        if let Some((track_id, clip_id)) = self.selected.peek() {
+            let clip = project
+                .tracks()
+                .iter()
+                .find(|track| track.id == track_id)?
+                .clips
+                .iter()
+                .find(|clip| clip.id == clip_id)?;
+            let ClipContent::Media { media_id } = clip.content else {
+                return None;
+            };
+            let media = project.media().iter().find(|media| media.id == media_id)?;
+            return Some(SourceRange {
+                path: media.path.clone(),
+                kind: media.kind,
+                source_start: clip.source_start_frame,
+                duration: clip.duration_frames,
+            });
         }
-        self.preview_serial
-            .set(self.preview_serial.get().wrapping_add(1));
+        let media_id = self.selected_media.peek()?;
+        let media = project.media().iter().find(|media| media.id == media_id)?;
+        let rate = &project.settings().frame_rate;
+        Some(SourceRange {
+            path: media.path.clone(),
+            kind: media.kind,
+            source_start: 0,
+            duration: media_frames(media, (rate.numerator, rate.denominator))?,
+        })
+    }
+
+    pub fn select_clip(&self, selection: Option<(u64, u64)>) {
+        if self.selected.peek() == selection {
+            return;
+        }
+        self.selected.set(selection);
+        if let Some((track_id, clip_id)) = selection {
+            self.selected_media.set(None);
+            self.sidebar.set(Sidebar::Inspector);
+            let title = self
+                .editor
+                .borrow()
+                .project()
+                .tracks()
+                .iter()
+                .find(|track| track.id == track_id)
+                .and_then(|track| track.clips.iter().find(|clip| clip.id == clip_id))
+                .and_then(|clip| match &clip.content {
+                    ClipContent::Title(title) => Some(title.text.clone()),
+                    ClipContent::Media { .. } => None,
+                });
+            if let Some(title) = title {
+                self.title_text.set_value(title);
+            }
+        }
+        self.reset_source();
+    }
+
+    pub fn select_media(&self, media_id: u64) {
+        if self.selected_media.peek() == Some(media_id) && self.selected.peek().is_none() {
+            return;
+        }
+        self.selected.set(None);
+        self.selected_media.set(Some(media_id));
+        self.reset_source();
+    }
+
+    fn reset_source(&self) {
+        self.stop(&self.source);
+        self.source.position.set(0);
+        self.request_source_preview();
+    }
+
+    pub fn play_source(&self) {
+        if !self.preview_available.peek() {
+            self.status
+                .set("GPU preview is not available on this display".into());
+            return;
+        }
+        let Some(range) = self
+            .source_range()
+            .filter(|range| range.kind != MediaKind::Audio)
+        else {
+            self.status
+                .set("Select a video clip or source to preview it".into());
+            return;
+        };
+        self.pause();
+        self.source.playing.set(true);
+        if self.source.position.peek() >= range.duration.saturating_sub(1) {
+            self.source.position.set(0);
+        }
+        self.request_source_preview();
+    }
+
+    pub fn pause_source(&self) {
+        self.stop(&self.source);
+    }
+
+    pub fn focus_source_frame(&self, frame: u64) {
+        self.source.position.set(frame);
+        self.request_source_preview();
     }
 
     fn request_preview(&self) {
-        self.cancel_preview();
-        let Some(window) = self.window.borrow().clone() else {
-            return;
-        };
-        if !self.preview_available.peek() || window.is_closed() {
-            return;
-        }
-        let Some(app) = self.app.borrow().clone() else {
-            return;
-        };
         let editor = self.editor.borrow();
         let project = editor.project();
         let mut sources = Vec::new();
@@ -247,33 +433,76 @@ impl UiState {
                 }
             }
         }
+        let fps = (
+            project.settings().frame_rate.numerator,
+            project.settings().frame_rate.denominator,
+        );
+        let resolution = (project.settings().width, project.settings().height);
+        drop(editor);
         let plan = PreviewPlan {
             sources,
-            end: project
-                .tracks()
-                .iter()
-                .flat_map(|track| &track.clips)
-                .filter_map(|clip| clip.start_frame.checked_add(clip.duration_frames))
-                .max()
-                .unwrap_or(0),
+            end: self.sequence_end(),
+            fps,
+            resolution,
+        };
+        self.stream(&self.program, plan, true);
+    }
+
+    fn request_source_preview(&self) {
+        let range = self
+            .source_range()
+            .filter(|range| range.kind != MediaKind::Audio);
+        let editor = self.editor.borrow();
+        let settings = editor.project().settings();
+        let plan = PreviewPlan {
+            end: range.as_ref().map_or(0, |range| range.duration),
+            sources: range
+                .into_iter()
+                .map(|range| FrameSource {
+                    clip_id: 0,
+                    path: range.path,
+                    kind: range.kind,
+                    start: 0,
+                    source_start: range.source_start,
+                    duration: range.duration,
+                })
+                .collect(),
             fps: (
-                project.settings().frame_rate.numerator,
-                project.settings().frame_rate.denominator,
+                settings.frame_rate.numerator,
+                settings.frame_rate.denominator,
             ),
-            resolution: (project.settings().width, project.settings().height),
+            resolution: (settings.width, settings.height),
         };
         drop(editor);
-        window.request_repaint();
-        if plan.end == 0 || (!self.playing.peek() && self.playhead.peek() >= plan.end) {
-            self.preview_slot.clear(&window);
+        if plan.end > 0 && self.source.position.peek() >= plan.end {
+            self.source.position.set(plan.end - 1);
+        }
+        self.stream(&self.source, plan, false);
+    }
+
+    fn stream(&self, monitor: &Monitor, plan: PreviewPlan, follow_timeline: bool) {
+        monitor.cancel();
+        let Some(window) = self.window.borrow().clone() else {
+            return;
+        };
+        if !self.preview_available.peek() || window.is_closed() {
             return;
         }
-        let serial = self.preview_serial.get();
-        let start = self.playhead.peek();
-        let playing = self.playing.peek();
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        window.request_repaint();
+        let start = monitor.position.peek();
+        let playing = monitor.playing.peek();
+        if plan.end == 0 || (!playing && start >= plan.end) {
+            monitor.slot.clear(&window);
+            return;
+        }
+        let serial = monitor.serial.get();
         let cancelled = Arc::new(AtomicBool::new(false));
-        *self.preview_cancel.borrow_mut() = Some(cancelled.clone());
+        *monitor.cancel.borrow_mut() = Some(cancelled.clone());
         let state = self.clone();
+        let monitor = monitor.clone();
         let pending = Arc::new(AtomicUsize::new(0));
         let worker_pending = pending.clone();
         app.spawn_stream(
@@ -297,44 +526,51 @@ impl UiState {
                 if matches!(event, PreviewEvent::Frame(..)) {
                     pending.fetch_sub(1, Ordering::Relaxed);
                 }
-                if state.preview_serial.get() != serial {
+                if monitor.serial.get() != serial {
                     return;
                 }
-                match event {
-                    PreviewEvent::Frame(frame, Some(image)) => {
-                        match upload_preview_frame(&window, image) {
-                            Ok(texture) => {
-                                state.preview_slot.publish(texture, &window);
-                                state.playhead.set(frame);
-                                state.update_timeline_page(frame);
-                            }
-                            Err(error) => {
-                                state.pause();
-                                state.status.set(format!("Preview failed: {error}"));
-                            }
+                let image = match event {
+                    PreviewEvent::Frame(frame, image) => {
+                        monitor.position.set(frame);
+                        if follow_timeline {
+                            state.follow_playhead(frame);
                         }
+                        image
                     }
-                    PreviewEvent::Frame(frame, None) => {
-                        state.preview_slot.clear(&window);
-                        state.playhead.set(frame);
-                        state.update_timeline_page(frame);
+                    PreviewEvent::Finished => {
+                        state.stop(&monitor);
+                        return;
                     }
-                    PreviewEvent::Finished => state.pause(),
                     PreviewEvent::Failed(error) => {
-                        state.pause();
+                        state.stop(&monitor);
+                        state.status.set(format!("Preview failed: {error}"));
+                        return;
+                    }
+                };
+                match image.map(|image| upload_preview_frame(&window, image)) {
+                    Some(Ok(texture)) => monitor.slot.publish(texture, &window),
+                    Some(Err(error)) => {
+                        state.stop(&monitor);
                         state.status.set(format!("Preview failed: {error}"));
                     }
+                    None => monitor.slot.clear(&window),
                 }
             },
         );
     }
 
-    fn update_timeline_page(&self, frame: u64) {
-        let editor = self.editor.borrow();
-        let rate = &editor.project().settings().frame_rate;
-        let page_frames = (u64::from(rate.numerator) * 10 / u64::from(rate.denominator)).max(1);
-        drop(editor);
-        self.timeline_page.set(frame / page_frames);
+    fn reset_monitors(&self) {
+        self.pause();
+        self.pause_source();
+        if let Some(window) = self.window.borrow().as_ref() {
+            self.program.slot.clear(window);
+            self.source.slot.clear(window);
+        }
+        self.selected.set(None);
+        self.selected_media.set(None);
+        self.program.position.set(0);
+        self.source.position.set(0);
+        self.timeline_start.set(0);
     }
 
     fn cancel_storyboards(&self) {
@@ -448,15 +684,9 @@ impl UiState {
         self.thumbnails.borrow_mut().clear();
         self.cancel_storyboards();
         self.storyboards.borrow_mut().clear();
-        self.pause();
-        if let Some(window) = self.window.borrow().as_ref() {
-            self.preview_slot.clear(window);
-        }
-        self.selected.set(None);
+        self.reset_monitors();
         self.media_query.set_value(String::new());
         self.media_filter.set(MediaFilter::All);
-        self.playhead.set(0);
-        self.timeline_page.set(0);
         self.sidebar.set(Sidebar::Media);
         self.dirty.set(false);
         self.revision.update(|revision| *revision += 1);
@@ -509,18 +739,15 @@ impl UiState {
                         state.cancel_storyboards();
                         state.storyboards.borrow_mut().clear();
                         state.project_path.set(Some(path));
-                        state.selected.set(None);
+                        state.reset_monitors();
                         state.media_query.set_value(String::new());
                         state.media_filter.set(MediaFilter::All);
-                        state.playhead.set(0);
-                        state.timeline_page.set(0);
                         state.revision.update(|revision| *revision += 1);
                         state.dirty.set(false);
                         state.sidebar.set(Sidebar::Media);
                         state.status.set("Project opened".into());
                         state.load_thumbnails(sources);
                         state.queue_storyboards();
-                        state.pause();
                         state.request_preview();
                     }
                     Ok(_) => state
@@ -907,16 +1134,9 @@ impl UiState {
             None
         };
         let frame_rate = &project.settings().frame_rate;
-        let frame_count = if let Some(duration_us) = media.duration_us {
-            let count = u128::from(duration_us) * u128::from(frame_rate.numerator)
-                / (1_000_000_u128 * u128::from(frame_rate.denominator));
-            u64::try_from(count).ok()
-        } else if media.kind == crate::media::MediaKind::Image {
-            Some((u64::from(frame_rate.numerator) * 3 / u64::from(frame_rate.denominator)).max(1))
-        } else {
-            None
-        };
-        let Some(duration_frames) = frame_count.filter(|count| *count > 0) else {
+        let Some(duration_frames) =
+            media_frames(media, (frame_rate.numerator, frame_rate.denominator))
+        else {
             self.status
                 .set("Source has no usable duration; import it again to probe".into());
             return;
@@ -978,11 +1198,25 @@ impl UiState {
         };
         drop(editor);
         if self.edit(command) {
-            self.selected.set(Some((track_id, clip_id)));
-            self.sidebar.set(Sidebar::Inspector);
+            self.select_clip(Some((track_id, clip_id)));
             self.focus_frame(start_frame);
         }
     }
+}
+
+/// Timeline frames a source occupies when inserted; stills default to 3 s.
+pub(crate) fn media_frames(media: &Media, fps: (u32, u32)) -> Option<u64> {
+    let (numerator, denominator) = (u64::from(fps.0), u64::from(fps.1.max(1)));
+    if let Some(duration_us) = media.duration_us {
+        let count = u128::from(duration_us) * u128::from(numerator)
+            / (1_000_000_u128 * u128::from(denominator));
+        u64::try_from(count).ok()
+    } else if media.kind == MediaKind::Image {
+        Some((numerator * 3 / denominator).max(1))
+    } else {
+        None
+    }
+    .filter(|count| *count > 0)
 }
 
 fn upload_preview_frame(window: &WindowHandle, image: FrameImage) -> Result<GpuFrame, String> {
@@ -1145,12 +1379,75 @@ mod tests {
         let state = UiState::new();
         state.project_path.set(Some("previous.ocus".into()));
         state.focus_frame(600);
+        assert_eq!(state.timeline_start.peek(), 600);
         state.sidebar.set(Sidebar::Inspector);
+        state.select_media(3);
         state.new_project();
         assert_eq!(state.project_path.peek(), None);
-        assert_eq!(state.playhead.peek(), 0);
-        assert_eq!(state.timeline_page.peek(), 0);
+        assert_eq!(state.program.position.peek(), 0);
+        assert_eq!(state.timeline_start.peek(), 0);
+        assert_eq!(state.selected_media.peek(), None);
         assert!(state.sidebar.peek() == Sidebar::Media);
         assert_eq!(state.editor.borrow().project().name(), "Untitled");
+    }
+
+    #[test]
+    fn source_monitor_follows_the_latest_bin_or_timeline_selection() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 4,
+            path: "scene.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: false,
+        })));
+        state.select_media(4);
+        let range = state.source_range().unwrap();
+        assert_eq!((range.source_start, range.duration), (0, 60));
+        state.insert_media(4);
+        assert_eq!(state.selected_media.peek(), None);
+        let (track_id, clip_id) = state.selected.peek().unwrap();
+        assert!(state.edit(Command::Trim {
+            track_id,
+            clip_id,
+            start_frame: 0,
+            source_start_frame: 10,
+            duration_frames: 20,
+        }));
+        state.focus_source_frame(25);
+        let range = state.source_range().unwrap();
+        assert_eq!((range.source_start, range.duration), (10, 20));
+        assert_eq!(state.source.position.peek(), 19);
+        state.edit(Command::RemoveClip { track_id, clip_id });
+        assert_eq!(state.source_range(), None);
+        state.select_media(4);
+        assert_eq!(state.selected.peek(), None);
+        assert_eq!(state.source.position.peek(), 0);
+    }
+
+    #[test]
+    fn timeline_zoom_and_scroll_keep_the_view_inside_the_sequence() {
+        let state = UiState::new();
+        assert_eq!(state.visible_frames(), 300);
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "long.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(60_000_000),
+            has_audio: false,
+        })));
+        state.insert_media(1);
+        state.scroll_timeline(3);
+        assert_eq!(state.timeline_start.peek(), 111);
+        state.scroll_timeline(-10);
+        assert_eq!(state.timeline_start.peek(), 0);
+        state.scroll_timeline(1_000);
+        assert_eq!(state.timeline_start.peek(), 1_799);
+        state.focus_frame(900);
+        state.zoom_timeline(0);
+        assert_eq!(state.visible_frames(), 60);
+        assert_eq!(state.timeline_start.peek(), 885);
+        state.zoom_timeline(99);
+        assert_eq!(state.visible_frames(), 5_400);
     }
 }

@@ -29,6 +29,7 @@ pub fn run_app() {
                         }
                         if close.confirm_discard() {
                             close.pause();
+                            close.pause_source();
                             true
                         } else {
                             false

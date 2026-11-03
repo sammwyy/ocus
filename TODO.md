@@ -41,6 +41,8 @@ clip commands do not complete the corresponding editor workflows.
   playback and seeking to it.
 - [ ] Add per-clip volume and mute controls that affect both preview and
   export, with tests.
+- [ ] Draw audio waveforms in timeline clips and the source monitor; both
+  currently show only the clip's volume level.
 - [ ] Extend editable title text with font, size, color, and position controls;
   render titles consistently in the video preview and export.
 - [ ] Export the edited project to MP4 with H.264 video and AAC audio.

@@ -54,6 +54,9 @@ pub fn thumbnail(path: &Path) -> Result<Thumbnail, String> {
     let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
         .and_then(|context| context.decoder().video())
         .map_err(|error| error.to_string())?;
+    if decoder.format() == ffmpeg::format::Pixel::None || decoder.width() == 0 {
+        return Err("Source has an unknown pixel format".into());
+    }
     let scale = (208.0 / decoder.width() as f32)
         .min(116.0 / decoder.height() as f32)
         .min(1.0);

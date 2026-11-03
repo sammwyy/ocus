@@ -21,7 +21,9 @@ src/
   timeline.rs       tracks, clips, and title data
   ui/
     window.rs       integrated titlebar, editor layout, and clip controls
-    state.rs        transient selection, native file dialogs, background jobs
+    controls.rs     palette, vector glyphs, buttons, scrubber, thumbnails
+    timeline_view.rs  painted ruler, track lanes, clips and playhead
+    state.rs        transient selection, monitors, file dialogs, background jobs
 ```
 
 `main` calls `app::run_app`; the app creates the initial project and provides
@@ -50,8 +52,10 @@ viewport. `export.rs` decodes
 video and still-image clips sequentially with bounded frame storage and
 encodes a silent H.264 MP4 from one continuous video track. It refuses audio,
 titles, gaps, and multiple active tracks rather than dropping them silently.
-The UI supports video play/pause, frame stepping, monitor and timeline
-scrubbing, source filtering, filmstrip clips and title text display. It does
+The UI has independent source and program monitors, each with its own
+decode stream, position and GPU frame slot; only one plays at a time. It
+supports video play/pause, frame stepping, monitor and timeline scrubbing,
+timeline zoom, source filtering, filmstrip clips and title text display. It does
 not composite simultaneous video/title layers; title edits, split/move/trim/delete,
 audio clip settings, and ripple delete use project commands. Video sources
 with audio add aligned clips to both tracks; later edits to those clips are

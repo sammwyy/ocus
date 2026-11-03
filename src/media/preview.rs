@@ -181,10 +181,16 @@ impl FrameReader {
         output: (u32, u32),
         cancelled: Arc<AtomicBool>,
     ) -> Result<Self, String> {
+        let interrupted = cancelled.clone();
         let mut input = ffmpeg::format::input_with_interrupt(&source.path, move || {
-            cancelled.load(Ordering::Relaxed)
+            interrupted.load(Ordering::Relaxed)
         })
         .map_err(|error| format!("Cannot open preview source: {error}"))?;
+        // An interrupted probe can leave codec parameters incomplete, and
+        // swscale aborts the process on an unknown pixel format.
+        if cancelled.load(Ordering::Relaxed) {
+            return Err("Preview cancelled".into());
+        }
         let stream = input
             .streams()
             .best(ffmpeg::media::Type::Video)
@@ -195,6 +201,9 @@ impl FrameReader {
         let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
             .and_then(|context| context.decoder().video())
             .map_err(|error| error.to_string())?;
+        if decoder.format() == ffmpeg::format::Pixel::None || decoder.width() == 0 {
+            return Err("Preview source has an unknown pixel format".into());
+        }
         let scaler = ffmpeg::software::scaling::context::Context::get(
             decoder.format(),
             decoder.width(),
@@ -412,6 +421,7 @@ mod tests {
         assert!(frames[1].is_some_and(|shade| shade < 120));
         assert!(frames[2].is_some_and(|shade| shade > 140));
         let cancelled = Arc::new(AtomicBool::new(true));
+        assert!(FrameReader::open(&clips[0], 0, (30, 1), (2, 2), cancelled.clone()).is_err());
         decode_sequence(&plan, 0, true, cancelled, |_| {
             panic!("cancelled preview emitted a frame")
         })

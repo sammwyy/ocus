@@ -13,9 +13,9 @@ use crate::media::preview::StoryboardKey;
 use crate::media::{Media, MediaKind};
 use crate::project::{Command, Project};
 use crate::settings::ThemeMode;
-use crate::timeline::{Clip, ClipContent, TrackKind};
+use crate::timeline::{Clip, ClipContent, Title, TrackKind};
 use creamui::core::layout::{Dimension, Style};
-use creamui::core::{Painter, Rect, Widget};
+use creamui::core::{Painter, Rect, TextAlign, Widget};
 use creamui::widgets::layout::Flex;
 use creamui::widgets::layout::{Align, Grid, Justify, StyleExt};
 use creamui::widgets::{AppTitlebar, RawScrollView, TextController, TextInput};
@@ -256,18 +256,120 @@ fn stage_message(
     Box::new(content)
 }
 
-fn title_card(title: &str) -> BoxedWidget {
-    Box::new(
-        Flex::column()
-            .gap(6.0)
-            .align(Align::Center)
-            .child(heading(title, text_color(), 26.0))
-            .child(text("Title overlay preview", faint(), 10.0)),
-    )
-}
-
 fn monitor_viewport(slot: &GpuFrameSlot, aspect: f32) -> BoxedWidget {
     Box::new(GpuViewport::new(fill_style(), slot.clone()).aspect_ratio(aspect))
+}
+
+fn program_layers(project: &Project, frame: u64) -> (bool, Vec<Title>) {
+    let mut picture = false;
+    let mut titles = Vec::new();
+    for track in project
+        .tracks()
+        .iter()
+        .filter(|track| track.kind == TrackKind::Video)
+    {
+        for clip in &track.clips {
+            if clip.start_frame > frame || frame - clip.start_frame >= clip.duration_frames {
+                continue;
+            }
+            match &clip.content {
+                ClipContent::Title(title) => titles.push(title.clone()),
+                ClipContent::Media { media_id } => {
+                    picture |= project
+                        .media()
+                        .iter()
+                        .any(|media| media.id == *media_id && media.kind != MediaKind::Audio);
+                }
+            }
+        }
+    }
+    (picture, titles)
+}
+
+struct ProgramCanvas {
+    slot: GpuFrameSlot,
+    picture: bool,
+    titles: Vec<Title>,
+    aspect: f32,
+    resolution: (u32, u32),
+}
+
+impl Widget for ProgramCanvas {
+    fn style(&self) -> creamui::Style {
+        fill_style().into()
+    }
+
+    fn paint(&self, painter: &mut dyn Painter, rect: Rect) {
+        if self.picture {
+            GpuViewport::new(fill_style(), self.slot.clone())
+                .aspect_ratio(self.aspect)
+                .paint(painter, rect);
+        }
+        let width = rect.width.min(rect.height * self.aspect);
+        let height = rect.height.min(rect.width / self.aspect);
+        let bounds = Rect {
+            x: rect.x + (rect.width - width) / 2.0,
+            y: rect.y + (rect.height - height) / 2.0,
+            width,
+            height,
+        };
+        if width <= 16.0 || height <= 0.0 {
+            return;
+        }
+        let scale = width / self.resolution.0.max(1) as f32;
+        painter.push_clip_rounded(bounds, 0.0);
+        for title in &self.titles {
+            let size = (title.font_size * scale).max(1.0).min(height * 0.4);
+            let lines: Vec<_> = title.text.lines().collect();
+            let line_height = size * 1.35;
+            let text_width = (width - 16.0).max(1.0);
+            let x = (bounds.x + width * title.x - text_width / 2.0)
+                .clamp(bounds.x, bounds.x + width - text_width);
+            let start_y = bounds.y + height * title.y - line_height * lines.len() as f32 / 2.0;
+            let color = Color::rgba(
+                title.color[0],
+                title.color[1],
+                title.color[2],
+                title.color[3],
+            );
+            for (index, line) in lines.into_iter().enumerate() {
+                if line.trim().is_empty() || color.a == 0 {
+                    continue;
+                }
+                let line_rect = Rect {
+                    x,
+                    y: start_y + index as f32 * line_height,
+                    width: text_width,
+                    height: line_height,
+                };
+                painter.fill_text_font(
+                    Rect {
+                        x: line_rect.x + 1.0,
+                        y: line_rect.y + 1.0,
+                        ..line_rect
+                    },
+                    line,
+                    Color::rgba(0, 0, 0, color.a.min(150)),
+                    size,
+                    TextAlign::Center,
+                    Some(&title.font_family),
+                    true,
+                    false,
+                );
+                painter.fill_text_font(
+                    line_rect,
+                    line,
+                    color,
+                    size,
+                    TextAlign::Center,
+                    Some(&title.font_family),
+                    true,
+                    false,
+                );
+            }
+        }
+        painter.pop_clip();
+    }
 }
 
 struct Transport {
@@ -966,22 +1068,8 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
             _ if clip.linked_audio => "Video + linked audio",
             _ => "Video clip",
         };
-        let preview: BoxedWidget = match (&clip.content, media) {
-            (ClipContent::Title(title), _) => Box::new(
-                Flex::column()
-                    .height(96.0)
-                    .full_width()
-                    .align(Align::Center)
-                    .justify(Justify::Center)
-                    .background(STAGE)
-                    .corner_radius(6.0)
-                    .child(heading(
-                        fit(&title.text, inner - 20.0, 18.0),
-                        text_color(),
-                        18.0,
-                    )),
-            ),
-            (_, Some(media)) => Box::new(Thumb {
+        if let Some(media) = media {
+            rows.push(Box::new(Thumb {
                 image: (track_kind == TrackKind::Video)
                     .then(|| state.thumbnails.borrow().get(&media.path).cloned())
                     .flatten(),
@@ -993,10 +1081,8 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 width: None,
                 height: 110.0,
                 badge: None,
-            }),
-            _ => Box::new(Flex::row().height(0.0)),
-        };
-        rows.push(preview);
+            }));
+        }
         rows.push(Box::new(
             Flex::row()
                 .gap(7.0)
@@ -1004,22 +1090,25 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 .child(dot(color, 8.0))
                 .child(heading(fit(&name, inner - 20.0, 13.0), text_color(), 13.0)),
         ));
-        rows.push(section(
-            "Timing",
-            vec![
-                property("Track", label_of(track_id)),
-                property("Start", timecode(clip.start_frame, fps)),
-                property(
-                    "Duration",
-                    format!(
-                        "{}  ·  {} f",
-                        timecode(clip.duration_frames, fps),
-                        clip.duration_frames
-                    ),
+        let mut timing = vec![
+            property("Track", label_of(track_id)),
+            property("Start", timecode(clip.start_frame, fps)),
+            property(
+                "Duration",
+                format!(
+                    "{}  ·  {} f",
+                    timecode(clip.duration_frames, fps),
+                    clip.duration_frames
                 ),
-                property("Source in", timecode(clip.source_start_frame, fps)),
-            ],
-        ));
+            ),
+        ];
+        if matches!(clip.content, ClipContent::Media { .. }) {
+            timing.push(property(
+                "Source in",
+                timecode(clip.source_start_frame, fps),
+            ));
+        }
+        rows.push(section("Timing", timing));
         if matches!(clip.content, ClipContent::Title(_)) {
             rows.push(section(
                 "Title",
@@ -1134,15 +1223,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     } else {
                         Box::new(Flex::row().height(0.0))
                     },
-                    text(
-                        if clip.linked_audio {
-                            "Cut, moved and trimmed with the picture."
-                        } else {
-                            "Saved with the project; audio playback is pending."
-                        },
-                        faint(),
-                        10.0,
-                    ),
+                    text("Volume and mute affect playback.", faint(), 10.0),
                 ],
             ));
         }
@@ -1377,18 +1458,6 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 property("Clips", clips.to_string()),
                 property("Sources", project.media().len().to_string()),
             ],
-        ));
-        rows.push(section(
-            "Preview",
-            vec![text(
-                if state.preview_available.get() {
-                    "GPU video preview ready · audio pending"
-                } else {
-                    "GPU rendering is required for video preview"
-                },
-                muted(),
-                11.0,
-            )],
         ));
         rows.push(section(
             "Shortcuts",
@@ -1631,38 +1700,29 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
 
     let frame = state.program.position.get();
     let timeline_end = state.sequence_end();
-    let clip_at = |frame: u64| {
-        project
-            .tracks()
-            .iter()
-            .filter(|track| track.kind == TrackKind::Video)
-            .flat_map(|track| &track.clips)
-            .find(|clip| {
-                clip.start_frame <= frame
-                    && clip
-                        .start_frame
-                        .checked_add(clip.duration_frames)
-                        .is_some_and(|end| frame < end)
-            })
-    };
-    let program_clip = clip_at(frame);
+    let (picture, titles) = program_layers(project, frame);
     let empty_timeline = project.tracks().iter().all(|track| track.clips.is_empty());
     let first_media = project.media().first();
-    let program_stage: BoxedWidget = match program_clip.map(|clip| &clip.content) {
-        Some(ClipContent::Media { .. }) if gpu_preview => {
-            monitor_viewport(&state.program.slot, aspect)
-        }
-        Some(ClipContent::Title(title)) => title_card(&title.text),
-        Some(ClipContent::Media { .. }) => stage_message(
+    let program_stage: BoxedWidget = if picture && !gpu_preview && titles.is_empty() {
+        stage_message(
             Glyph::Film,
-            "GPU preview unavailable",
-            "A GPU rendering backend is required to show video.",
+            "Video preview unavailable",
+            "This display cannot show video preview.",
             None,
-        ),
-        None if empty_timeline => stage_message(
+        )
+    } else if picture || !titles.is_empty() {
+        Box::new(ProgramCanvas {
+            slot: state.program.slot.clone(),
+            picture: picture && gpu_preview,
+            titles,
+            aspect,
+            resolution: (project.settings().width, project.settings().height),
+        })
+    } else if empty_timeline {
+        stage_message(
             Glyph::Film,
             if first_media.is_some() {
-                "Footage is ready"
+                "Add footage to the timeline"
             } else {
                 "Start your edit"
             },
@@ -1690,18 +1750,22 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     UiState::import_dialog,
                 ),
             }),
-        ),
-        None => stage_message(
+        )
+    } else {
+        stage_message(
             Glyph::Film,
             "No clip at this frame",
-            "Move the playhead over a video, still or title clip.",
+            "Move the playhead over a clip.",
             None,
-        ),
+        )
     };
     let mut has_picture = false;
     let mut playable = false;
     for track in project.tracks() {
         for clip in &track.clips {
+            if track.kind == TrackKind::Video && matches!(clip.content, ClipContent::Title(_)) {
+                playable = true;
+            }
             let ClipContent::Media { media_id } = clip.content else {
                 continue;
             };
@@ -1790,11 +1854,16 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         (Some(_), _) if gpu_preview => monitor_viewport(&state.source.slot, aspect),
         (Some(_), _) => stage_message(
             Glyph::Film,
-            "GPU preview unavailable",
-            "A GPU rendering backend is required to show video.",
+            "Video preview unavailable",
+            "This display cannot show video preview.",
             None,
         ),
-        (None, Some(title)) => title_card(title),
+        (None, Some(_)) => stage_message(
+            Glyph::Title,
+            "Title overlay",
+            "See it over the footage in the Program monitor.",
+            None,
+        ),
         (None, None) => stage_message(
             Glyph::Locate,
             "No source selected",
@@ -2300,16 +2369,21 @@ mod tests {
         labels: Vec<String>,
         bounds: Vec<(String, Rect)>,
         images: Vec<Rect>,
+        fills: Vec<(Rect, Color)>,
+        text_colors: Vec<(String, Color)>,
     }
 
     impl Painter for TestPainter {
-        fn fill_rect(&mut self, _: Rect, _: Color, _: f32) {}
+        fn fill_rect(&mut self, rect: Rect, color: Color, _: f32) {
+            self.fills.push((rect, color));
+        }
 
         fn stroke_rect(&mut self, _: Rect, _: Color, _: f32, _: f32) {}
 
-        fn fill_text(&mut self, rect: Rect, text: &str, _: Color, _: f32, _: TextAlign) {
+        fn fill_text(&mut self, rect: Rect, text: &str, color: Color, _: f32, _: TextAlign) {
             self.labels.push(text.to_owned());
             self.bounds.push((text.to_owned(), rect));
+            self.text_colors.push((text.to_owned(), color));
         }
 
         fn draw_image(&mut self, rect: Rect, _: &RgbaImage, _: Option<Color>) {
@@ -2327,6 +2401,98 @@ mod tests {
             Renderer::new().render(build(state, viewport), viewport, &mut painter);
         });
         painter
+    }
+
+    #[test]
+    fn title_added_over_footage_appears_in_program_monitor() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/tmp/footage.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(3_000_000),
+            has_audio: false,
+        })));
+        state.insert_media(1);
+        state.focus_frame(0);
+        assert!(state.add_title());
+        let project = state.editor.borrow();
+        let title = &project.project().tracks()[1].clips[0];
+        assert_eq!(title.start_frame, 0);
+        drop(project);
+        state.select_clip(None);
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(
+            painter
+                .bounds
+                .iter()
+                .any(|(label, rect)| { label == "Title 2" && rect.y < 450.0 })
+        );
+        state.focus_frame(90);
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(
+            !painter
+                .bounds
+                .iter()
+                .any(|(label, rect)| label == "Title 2" && rect.y < 450.0)
+        );
+    }
+
+    #[test]
+    fn a_title_can_play_without_a_video_device() {
+        let state = UiState::new();
+        assert!(state.add_title());
+        state.play();
+        assert!(state.program.playing.peek());
+        state.pause();
+    }
+
+    #[test]
+    fn inspector_does_not_show_internal_preview_diagnostics() {
+        let state = UiState::new();
+        let painter = render(&state, 1280.0, 1600.0);
+        assert!(!painter.labels.iter().any(|label| {
+            label.contains("GPU video preview ready") || label.contains("audio pending")
+        }));
+        assert!(state.add_title());
+        let painter = render(&state, 1280.0, 1600.0);
+        assert!(!painter.labels.iter().any(|label| label == "Source in"));
+    }
+
+    #[test]
+    fn titles_use_transparent_text_over_the_program_frame() {
+        let stage = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 640.0,
+            height: 360.0,
+        };
+        let title = Title {
+            text: "Over footage".into(),
+            font_family: "Sans".into(),
+            font_size: 72.0,
+            color: [245, 210, 80, 160],
+            x: 0.25,
+            y: 0.7,
+        };
+        let mut painter = TestPainter::default();
+        ProgramCanvas {
+            slot: GpuFrameSlot::new(),
+            picture: true,
+            titles: vec![title],
+            aspect: 16.0 / 9.0,
+            resolution: (1920, 1080),
+        }
+        .paint(&mut painter, stage);
+        assert_eq!(painter.fills.len(), 1);
+        assert_eq!(painter.fills[0].1, Color::rgb(32, 32, 32));
+        assert!(painter.labels.iter().all(|label| label == "Over footage"));
+        let (_, rect) = painter.bounds.last().unwrap();
+        assert!(rect.y > stage.height / 2.0);
+        assert_eq!(
+            painter.text_colors.last().unwrap().1,
+            Color::rgba(245, 210, 80, 160)
+        );
     }
 
     #[test]

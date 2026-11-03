@@ -485,6 +485,9 @@ impl UiState {
         let mut playable = false;
         for track in project.project().tracks() {
             for clip in &track.clips {
+                if track.kind == TrackKind::Video && matches!(clip.content, ClipContent::Title(_)) {
+                    playable = true;
+                }
                 let ClipContent::Media { media_id } = clip.content else {
                     continue;
                 };
@@ -507,13 +510,13 @@ impl UiState {
         drop(project);
         if has_picture && !self.preview_available.peek() {
             self.status
-                .set("GPU preview is not available on this display".into());
+                .set("Video preview is not available on this display".into());
             return;
         }
         let end = self.sequence_end();
         if !playable || end == 0 {
             self.status
-                .set("Add media to the timeline to preview".into());
+                .set("Add a clip to the timeline to play the sequence".into());
             return;
         }
         self.pause_source();
@@ -694,7 +697,7 @@ impl UiState {
         };
         if range.kind != MediaKind::Audio && !self.preview_available.peek() {
             self.status
-                .set("GPU preview is not available on this display".into());
+                .set("Video preview is not available on this display".into());
             return;
         }
         self.pause();

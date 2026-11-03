@@ -292,6 +292,45 @@ impl UiState {
     }
 
     pub fn add_title_at(&self, placement: Option<(u64, u64)>) -> bool {
+        let placement = if placement.is_none() {
+            let editor = self.editor.borrow();
+            let project = editor.project();
+            let frame = self.program.position.peek();
+            let duration = u64::from(project.settings().frame_rate.numerator).saturating_mul(3)
+                / u64::from(project.settings().frame_rate.denominator);
+            let end = frame.saturating_add(duration);
+            let footage_here = project.tracks().iter().any(|track| {
+                track.kind == TrackKind::Video
+                    && track.clips.iter().any(|clip| {
+                        matches!(clip.content, ClipContent::Media { .. })
+                            && clip.start_frame <= frame
+                            && frame - clip.start_frame < clip.duration_frames
+                    })
+            });
+            if footage_here {
+                let Some(track) = project
+                    .tracks()
+                    .iter()
+                    .filter(|track| track.kind == TrackKind::Video)
+                    .rev()
+                    .find(|track| {
+                        track.clips.iter().all(|clip| {
+                            clip.start_frame >= end
+                                || clip.start_frame.saturating_add(clip.duration_frames) <= frame
+                        })
+                    })
+                else {
+                    self.status
+                        .set("Add a free video track for the title overlay".into());
+                    return false;
+                };
+                Some((track.id, frame))
+            } else {
+                None
+            }
+        } else {
+            placement
+        };
         let title = edits::title_clip(self.editor.borrow().project(), placement);
         let Some((track_id, clip)) = title else {
             return false;

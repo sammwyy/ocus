@@ -70,7 +70,8 @@ and deleting a selection is planned in `ui/edits.rs` against the current
 project and applied as one `ReplaceTracks` command, so it undoes in one step
 and the project's own validation still rejects overlaps. Drag previews and
 the rubber band are transient UI state. It does
-not composite simultaneous video/title layers; title edits, split/move/trim/delete,
+overlays title text over the first active video/still layer in the Program
+monitor, but does not composite simultaneous video layers; title edits, split/move/trim/delete,
 audio clip settings, track creation/removal and ripple delete use project
 commands. A video with sound is inserted as one clip with `linked_audio`, an
 optional field that keeps version 1 files readable (absent means false), so
@@ -82,7 +83,7 @@ absolutely positioned layers above the workspace. During playback
 any clip on audio tracks, honoring volume and mute), resamples and mixes it to
 48 kHz stereo on a worker, and `playback.rs` streams it through rodio to the
 default output device; video pacing follows the consumed-sample clock so
-picture and sound stay aligned. The preview compositor, title rendering, and
+picture and sound stay aligned. Multi-video compositing, titles in exports, and
 full A/V export remain unimplemented.
 
 ## Where new work belongs

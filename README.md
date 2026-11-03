@@ -6,8 +6,9 @@ and exporting an MP4 in v0.1. **The end-to-end video workflow is not implemented
 yet.** Today the repository builds a CreamUI desktop shell with an integrated
 titlebar, four timeline tracks, a versioned JSON project representation, and
 undo/redo commands for renaming projects and inserting/removing clips. The
-timeline toolbar's **Title** tool appends a three-second text clip to the first
-video track. The workspace supports selecting and renaming titles, stepping through
+timeline toolbar's **Title** tool adds a three-second text clip; over footage
+it places the title on a free video track at the playhead. The workspace
+supports selecting and renaming titles, stepping through
 frames to inspect title text, splitting, moving, trimming, deleting and ripple
 deleting clips, and undo/redo. **Open** and **Save as…** use native
 file dialogs instead of requiring typed paths; **Save** reuses the chosen
@@ -87,12 +88,14 @@ clips and still images on one video track. Cuts and trims are honored; export
 runs in the background, shows progress, can be cancelled, and publishes a
 completed file atomically. The button reports unsupported sequences rather
 than silently omitting content. Audio, titles, gaps and multiple active tracks
-are **not** exported, and output has no AAC audio stream.
+are **not** exported, and output has no AAC audio stream. Titles appear over
+footage in the Program monitor but cannot be exported yet.
 
 This is not a completed v0.1 video editor. Preview renders a single active
-video layer or still image and plays clip audio mixed through the default
-output device, with picture timed to the audio clock; it does not yet composite
-overlapping tracks or titles onto video, and export still has no audio stream.
+video layer or still image with transparent title text from other video tracks
+and plays clip audio mixed through the default output device, with picture timed
+to the audio clock; it does not yet composite multiple video layers, and export
+still has no audio stream or title overlays.
 Building requires FFmpeg development libraries (available
 on the Fedora development machine) and a GPU-capable CreamUI window.
 

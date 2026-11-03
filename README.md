@@ -25,8 +25,8 @@ split, move, trim, delete or ripple applies to both, so cutting a clip in three
 and ripple-deleting the middle keeps picture and sound 1:1. **Detach audio**
 (inspector or right-click) moves that sound to an audio track that is free for
 the same range, creating a new one if needed, and **Link audio** folds a
-matching pair back together. Clip volume and mute are editable and saved, but
-do not affect playback or export yet. Previously saved references without probe
+matching pair back together. Clip volume and mute are editable, saved, and
+honored during preview playback (export stays silent). Previously saved references without probe
 metadata can be re-imported.
 
 The workspace has two GPU monitors: **Source** shows the selected timeline
@@ -83,9 +83,10 @@ than silently omitting content. Audio, titles, gaps and multiple active tracks
 are **not** exported, and output has no AAC audio stream.
 
 This is not a completed v0.1 video editor. Preview renders a single active
-video layer or still image without audio; it does not yet composite overlapping
-tracks or titles onto video. Audio playback and audio-synchronized timing are
-not implemented. Building requires FFmpeg development libraries (available
+video layer or still image and plays clip audio mixed through the default
+output device, with picture timed to the audio clock; it does not yet composite
+overlapping tracks or titles onto video, and export still has no audio stream.
+Building requires FFmpeg development libraries (available
 on the Fedora development machine) and a GPU-capable CreamUI window.
 
 ## Run and check
@@ -109,8 +110,9 @@ from crates.io. No local CreamUI checkout is needed.
 - `src/app.rs`: window startup and wiring.
 - `src/project/`: saved project, JSON format, and edit history/undo-redo.
 - `src/timeline.rs`: tracks, clips, and titles.
-- `src/media.rs` and `src/media/preview.rs`: source references, FFmpeg probing,
-  thumbnails and background video decoding.
+- `src/media.rs`, `src/media/preview.rs` and `src/media/audio.rs`: source
+  references, FFmpeg probing, thumbnails and background video/audio decoding.
+- `src/playback.rs`: default audio device and playback sessions.
 - `src/export.rs`: limited H.264 MP4 encoding and cancellation.
 - `src/ui/`: compact CreamUI workspace and background file workflow.
 - `src/main.rs`: executable entry point.

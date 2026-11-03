@@ -1,10 +1,12 @@
 use super::edits::{self, ClipRef};
 use super::interaction::{DragState, Gesture, MenuState};
 use crate::export::{self, ExportControl};
+use crate::media::audio::{self, AudioPlan, AudioSource, Clock};
 use crate::media::preview::{
     FrameImage, FrameSource, PreviewEvent, PreviewPlan, StoryboardKey, decode_sequence, storyboard,
 };
 use crate::media::{Media, MediaKind, MediaProbe, Thumbnail, probe, thumbnail};
+use crate::playback::{self, Session};
 use crate::project::{Command, Editor, Project, store};
 use crate::timeline::{Clip, ClipContent, TrackKind};
 use creamui::core::{Modifiers, Point, Rect, RgbaImage};
@@ -56,6 +58,7 @@ pub(crate) struct Monitor {
     pub position: Signal<u64>,
     cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
     serial: Rc<Cell<u64>>,
+    audio: Rc<RefCell<Option<Session>>>,
 }
 
 impl Monitor {
@@ -66,6 +69,7 @@ impl Monitor {
             position: Signal::new(0),
             cancel: Rc::new(RefCell::new(None)),
             serial: Rc::new(Cell::new(0)),
+            audio: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -73,6 +77,7 @@ impl Monitor {
         if let Some(cancel) = self.cancel.borrow_mut().take() {
             cancel.store(true, Ordering::Relaxed);
         }
+        self.audio.borrow_mut().take();
         self.serial.set(self.serial.get().wrapping_add(1));
     }
 }
@@ -131,6 +136,8 @@ pub(crate) struct UiState {
     storyboard_cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
     storyboard_serial: Rc<Cell<u64>>,
     export_control: Rc<RefCell<Option<Arc<ExportControl>>>>,
+    audio_output: Rc<RefCell<Option<playback::Output>>>,
+    audio_failed: Rc<Cell<bool>>,
 }
 
 impl UiState {
@@ -177,6 +184,8 @@ impl UiState {
             storyboard_cancel: Rc::new(RefCell::new(None)),
             storyboard_serial: Rc::new(Cell::new(0)),
             export_control: Rc::new(RefCell::new(None)),
+            audio_output: Rc::new(RefCell::new(None)),
+            audio_failed: Rc::new(Cell::new(false)),
         }
     }
 
@@ -338,23 +347,40 @@ impl UiState {
     }
 
     pub fn play(&self) {
-        if !self.preview_available.peek() {
+        let project = self.editor.borrow();
+        let mut has_picture = false;
+        let mut playable = false;
+        for track in project.project().tracks() {
+            for clip in &track.clips {
+                let ClipContent::Media { media_id } = clip.content else {
+                    continue;
+                };
+                let Some(media) = project
+                    .project()
+                    .media()
+                    .iter()
+                    .find(|media| media.id == media_id)
+                else {
+                    continue;
+                };
+                if track.kind == TrackKind::Video && media.kind != MediaKind::Audio {
+                    has_picture = true;
+                    playable = true;
+                } else if audible(track.kind, clip, media) {
+                    playable = true;
+                }
+            }
+        }
+        drop(project);
+        if has_picture && !self.preview_available.peek() {
             self.status
                 .set("GPU preview is not available on this display".into());
             return;
         }
-        let project = self.editor.borrow();
-        let has_video = project.project().tracks().iter().any(|track| {
-            track.kind == TrackKind::Video && track.clips.iter().any(|clip| {
-                matches!(clip.content, ClipContent::Media { media_id }
-                    if project.project().media().iter().any(|media| media.id == media_id && media.kind != MediaKind::Audio))
-            })
-        });
-        drop(project);
         let end = self.sequence_end();
-        if !has_video || end == 0 {
+        if !playable || end == 0 {
             self.status
-                .set("Add video or an image to the timeline to preview".into());
+                .set("Add media to the timeline to preview".into());
             return;
         }
         self.pause_source();
@@ -528,19 +554,16 @@ impl UiState {
     }
 
     pub fn play_source(&self) {
-        if !self.preview_available.peek() {
+        let Some(range) = self.source_range() else {
+            self.status
+                .set("Select a clip or source to preview it".into());
+            return;
+        };
+        if range.kind != MediaKind::Audio && !self.preview_available.peek() {
             self.status
                 .set("GPU preview is not available on this display".into());
             return;
         }
-        let Some(range) = self
-            .source_range()
-            .filter(|range| range.kind != MediaKind::Audio)
-        else {
-            self.status
-                .set("Select a video clip or source to preview it".into());
-            return;
-        };
         self.pause();
         self.source.playing.set(true);
         if self.source.position.peek() >= range.duration.saturating_sub(1) {
@@ -562,15 +585,16 @@ impl UiState {
         let editor = self.editor.borrow();
         let project = editor.project();
         let mut sources = Vec::new();
-        for track in project
-            .tracks()
-            .iter()
-            .filter(|track| track.kind == TrackKind::Video)
-        {
+        let mut audio_sources = Vec::new();
+        for track in project.tracks() {
             for clip in &track.clips {
-                if let ClipContent::Media { media_id } = clip.content
-                    && let Some(media) = project.media().iter().find(|media| media.id == media_id)
-                {
+                let ClipContent::Media { media_id } = clip.content else {
+                    continue;
+                };
+                let Some(media) = project.media().iter().find(|media| media.id == media_id) else {
+                    continue;
+                };
+                if track.kind == TrackKind::Video {
                     sources.push(FrameSource {
                         clip_id: clip.id,
                         path: media.path.clone(),
@@ -578,6 +602,15 @@ impl UiState {
                         start: clip.start_frame,
                         source_start: clip.source_start_frame,
                         duration: clip.duration_frames,
+                    });
+                }
+                if audible(track.kind, clip, media) {
+                    audio_sources.push(AudioSource {
+                        path: media.path.clone(),
+                        start: clip.start_frame,
+                        source_start: clip.source_start_frame,
+                        duration: clip.duration_frames,
+                        volume: clip.volume,
                     });
                 }
             }
@@ -588,53 +621,81 @@ impl UiState {
         );
         let resolution = (project.settings().width, project.settings().height);
         drop(editor);
+        let end = self.sequence_end();
         let plan = PreviewPlan {
             sources,
-            end: self.sequence_end(),
+            end,
             fps,
             resolution,
         };
-        self.stream(&self.program, plan, true);
+        let audio = AudioPlan {
+            sources: audio_sources,
+            end,
+            fps,
+        };
+        self.stream(&self.program, plan, audio, true);
     }
 
     fn request_source_preview(&self) {
-        let range = self
-            .source_range()
-            .filter(|range| range.kind != MediaKind::Audio);
+        let range = self.source_range();
         let editor = self.editor.borrow();
         let settings = editor.project().settings();
+        let fps = (
+            settings.frame_rate.numerator,
+            settings.frame_rate.denominator,
+        );
+        let end = range.as_ref().map_or(0, |range| range.duration);
         let plan = PreviewPlan {
-            end: range.as_ref().map_or(0, |range| range.duration),
+            end,
             sources: range
-                .into_iter()
+                .iter()
+                .filter(|range| range.kind != MediaKind::Audio)
                 .map(|range| FrameSource {
                     clip_id: 0,
-                    path: range.path,
+                    path: range.path.clone(),
                     kind: range.kind,
                     start: 0,
                     source_start: range.source_start,
                     duration: range.duration,
                 })
                 .collect(),
-            fps: (
-                settings.frame_rate.numerator,
-                settings.frame_rate.denominator,
-            ),
+            fps,
             resolution: (settings.width, settings.height),
+        };
+        let audio = AudioPlan {
+            end,
+            sources: range
+                .iter()
+                .filter(|range| range.kind != MediaKind::Image)
+                .map(|range| AudioSource {
+                    path: range.path.clone(),
+                    start: 0,
+                    source_start: range.source_start,
+                    duration: range.duration,
+                    volume: 1.0,
+                })
+                .collect(),
+            fps,
         };
         drop(editor);
         if plan.end > 0 && self.source.position.peek() >= plan.end {
             self.source.position.set(plan.end - 1);
         }
-        self.stream(&self.source, plan, false);
+        self.stream(&self.source, plan, audio, false);
     }
 
-    fn stream(&self, monitor: &Monitor, plan: PreviewPlan, follow_timeline: bool) {
+    fn stream(
+        &self,
+        monitor: &Monitor,
+        plan: PreviewPlan,
+        audio: AudioPlan,
+        follow_timeline: bool,
+    ) {
         monitor.cancel();
         let Some(window) = self.window.borrow().clone() else {
             return;
         };
-        if !self.preview_available.peek() || window.is_closed() {
+        if window.is_closed() {
             return;
         }
         let Some(app) = self.app.borrow().clone() else {
@@ -647,27 +708,37 @@ impl UiState {
             monitor.slot.clear(&window);
             return;
         }
+        if !plan.sources.is_empty() && !self.preview_available.peek() {
+            return;
+        }
         let serial = monitor.serial.get();
         let cancelled = Arc::new(AtomicBool::new(false));
         *monitor.cancel.borrow_mut() = Some(cancelled.clone());
+        let clock = if playing && start < plan.end {
+            self.start_audio(monitor, audio, start, &app, serial)
+        } else {
+            None
+        };
         let state = self.clone();
         let monitor = monitor.clone();
         let pending = Arc::new(AtomicUsize::new(0));
         let worker_pending = pending.clone();
         app.spawn_stream(
             move |emit| {
-                if let Err(error) = decode_sequence(&plan, start, playing, cancelled, |event| {
-                    if matches!(event, PreviewEvent::Frame(..))
-                        && worker_pending
-                            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                                (count < 2).then_some(count + 1)
-                            })
-                            .is_err()
-                    {
-                        return;
-                    }
-                    emit(event);
-                }) {
+                if let Err(error) =
+                    decode_sequence(&plan, start, playing, cancelled, clock, |event| {
+                        if matches!(event, PreviewEvent::Frame(..))
+                            && worker_pending
+                                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                                    (count < 2).then_some(count + 1)
+                                })
+                                .is_err()
+                        {
+                            return;
+                        }
+                        emit(event);
+                    })
+                {
                     emit(PreviewEvent::Failed(error));
                 }
             },
@@ -706,6 +777,50 @@ impl UiState {
                 }
             },
         );
+    }
+
+    /// Starts a sound session for a playing stream and returns the clock
+    /// video pacing follows; `None` keeps playback timed by the wall clock.
+    fn start_audio(
+        &self,
+        monitor: &Monitor,
+        plan: AudioPlan,
+        start: u64,
+        app: &AppHandle,
+        serial: u64,
+    ) -> Option<Clock> {
+        if plan.sources.is_empty() {
+            return None;
+        }
+        if self.audio_output.borrow().is_none() && !self.audio_failed.get() {
+            match playback::Output::open() {
+                Ok(output) => *self.audio_output.borrow_mut() = Some(output),
+                Err(error) => {
+                    self.audio_failed.set(true);
+                    self.status.set(error);
+                }
+            }
+        }
+        let output = self.audio_output.borrow();
+        let session = playback::play(output.as_ref()?);
+        let clock = session.clock.clone();
+        let queue = session.queue.clone();
+        let cancelled = session.cancel.clone();
+        drop(output);
+        *monitor.audio.borrow_mut() = Some(session);
+        let state = self.clone();
+        let monitor = monitor.clone();
+        app.spawn_background(
+            move || audio::feed(&plan, start, queue, cancelled),
+            move |result| {
+                if monitor.serial.get() == serial
+                    && let Err(error) = result
+                {
+                    state.status.set(format!("Audio preview: {error}"));
+                }
+            },
+        );
+        Some(clock)
     }
 
     fn reset_monitors(&self) {
@@ -1289,6 +1404,15 @@ impl UiState {
         }
         insertion.start.checked_add(insertion.duration)
     }
+}
+
+/// Whether a clip contributes sound to preview playback.
+pub(crate) fn audible(kind: TrackKind, clip: &Clip, media: &Media) -> bool {
+    !clip.muted
+        && match kind {
+            TrackKind::Video => clip.linked_audio && media.has_audio,
+            TrackKind::Audio => media.kind == MediaKind::Audio || media.has_audio,
+        }
 }
 
 /// Timeline frames a source occupies when inserted; stills default to 3 s.

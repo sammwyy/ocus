@@ -138,11 +138,11 @@ impl Project {
         kind: TrackKind,
         clip: &crate::timeline::Clip,
     ) -> bool {
-        if !matches!(
+        if !(matches!(
             (kind, media.kind),
             (TrackKind::Video, MediaKind::Video | MediaKind::Image)
                 | (TrackKind::Audio, MediaKind::Audio)
-        ) && !(kind == TrackKind::Audio && media.kind == MediaKind::Video && media.has_audio)
+        ) || kind == TrackKind::Audio && media.kind == MediaKind::Video && media.has_audio)
         {
             return false;
         }

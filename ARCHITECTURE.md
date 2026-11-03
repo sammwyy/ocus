@@ -17,6 +17,8 @@ src/
     format.rs       versioned JSON string format
   media.rs          source references, probing and thumbnail decoding
   media/preview.rs  background video decoding and frame-accurate seek
+  media/audio.rs    background audio decoding, mixing and the playback clock
+  playback.rs       default output device and monitor sound sessions
   export.rs         silent H.264 MP4 encoding with cancellation
   timeline.rs       tracks, clips, and title data
   ui/
@@ -70,8 +72,13 @@ optional field that keeps version 1 files readable (absent means false), so
 any edit of the clip also edits its sound; validation only allows it on video
 tracks for video sources with audio. Detaching turns it into an aligned clip on
 an audio track. Context menus and the drag label are UI overlays drawn as
-absolutely positioned layers above the workspace. Audio, the preview compositor, title rendering, and full
-A/V export remain unimplemented.
+absolutely positioned layers above the workspace. During playback
+`media/audio.rs` decodes each audible clip (linked audio on video tracks and
+any clip on audio tracks, honoring volume and mute), resamples and mixes it to
+48 kHz stereo on a worker, and `playback.rs` streams it through rodio to the
+default output device; video pacing follows the consumed-sample clock so
+picture and sound stay aligned. The preview compositor, title rendering, and
+full A/V export remain unimplemented.
 
 ## Where new work belongs
 

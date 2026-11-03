@@ -1,4 +1,5 @@
 use super::MediaKind;
+use super::audio::Clock;
 use ffmpeg_next as ffmpeg;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -80,6 +81,9 @@ pub struct PreviewPlan {
     pub resolution: (u32, u32),
 }
 
+/// How far video may run ahead of a stalled audio clock before taking over.
+const MAX_AUDIO_LAG: Duration = Duration::from_millis(250);
+
 pub enum PreviewEvent {
     Frame(u64, Option<FrameImage>),
     Finished,
@@ -91,6 +95,7 @@ pub fn decode_sequence(
     start: u64,
     playing: bool,
     cancelled: Arc<AtomicBool>,
+    clock: Option<Clock>,
     mut emit: impl FnMut(PreviewEvent),
 ) -> Result<(), String> {
     ffmpeg::init().map_err(|error| error.to_string())?;
@@ -120,11 +125,21 @@ pub fn decode_sequence(
             let nanos = u128::from(position - start) * u128::from(fps.1) * 1_000_000_000
                 / u128::from(fps.0);
             let deadline = Duration::from_nanos(nanos.min(u128::from(u64::MAX)) as u64);
-            while started.elapsed() < deadline {
+            loop {
+                let wall = started.elapsed();
+                // Audio output is the master clock, but a stalled device must
+                // not freeze the picture for more than MAX_AUDIO_LAG.
+                let elapsed = match &clock {
+                    Some(clock) => wall.saturating_sub(MAX_AUDIO_LAG).max(clock.elapsed()),
+                    None => wall,
+                };
+                if elapsed >= deadline {
+                    break;
+                }
                 if cancelled.load(Ordering::Relaxed) {
                     return Ok(());
                 }
-                std::thread::sleep((deadline - started.elapsed()).min(Duration::from_millis(10)));
+                std::thread::sleep((deadline - elapsed).min(Duration::from_millis(10)));
             }
         }
         let source = sources
@@ -356,21 +371,35 @@ mod tests {
             resolution: (2, 2),
         };
         let mut result = Vec::new();
-        decode_sequence(&plan, 4, false, Arc::new(AtomicBool::new(false)), |event| {
-            if let PreviewEvent::Frame(position, Some(image)) = event {
-                result.push((position, image.pixels[0]));
-            }
-        })
+        decode_sequence(
+            &plan,
+            4,
+            false,
+            Arc::new(AtomicBool::new(false)),
+            None,
+            |event| {
+                if let PreviewEvent::Frame(position, Some(image)) = event {
+                    result.push((position, image.pixels[0]));
+                }
+            },
+        )
         .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, 4);
         assert!(result[0].1 > 140, "{result:?}");
         result.clear();
-        decode_sequence(&plan, 0, true, Arc::new(AtomicBool::new(false)), |event| {
-            if let PreviewEvent::Frame(position, Some(image)) = event {
-                result.push((position, image.pixels[0]));
-            }
-        })
+        decode_sequence(
+            &plan,
+            0,
+            true,
+            Arc::new(AtomicBool::new(false)),
+            None,
+            |event| {
+                if let PreviewEvent::Frame(position, Some(image)) = event {
+                    result.push((position, image.pixels[0]));
+                }
+            },
+        )
         .unwrap();
         assert_eq!(result.len(), 6);
         assert!(result[0].1 < 120 && result[5].1 > 140, "{result:?}");
@@ -408,6 +437,7 @@ mod tests {
                 position,
                 false,
                 Arc::new(AtomicBool::new(false)),
+                None,
                 |event| {
                     if let PreviewEvent::Frame(_, image) = event {
                         frames.push(image.map(|image| image.pixels[0]));
@@ -422,7 +452,7 @@ mod tests {
         assert!(frames[2].is_some_and(|shade| shade > 140));
         let cancelled = Arc::new(AtomicBool::new(true));
         assert!(FrameReader::open(&clips[0], 0, (30, 1), (2, 2), cancelled.clone()).is_err());
-        decode_sequence(&plan, 0, true, cancelled, |_| {
+        decode_sequence(&plan, 0, true, cancelled, None, |_| {
             panic!("cancelled preview emitted a frame")
         })
         .unwrap();

@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use ffmpeg_next as ffmpeg;
 use serde::{Deserialize, Serialize};
 
+pub mod audio;
 pub mod preview;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

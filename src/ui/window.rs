@@ -6,7 +6,7 @@ use super::controls::{
     timecode, tool_button,
 };
 use super::interaction::{Action, DragPayload, MenuState};
-use super::state::{MediaView, SourceRange, ZOOM_SECONDS, media_frames};
+use super::state::{MediaView, SourceRange, ZOOM_SECONDS, audible, media_frames};
 use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
 use super::{MediaFilter, Sidebar, UiState};
 use crate::media::preview::StoryboardKey;
@@ -1638,13 +1638,24 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             None,
         ),
     };
-    let has_video = project.tracks().iter().any(|track| {
-        track.kind == TrackKind::Video
-            && track
-                .clips
-                .iter()
-                .any(|clip| matches!(clip.content, ClipContent::Media { .. }))
-    });
+    let mut has_picture = false;
+    let mut playable = false;
+    for track in project.tracks() {
+        for clip in &track.clips {
+            let ClipContent::Media { media_id } = clip.content else {
+                continue;
+            };
+            let Some(media) = project.media().iter().find(|media| media.id == media_id) else {
+                continue;
+            };
+            if track.kind == TrackKind::Video && media.kind != MediaKind::Audio {
+                has_picture = true;
+                playable = true;
+            } else if audible(track.kind, clip, media) {
+                playable = true;
+            }
+        }
+    }
     let program_playing = state.program.playing.get();
     let program = monitor(
         "Program",
@@ -1663,7 +1674,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 end: timeline_end,
                 fps,
                 playing: program_playing,
-                can_play: gpu_preview && has_video,
+                can_play: playable && (gpu_preview || !has_picture),
                 color: ACCENT,
                 compact: narrow,
             },
@@ -1713,7 +1724,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         (Some(range), _) if range.kind == MediaKind::Audio => stage_message(
             Glyph::Music,
             "Audio source",
-            "Waveforms and audio playback are not available yet.",
+            "Audio plays through the default output device.",
             None,
         ),
         (Some(_), _) if gpu_preview => monitor_viewport(&state.source.slot, aspect),
@@ -1769,7 +1780,9 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 end: source_end,
                 fps,
                 playing: state.source.playing.get(),
-                can_play: gpu_preview && range.as_ref().is_some_and(|r| r.kind != MediaKind::Audio),
+                can_play: range
+                    .as_ref()
+                    .is_some_and(|r| gpu_preview || r.kind == MediaKind::Audio),
                 color: VIDEO,
                 compact: narrow,
             },

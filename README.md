@@ -15,8 +15,10 @@ path. **New** asks before discarding unsaved changes. Saves are atomic and
 file operations run in the background. **Import media** accepts multiple
 files from the native picker and probes video, audio, and images with FFmpeg
 on a worker thread. Video and still-image sources get small, regenerable
-first-frame thumbnails. The media bin can insert a clip on a video or audio
-track using the probed duration (still images default to three seconds).
+first-frame thumbnails. The media bin offers search and video/audio/image
+filters, plus compact source cards with duration and a one-click insert
+action. The media bin can insert a clip on a video or audio track using the
+probed duration (still images default to three seconds).
 Videos with audio place aligned video and audio clips in a single undoable
 action. Audio clips have editable volume and mute values, but those values do
 not affect playback or export yet. Previously saved references without probe
@@ -24,11 +26,15 @@ metadata can be re-imported.
 
 The workspace shows a time-scaled, paged timeline, a GPU video monitor, and
 an inspector that scrolls through clip controls. Play/Pause, single-frame
-stepping and dragging the timeline ruler seek video and still-image clips;
-decoding happens on a worker and the current frame is presented on the same
-GPU device as CreamUI. On a CPU-only window the monitor instead explains why
-video cannot be displayed. On narrower windows the media library and
-inspector share a tabbed sidebar.
+stepping, a monitor scrub bar, and dragging the timeline ruler or a clip seek
+video and still-image sources. Video clips display small filmstrips sampled
+from their actual trimmed source range; these regenerate in the background
+and do not change the project file. The timeline can expand to show all
+tracks or give more space to the program monitor. Video decoding happens
+on a worker and the current frame is presented on the same GPU device as
+CreamUI. On a CPU-only window the monitor instead explains why video cannot
+be displayed. On narrower windows the media library and inspector share a
+tabbed sidebar.
 
 **Export silent MP4** encodes H.264 from a continuous sequence of video-only
 clips and still images on one video track. Cuts and trims are honored; export

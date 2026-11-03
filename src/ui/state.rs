@@ -1,5 +1,7 @@
 use crate::export::{self, ExportControl};
-use crate::media::preview::{FrameImage, FrameSource, PreviewEvent, PreviewPlan, decode_sequence};
+use crate::media::preview::{
+    FrameImage, FrameSource, PreviewEvent, PreviewPlan, StoryboardKey, decode_sequence, storyboard,
+};
 use crate::media::{Media, MediaKind, MediaProbe, Thumbnail, probe, thumbnail};
 use crate::project::{Command, Editor, Project, store};
 use crate::timeline::{ClipContent, TrackKind};
@@ -8,7 +10,7 @@ use creamui::widgets::{ScrollController, TextController};
 use creamui::{AppHandle, GpuFrame, GpuFrameSlot, Signal, WindowHandle};
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -20,7 +22,18 @@ pub(crate) enum Sidebar {
     Inspector,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaFilter {
+    All,
+    Video,
+    Audio,
+    Image,
+}
+
 const MAX_THUMBNAILS: usize = 256;
+const MAX_STORYBOARDS: usize = 64;
+
+pub(crate) type Storyboard = Arc<Vec<Arc<RgbaImage>>>;
 
 #[derive(Clone)]
 pub(crate) struct UiState {
@@ -34,21 +47,27 @@ pub(crate) struct UiState {
     pub preview_slot: GpuFrameSlot,
     pub project_path: Signal<Option<PathBuf>>,
     pub title_text: TextController,
+    pub media_query: TextController,
+    pub media_filter: Signal<MediaFilter>,
     pub status: Signal<String>,
     pub dirty: Signal<bool>,
     pub busy: Signal<bool>,
     pub exporting: Signal<bool>,
     pub export_total: Signal<u64>,
     pub thumbnails: Rc<RefCell<HashMap<PathBuf, Arc<RgbaImage>>>>,
+    pub storyboards: Rc<RefCell<HashMap<StoryboardKey, Storyboard>>>,
     pub media_scroll: ScrollController,
     pub inspector_scroll: ScrollController,
     pub timeline_scroll: ScrollController,
     pub timeline_page: Signal<u64>,
+    pub timeline_expanded: Signal<bool>,
     pub sidebar: Signal<Sidebar>,
     app: Rc<RefCell<Option<AppHandle>>>,
     window: Rc<RefCell<Option<WindowHandle>>>,
     preview_cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
     preview_serial: Rc<Cell<u64>>,
+    storyboard_cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
+    storyboard_serial: Rc<Cell<u64>>,
     export_control: Rc<RefCell<Option<Arc<ExportControl>>>>,
 }
 
@@ -65,21 +84,27 @@ impl UiState {
             preview_slot: GpuFrameSlot::new(),
             project_path: Signal::new(None),
             title_text: TextController::default(),
+            media_query: TextController::default(),
+            media_filter: Signal::new(MediaFilter::All),
             status: Signal::new("Ready · Project not saved".into()),
             dirty: Signal::new(false),
             busy: Signal::new(false),
             exporting: Signal::new(false),
             export_total: Signal::new(0),
             thumbnails: Rc::new(RefCell::new(HashMap::new())),
+            storyboards: Rc::new(RefCell::new(HashMap::new())),
             media_scroll: ScrollController::default(),
             inspector_scroll: ScrollController::default(),
             timeline_scroll: ScrollController::default(),
             timeline_page: Signal::new(0),
+            timeline_expanded: Signal::new(false),
             sidebar: Signal::new(Sidebar::Media),
             app: Rc::new(RefCell::new(None)),
             window: Rc::new(RefCell::new(None)),
             preview_cancel: Rc::new(RefCell::new(None)),
             preview_serial: Rc::new(Cell::new(0)),
+            storyboard_cancel: Rc::new(RefCell::new(None)),
+            storyboard_serial: Rc::new(Cell::new(0)),
             export_control: Rc::new(RefCell::new(None)),
         }
     }
@@ -101,6 +126,7 @@ impl UiState {
             self.dirty.set(true);
             self.status.set("Unsaved changes".into());
             self.request_preview();
+            self.queue_storyboards();
         } else {
             self.status
                 .set("Edit rejected: check range, track and clip".into());
@@ -114,6 +140,7 @@ impl UiState {
             self.dirty.set(true);
             self.status.set("Undid edit · Unsaved changes".into());
             self.request_preview();
+            self.queue_storyboards();
         }
     }
 
@@ -123,6 +150,7 @@ impl UiState {
             self.dirty.set(true);
             self.status.set("Redid edit · Unsaved changes".into());
             self.request_preview();
+            self.queue_storyboards();
         }
     }
 
@@ -309,6 +337,97 @@ impl UiState {
         self.timeline_page.set(frame / page_frames);
     }
 
+    fn cancel_storyboards(&self) {
+        if let Some(cancel) = self.storyboard_cancel.borrow_mut().take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.storyboard_serial
+            .set(self.storyboard_serial.get().wrapping_add(1));
+    }
+
+    fn queue_storyboards(&self) {
+        self.cancel_storyboards();
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let editor = self.editor.borrow();
+        let project = editor.project();
+        let fps = (
+            project.settings().frame_rate.numerator,
+            project.settings().frame_rate.denominator,
+        );
+        let keys: Vec<_> = project
+            .tracks()
+            .iter()
+            .filter(|track| track.kind == TrackKind::Video)
+            .flat_map(|track| &track.clips)
+            .filter_map(|clip| {
+                let ClipContent::Media { media_id } = clip.content else {
+                    return None;
+                };
+                let media = project.media().iter().find(|media| media.id == media_id)?;
+                Some(StoryboardKey {
+                    path: media.path.clone(),
+                    kind: media.kind,
+                    source_start: clip.source_start_frame,
+                    duration: clip.duration_frames,
+                    fps,
+                })
+            })
+            .collect();
+        drop(editor);
+        let live: HashSet<_> = keys.iter().cloned().collect();
+        let mut cache = self.storyboards.borrow_mut();
+        cache.retain(|key, _| live.contains(key));
+        let mut requested = HashSet::new();
+        let requests: Vec<_> = keys
+            .into_iter()
+            .filter(|key| requested.insert(key.clone()) && !cache.contains_key(key))
+            .take(MAX_STORYBOARDS.saturating_sub(cache.len()))
+            .collect();
+        drop(cache);
+        if requests.is_empty() {
+            return;
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        *self.storyboard_cancel.borrow_mut() = Some(cancelled.clone());
+        let serial = self.storyboard_serial.get();
+        let state = self.clone();
+        app.spawn_stream(
+            move |emit| {
+                for key in requests {
+                    if cancelled.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let result = storyboard(&key, cancelled.clone());
+                    emit((key, result));
+                }
+            },
+            move |(key, result): (StoryboardKey, Result<Vec<FrameImage>, String>)| {
+                if state.storyboard_serial.get() != serial {
+                    return;
+                }
+                match result {
+                    Ok(frames) if !frames.is_empty() => {
+                        let images: Vec<_> = frames
+                            .into_iter()
+                            .filter_map(|frame| {
+                                RgbaImage::new(frame.width, frame.height, frame.pixels)
+                                    .map(Arc::new)
+                            })
+                            .collect();
+                        if !images.is_empty() {
+                            state.storyboards.borrow_mut().insert(key, Arc::new(images));
+                            state.ui_revision.update(|revision| *revision += 1);
+                        }
+                    }
+                    Err(error) => state.status.set(format!("Timeline thumbnail: {error}")),
+                    _ => {}
+                }
+            },
+        );
+    }
+
     pub fn confirm_discard(&self) -> bool {
         !self.dirty.peek()
             || MessageDialog::new()
@@ -327,11 +446,15 @@ impl UiState {
         *self.editor.borrow_mut() = Editor::new(Project::new("Untitled"));
         self.project_path.set(None);
         self.thumbnails.borrow_mut().clear();
+        self.cancel_storyboards();
+        self.storyboards.borrow_mut().clear();
         self.pause();
         if let Some(window) = self.window.borrow().as_ref() {
             self.preview_slot.clear(window);
         }
         self.selected.set(None);
+        self.media_query.set_value(String::new());
+        self.media_filter.set(MediaFilter::All);
         self.playhead.set(0);
         self.timeline_page.set(0);
         self.sidebar.set(Sidebar::Media);
@@ -383,8 +506,12 @@ impl UiState {
                             .collect();
                         *state.editor.borrow_mut() = Editor::new(project);
                         state.thumbnails.borrow_mut().clear();
+                        state.cancel_storyboards();
+                        state.storyboards.borrow_mut().clear();
                         state.project_path.set(Some(path));
                         state.selected.set(None);
+                        state.media_query.set_value(String::new());
+                        state.media_filter.set(MediaFilter::All);
                         state.playhead.set(0);
                         state.timeline_page.set(0);
                         state.revision.update(|revision| *revision += 1);
@@ -392,6 +519,7 @@ impl UiState {
                         state.sidebar.set(Sidebar::Media);
                         state.status.set("Project opened".into());
                         state.load_thumbnails(sources);
+                        state.queue_storyboards();
                         state.pause();
                         state.request_preview();
                     }

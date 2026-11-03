@@ -1,6 +1,8 @@
-use super::{Sidebar, UiState};
+use super::state::Storyboard;
+use super::{MediaFilter, Sidebar, UiState};
 use crate::export::ExportControl;
 use crate::media::MediaKind;
+use crate::media::preview::StoryboardKey;
 use crate::project::Command;
 use crate::timeline::{Clip, ClipContent, Title, TrackKind};
 use creamui::core::layout::{Dimension, Style};
@@ -22,6 +24,7 @@ const TEXT: Color = Color::rgb(235, 240, 242);
 const MUTED: Color = Color::rgb(139, 153, 164);
 const ACCENT: Color = Color::rgb(114, 208, 193);
 const AUDIO: Color = Color::rgb(226, 167, 110);
+const TITLE: Color = Color::rgb(185, 155, 220);
 
 struct TimelineRuler {
     start: u64,
@@ -119,6 +122,247 @@ struct ExportMeter {
     total: u64,
 }
 
+struct TimelineClip {
+    width: f32,
+    kind: TrackKind,
+    name: String,
+    duration: String,
+    selected: bool,
+    images: Option<Storyboard>,
+    fallback: Option<Arc<RgbaImage>>,
+    track_id: u64,
+    clip_id: u64,
+    start: u64,
+    visible_frames: u64,
+    title: String,
+    is_title: bool,
+    state: UiState,
+}
+
+impl Widget for TimelineClip {
+    fn style(&self) -> creamui::Style {
+        Style {
+            size: creamui::core::layout::Size {
+                width: Dimension::Length(self.width),
+                height: Dimension::Length(46.0),
+            },
+            ..Default::default()
+        }
+        .into()
+    }
+
+    fn paint(&self, painter: &mut dyn Painter, rect: Rect) {
+        let color = if self.kind == TrackKind::Audio {
+            Color::rgb(65, 49, 37)
+        } else if !self.is_title {
+            Color::rgb(31, 69, 70)
+        } else {
+            Color::rgb(59, 47, 78)
+        };
+        painter.push_clip(rect);
+        painter.fill_rect(rect, color, 6.0);
+        if self.kind == TrackKind::Video
+            && let Some(images) = self
+                .images
+                .as_deref()
+                .filter(|images| !images.is_empty())
+                .map(Vec::as_slice)
+                .or_else(|| self.fallback.as_ref().map(std::slice::from_ref))
+        {
+            let count = ((rect.width / 110.0).floor() as usize).clamp(1, 3);
+            for index in 0..count {
+                let image = &images[index * images.len() / count];
+                let tile_width = rect.width / count as f32;
+                let tile = Rect {
+                    x: rect.x + index as f32 * tile_width,
+                    y: rect.y,
+                    width: tile_width,
+                    height: rect.height,
+                };
+                painter.draw_image(tile, image, None);
+                if index > 0 {
+                    painter.stroke_line(
+                        Point {
+                            x: tile.x,
+                            y: tile.y,
+                        },
+                        Point {
+                            x: tile.x,
+                            y: tile.y + tile.height,
+                        },
+                        Color::rgb(34, 44, 50),
+                        2.0,
+                    );
+                }
+            }
+        }
+        painter.fill_rect(
+            Rect {
+                x: rect.x,
+                y: rect.y + rect.height - 21.0,
+                width: rect.width,
+                height: 21.0,
+            },
+            Color::rgb(19, 27, 33),
+            0.0,
+        );
+        if rect.width >= 40.0 {
+            painter.fill_text(
+                Rect {
+                    x: rect.x + 8.0,
+                    y: rect.y + rect.height - 20.0,
+                    width: (rect.width - 16.0).max(0.0),
+                    height: 18.0,
+                },
+                &self.name,
+                TEXT,
+                10.0,
+                TextAlign::Start,
+            );
+        }
+        if rect.width >= 140.0 {
+            painter.fill_rect(
+                Rect {
+                    x: rect.x + 5.0,
+                    y: rect.y + 3.0,
+                    width: 66.0,
+                    height: 15.0,
+                },
+                Color::rgb(19, 27, 33),
+                3.0,
+            );
+            painter.fill_text(
+                Rect {
+                    x: rect.x + 8.0,
+                    y: rect.y + 3.0,
+                    width: 62.0,
+                    height: 15.0,
+                },
+                &self.duration,
+                if self.kind == TrackKind::Audio {
+                    AUDIO
+                } else if self.is_title {
+                    TITLE
+                } else {
+                    ACCENT
+                },
+                10.0,
+                TextAlign::Start,
+            );
+        }
+        painter.stroke_rect(
+            rect,
+            if self.selected { ACCENT } else { color },
+            if self.selected { 2.0 } else { 1.0 },
+            6.0,
+        );
+        painter.pop_clip();
+    }
+
+    fn on_drag(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
+        let state = self.state.clone();
+        let (track_id, clip_id, start, span) =
+            (self.track_id, self.clip_id, self.start, self.visible_frames);
+        let title = self.title.clone();
+        Some(Rc::new(move |position, rect| {
+            if state.selected.peek() != Some((track_id, clip_id)) {
+                state.selected.set(Some((track_id, clip_id)));
+                state.sidebar.set(Sidebar::Inspector);
+                state.title_text.set_value(title.clone());
+            }
+            let offset =
+                ((position.x / rect.width.max(1.0)).clamp(0.0, 1.0) * span as f32).floor() as u64;
+            let frame = start.saturating_add(offset.min(span.saturating_sub(1)));
+            if state.playhead.peek() != frame {
+                if state.playing.peek() {
+                    state.pause();
+                }
+                state.focus_frame(frame);
+            }
+        }))
+    }
+}
+
+struct TransportScrub {
+    frame: u64,
+    end: u64,
+    state: UiState,
+}
+
+impl Widget for TransportScrub {
+    fn style(&self) -> creamui::Style {
+        Style {
+            size: creamui::core::layout::Size {
+                width: Dimension::Percent(1.0),
+                height: Dimension::Length(16.0),
+            },
+            ..Default::default()
+        }
+        .into()
+    }
+
+    fn paint(&self, painter: &mut dyn Painter, rect: Rect) {
+        let progress = self.frame as f32 / self.end.max(1) as f32;
+        let bar = Rect {
+            x: rect.x,
+            y: rect.y + 6.0,
+            width: rect.width,
+            height: 4.0,
+        };
+        painter.fill_rect(bar, SURFACE, 2.0);
+        painter.fill_rect(
+            Rect {
+                width: bar.width * progress.min(1.0),
+                ..bar
+            },
+            ACCENT,
+            2.0,
+        );
+        if self.end > 0 {
+            painter.fill_rect(
+                Rect {
+                    x: rect.x + (rect.width * progress).min(rect.width - 10.0).max(0.0),
+                    y: rect.y + 3.0,
+                    width: 10.0,
+                    height: 10.0,
+                },
+                TEXT,
+                5.0,
+            );
+        }
+    }
+
+    fn on_drag(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
+        let state = self.state.clone();
+        let end = self.end;
+        Some(Rc::new(move |position, rect| {
+            if end == 0 {
+                return;
+            }
+            let frame =
+                ((position.x / rect.width.max(1.0)).clamp(0.0, 1.0) * end as f32).round() as u64;
+            let frame = frame.min(end - 1);
+            if state.playhead.peek() != frame {
+                if state.playing.peek() {
+                    state.pause();
+                }
+                state.focus_frame(frame);
+            }
+        }))
+    }
+}
+
+fn timecode(frame: u64, fps: (u32, u32)) -> String {
+    let milliseconds = u128::from(frame) * u128::from(fps.1) * 1000 / u128::from(fps.0.max(1));
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        milliseconds / 3_600_000,
+        (milliseconds / 60_000) % 60,
+        (milliseconds / 1_000) % 60,
+        milliseconds % 1_000
+    )
+}
+
 struct MediaArtwork {
     image: Option<Arc<RgbaImage>>,
     kind: MediaKind,
@@ -128,8 +372,8 @@ impl Widget for MediaArtwork {
     fn style(&self) -> creamui::Style {
         Style {
             size: creamui::core::layout::Size {
-                width: Dimension::Percent(1.0),
-                height: Dimension::Length(92.0),
+                width: Dimension::Length(86.0),
+                height: Dimension::Length(66.0),
             },
             ..Default::default()
         }
@@ -402,9 +646,22 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             12.0,
         ));
 
-    let files = project
+    let query = state.media_query.value().to_lowercase();
+    let filter = state.media_filter.get();
+    let files: Vec<BoxedWidget> = project
         .media()
         .iter()
+        .filter(|media| {
+            (match filter {
+                MediaFilter::All => true,
+                MediaFilter::Video => media.kind == MediaKind::Video,
+                MediaFilter::Audio => media.kind == MediaKind::Audio,
+                MediaFilter::Image => media.kind == MediaKind::Image,
+            }) && media
+                .path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().to_lowercase().contains(&query))
+        })
         .map(|media| {
             let name = media.path.file_name().map_or_else(
                 || media.path.display().to_string(),
@@ -412,29 +669,65 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             );
             Box::new(
                 Flex::column()
-                    .gap(7.0)
-                    .padding(10.0)
+                    .gap(6.0)
+                    .padding(8.0)
                     .background(SURFACE)
-                    .corner_radius(6.0)
-                    .child(Box::new(MediaArtwork {
-                        image: state.thumbnails.borrow().get(&media.path).cloned(),
-                        kind: media.kind,
-                    }))
-                    .child(text(name.chars().take(24).collect::<String>(), TEXT, 12.0))
-                    .child(text(
-                        format!(
-                            "{:?} · {}",
-                            media.kind,
-                            media.duration_us.map_or_else(
-                                || "still image · 3s default".into(),
-                                |duration| format!("{:.1}s", duration as f64 / 1_000_000.0)
-                            )
-                        ),
-                        MUTED,
-                        10.0,
+                    .corner_radius(8.0)
+                    .child(Box::new(
+                        Flex::row()
+                            .gap(9.0)
+                            .align(Align::Center)
+                            .child(Box::new(MediaArtwork {
+                                image: state.thumbnails.borrow().get(&media.path).cloned(),
+                                kind: media.kind,
+                            }))
+                            .child(Box::new(
+                                Flex::column()
+                                    .gap(4.0)
+                                    .child(heading(
+                                        match media.kind {
+                                            MediaKind::Video => "VIDEO",
+                                            MediaKind::Audio => "AUDIO",
+                                            MediaKind::Image => "IMAGE",
+                                        },
+                                        if media.kind == MediaKind::Audio {
+                                            AUDIO
+                                        } else {
+                                            ACCENT
+                                        },
+                                        10.0,
+                                    ))
+                                    .child(text(
+                                        name.chars().take(16).collect::<String>(),
+                                        TEXT,
+                                        11.0,
+                                    ))
+                                    .child(text(
+                                        media.duration_us.map_or_else(
+                                            || "Still · 3s default".into(),
+                                            |duration| {
+                                                format!(
+                                                    "{:02}:{:02}{}",
+                                                    duration / 60_000_000,
+                                                    duration / 1_000_000 % 60,
+                                                    if media.has_audio
+                                                        && media.kind == MediaKind::Video
+                                                    {
+                                                        " · audio"
+                                                    } else {
+                                                        ""
+                                                    }
+                                                )
+                                            },
+                                        ),
+                                        MUTED,
+                                        10.0,
+                                    )),
+                            )),
                     ))
-                    .child(action(
+                    .child(styled_action(
                         "Add to timeline",
+                        ButtonVariant::Secondary,
                         media.duration_us.is_some() || media.kind == crate::media::MediaKind::Image,
                         state,
                         {
@@ -445,8 +738,9 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             ) as BoxedWidget
         })
         .collect();
+    let count = files.len();
     let media_content = Flex::column()
-        .gap(10.0)
+        .gap(8.0)
         .grow(1.0)
         .child(styled_action(
             "Import media",
@@ -455,8 +749,62 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             state,
             UiState::import_dialog,
         ))
+        .child(Box::new(
+            TextInput::controlled(&state.media_query)
+                .width(if compact { 224.0 } else { 240.0 })
+                .height(30.0)
+                .placeholder("Search sources"),
+        ))
+        .child(Box::new(
+            Flex::row()
+                .gap(3.0)
+                .child(styled_action(
+                    "All",
+                    if filter == MediaFilter::All {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Tertiary
+                    },
+                    true,
+                    state,
+                    |state| state.media_filter.set(MediaFilter::All),
+                ))
+                .child(styled_action(
+                    "Video",
+                    if filter == MediaFilter::Video {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Tertiary
+                    },
+                    true,
+                    state,
+                    |state| state.media_filter.set(MediaFilter::Video),
+                ))
+                .child(styled_action(
+                    "Audio",
+                    if filter == MediaFilter::Audio {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Tertiary
+                    },
+                    true,
+                    state,
+                    |state| state.media_filter.set(MediaFilter::Audio),
+                ))
+                .child(styled_action(
+                    "Images",
+                    if filter == MediaFilter::Image {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Tertiary
+                    },
+                    true,
+                    state,
+                    |state| state.media_filter.set(MediaFilter::Image),
+                )),
+        ))
         .child(text(
-            format!("{} sources in this project", project.media().len()),
+            format!("{count} of {} sources", project.media().len()),
             MUTED,
             11.0,
         ))
@@ -472,15 +820,27 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 },
                 state.media_scroll.clone(),
             )
-            .child(Box::new(if project.media().is_empty() {
+            .child(Box::new(if count == 0 {
                 Flex::column()
                     .gap(7.0)
                     .padding(12.0)
                     .background(SURFACE)
                     .corner_radius(6.0)
-                    .child(text("Your media bin is empty", TEXT, 12.0))
                     .child(text(
-                        "Import video, audio or still images to begin.",
+                        if project.media().is_empty() {
+                            "Your media bin is empty"
+                        } else {
+                            "No matching sources"
+                        },
+                        TEXT,
+                        12.0,
+                    ))
+                    .child(text(
+                        if project.media().is_empty() {
+                            "Import video, audio or still images to begin."
+                        } else {
+                            "Try another search or filter."
+                        },
                         MUTED,
                         11.0,
                     ))
@@ -639,21 +999,41 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         },
         Box::new(
             Flex::column()
-                .gap(8.0)
+                .gap(7.0)
                 .grow(1.0)
                 .child(stage)
+                .child(Box::new(TransportScrub {
+                    frame,
+                    end: timeline_end,
+                    state: state.clone(),
+                }))
                 .child(Box::new(
                     Flex::row()
-                        .gap(8.0)
+                        .gap(5.0)
                         .align(Align::Center)
+                        .child(action("Start", frame > 0, state, |s| s.focus_frame(0)))
+                        .child(action("−1", frame > 0, state, |s| {
+                            s.focus_frame(s.playhead.peek().saturating_sub(1));
+                        }))
                         .child(if gpu_preview {
                             if state.playing.get() {
-                                action("Pause", true, state, UiState::pause)
+                                styled_action(
+                                    "Pause",
+                                    ButtonVariant::Primary,
+                                    true,
+                                    state,
+                                    UiState::pause,
+                                )
                             } else {
                                 styled_action(
                                     "Play",
                                     ButtonVariant::Primary,
-                                    timeline_end > 0,
+                                    project.tracks().iter().any(|track| {
+                                        track.kind == TrackKind::Video
+                                            && track.clips.iter().any(|clip| {
+                                                matches!(clip.content, ClipContent::Media { .. })
+                                            })
+                                    }),
                                     state,
                                     UiState::play,
                                 )
@@ -661,23 +1041,42 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                         } else {
                             Box::new(Flex::row().height(0.0))
                         })
-                        .child(action("Previous frame", frame > 0, state, |s| {
-                            s.focus_frame(s.playhead.peek().saturating_sub(1));
-                        }))
-                        .child(text(format!("Frame {frame}"), ACCENT, 12.0))
                         .child(action(
-                            "Next frame",
+                            "+1",
                             frame.saturating_add(1) < timeline_end,
                             state,
                             |s| {
                                 s.focus_frame(s.playhead.peek().saturating_add(1));
                             },
                         ))
+                        .child(action(
+                            "End",
+                            timeline_end > 0 && frame < timeline_end - 1,
+                            state,
+                            move |s| s.focus_frame(timeline_end.saturating_sub(1)),
+                        ))
+                        .child(Box::new(Flex::row().grow(1.0)))
+                        .child(text(
+                            timecode(
+                                frame,
+                                (
+                                    project.settings().frame_rate.numerator,
+                                    project.settings().frame_rate.denominator,
+                                ),
+                            ),
+                            ACCENT,
+                            12.0,
+                        ))
                         .child(text(
                             format!(
-                                "{} × {}",
-                                project.settings().width,
-                                project.settings().height
+                                "/ {}",
+                                timecode(
+                                    timeline_end,
+                                    (
+                                        project.settings().frame_rate.numerator,
+                                        project.settings().frame_rate.denominator,
+                                    )
+                                )
                             ),
                             MUTED,
                             11.0,
@@ -1006,45 +1405,64 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     ClipContent::Title(title) => title.text.clone(),
                     _ => String::new(),
                 };
-                let state = state.clone();
                 let width = (end - start) as f32 * px_per_frame;
                 let label = if width >= 220.0 {
-                    format!(
-                        "{} · {:.1}s",
-                        name.chars().take(16).collect::<String>(),
-                        clip.duration_frames as f64 / fps
-                    )
+                    name.chars().take(27).collect::<String>()
                 } else if width >= 120.0 {
-                    name.chars().take(12).collect()
+                    name.chars().take(15).collect()
                 } else if width >= 70.0 {
                     format!("{}…", name.chars().take(5).collect::<String>())
                 } else {
                     String::new()
                 };
-                clips.push(Box::new(
-                    Button::styled(
-                        if state.selected.peek() == Some((track_id, clip_id)) {
-                            ButtonVariant::Primary
-                        } else {
-                            ButtonVariant::Secondary
-                        },
-                        ButtonSize::Sm,
-                        label,
-                        ButtonState::Normal,
-                        move || {
-                            state.selected.set(Some((track_id, clip_id)));
-                            state.sidebar.set(Sidebar::Inspector);
-                            state.title_text.set_value(title.clone());
-                            state.focus_frame(start_frame);
-                        },
-                    )
-                    .width(width),
-                ) as BoxedWidget);
+                let source = match &clip.content {
+                    ClipContent::Media { media_id } => {
+                        project.media().iter().find(|media| media.id == *media_id)
+                    }
+                    _ => None,
+                };
+                let images = source
+                    .filter(|_| track.kind == TrackKind::Video)
+                    .and_then(|media| {
+                        state
+                            .storyboards
+                            .borrow()
+                            .get(&StoryboardKey {
+                                path: media.path.clone(),
+                                kind: media.kind,
+                                source_start: clip.source_start_frame,
+                                duration: clip.duration_frames,
+                                fps: (
+                                    project.settings().frame_rate.numerator,
+                                    project.settings().frame_rate.denominator,
+                                ),
+                            })
+                            .cloned()
+                    });
+                let fallback = source
+                    .filter(|_| track.kind == TrackKind::Video)
+                    .and_then(|media| state.thumbnails.borrow().get(&media.path).cloned());
+                clips.push(Box::new(TimelineClip {
+                    width,
+                    kind: track.kind,
+                    name: label,
+                    duration: format!("{:.1}s", clip.duration_frames as f64 / fps),
+                    selected: state.selected.peek() == Some((track_id, clip_id)),
+                    images,
+                    fallback,
+                    track_id,
+                    clip_id,
+                    start: start_frame,
+                    visible_frames: end - start,
+                    is_title: matches!(clip.content, ClipContent::Title(_)),
+                    title,
+                    state: state.clone(),
+                }) as BoxedWidget);
                 cursor = end;
             }
             Box::new(
                 Flex::row()
-                    .height(46.0)
+                    .height(52.0)
                     .gap(8.0)
                     .align(Align::Center)
                     .background(SURFACE)
@@ -1063,8 +1481,16 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             ) as BoxedWidget
         })
         .collect();
+    let expanded_timeline = state.timeline_expanded.get();
+    let timeline_height = if expanded_timeline {
+        (viewport.height * 0.41).clamp(250.0, 345.0)
+    } else {
+        (viewport.height * 0.31).clamp(205.0, 285.0)
+    };
+    let toolbar_height = if viewport.width < 850.0 { 82.0 } else { 44.0 };
+    let workspace_height = (viewport.height - timeline_height - toolbar_height - 104.0).max(145.0);
     let timeline = Flex::column()
-        .height((viewport.height * 0.41).clamp(240.0, 345.0))
+        .height(timeline_height)
         .gap(8.0)
         .padding(12.0)
         .background(PANEL)
@@ -1108,7 +1534,22 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     state
                         .timeline_page
                         .update(|page| *page = page.saturating_add(1));
-                })),
+                }))
+                .child(styled_action(
+                    if expanded_timeline {
+                        "Focus preview"
+                    } else {
+                        "Expand tracks"
+                    },
+                    ButtonVariant::Secondary,
+                    true,
+                    state,
+                    |state| {
+                        state
+                            .timeline_expanded
+                            .update(|expanded| *expanded = !*expanded);
+                    },
+                )),
         ))
         .child(Box::new(TimelineRuler {
             start: visible_start,
@@ -1130,7 +1571,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 },
                 state.timeline_scroll.clone(),
             )
-            .child(Box::new(Flex::column().gap(5.0).with_children(tracks))),
+            .child(Box::new(Flex::column().gap(4.0).with_children(tracks))),
         ));
 
     let workspace: BoxedWidget = if compact {
@@ -1174,7 +1615,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         Box::new(
             Flex::row()
                 .gap(8.0)
-                .grow(1.0)
+                .height(workspace_height)
                 .child(sidebar)
                 .child(Box::new(preview)),
         )
@@ -1182,7 +1623,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         Box::new(
             Flex::row()
                 .gap(8.0)
-                .grow(1.0)
+                .height(workspace_height)
                 .child(Box::new(media))
                 .child(Box::new(preview))
                 .child(Box::new(inspector)),
@@ -1245,6 +1686,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
     let toolbar: BoxedWidget = if viewport.width < 850.0 {
         Box::new(
             Flex::column()
+                .height(toolbar_height)
                 .gap(5.0)
                 .padding(8.0)
                 .background(PANEL)
@@ -1255,6 +1697,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
     } else {
         Box::new(
             Flex::row()
+                .height(toolbar_height)
                 .gap(16.0)
                 .align(Align::Center)
                 .padding(8.0)
@@ -1318,6 +1761,8 @@ mod tests {
     struct TestPainter {
         labels: Vec<String>,
         positions: Vec<(String, f32)>,
+        bounds: Vec<(String, Rect)>,
+        images: Vec<Rect>,
     }
 
     impl Painter for TestPainter {
@@ -1328,7 +1773,93 @@ mod tests {
         fn fill_text(&mut self, rect: Rect, text: &str, _: Color, _: f32, _: TextAlign) {
             self.labels.push(text.to_owned());
             self.positions.push((text.to_owned(), rect.x));
+            self.bounds.push((text.to_owned(), rect));
         }
+
+        fn draw_image(&mut self, rect: Rect, _: &RgbaImage, _: Option<Color>) {
+            self.images.push(rect);
+        }
+    }
+
+    #[test]
+    fn media_cards_do_not_push_the_timeline_out_of_the_window() {
+        let state = UiState::new();
+        state.timeline_expanded.set(true);
+        assert!(state.edit(Command::ImportMedia(crate::media::Media {
+            id: 1,
+            path: "/tmp/footage.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: false,
+        })));
+        let viewport = Size {
+            width: 1280.0,
+            height: 760.0,
+        };
+        let mut painter = TestPainter::default();
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
+                creamui::Theme::dark(),
+            ));
+            Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+        });
+        let last_track = painter
+            .bounds
+            .iter()
+            .find(|(label, _)| label.starts_with("A2"))
+            .unwrap()
+            .1;
+        assert!(last_track.y + last_track.height < viewport.height - 20.0);
+        assert!(painter.labels.iter().any(|text| text == "footage.mp4"));
+        state.media_query.set_value("missing");
+        let mut painter = TestPainter::default();
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
+                creamui::Theme::dark(),
+            ));
+            Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+        });
+        assert!(
+            painter
+                .labels
+                .iter()
+                .any(|text| text == "No matching sources")
+        );
+    }
+
+    #[test]
+    fn timeline_filmstrip_draws_frames_and_seeks_from_a_clip() {
+        let state = UiState::new();
+        let image = Arc::new(RgbaImage::new(2, 2, vec![255; 16]).unwrap());
+        let clip = TimelineClip {
+            width: 300.0,
+            kind: TrackKind::Video,
+            name: "Source".into(),
+            duration: "2.0s".into(),
+            selected: false,
+            images: Some(Arc::new(vec![image.clone(), image.clone(), image])),
+            fallback: None,
+            track_id: 0,
+            clip_id: 7,
+            start: 10,
+            visible_frames: 60,
+            title: String::new(),
+            is_title: false,
+            state: state.clone(),
+        };
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 46.0,
+        };
+        let mut painter = TestPainter::default();
+        clip.paint(&mut painter, rect);
+        assert_eq!(painter.images.len(), 2);
+        clip.on_drag().unwrap()(Point { x: 150.0, y: 20.0 }, rect);
+        assert_eq!(state.selected.peek(), Some((0, 7)));
+        assert_eq!(state.playhead.peek(), 40);
+        assert_eq!(timecode(30, (30_000, 1_001)), "00:00:01.001");
     }
 
     #[test]
@@ -1468,13 +1999,13 @@ mod tests {
         let first = painter
             .positions
             .iter()
-            .find(|(label, _)| label.starts_with("Title 1 ·"))
+            .find(|(label, _)| label == "Title 1")
             .unwrap()
             .1;
         let second = painter
             .positions
             .iter()
-            .find(|(label, _)| label.starts_with("Title 2 ·"))
+            .find(|(label, x)| label == "Title 2" && *x > first)
             .unwrap()
             .1;
         assert!(second - first > 300.0);
@@ -1489,17 +2020,7 @@ mod tests {
             ));
             Renderer::new().render(build(&state, viewport), viewport, &mut painter);
         });
-        assert!(
-            painter
-                .labels
-                .iter()
-                .any(|label| label.starts_with("Title 4 ·"))
-        );
-        assert!(
-            !painter
-                .labels
-                .iter()
-                .any(|label| label.starts_with("Title 1 ·"))
-        );
+        assert!(painter.labels.iter().any(|label| label == "Title 4"));
+        assert!(!painter.labels.iter().any(|label| label == "Title 1"));
     }
 }

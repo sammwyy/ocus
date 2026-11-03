@@ -23,8 +23,12 @@ clip commands do not complete the corresponding editor workflows.
   originals; report unsupported or missing files.
 - [x] Generate regenerable thumbnails and show them in a responsive media
   bin without blocking the UI.
-- [ ] Build timeline clip rendering and interactions for selection, split,
-  move, trim, delete, and ripple delete; connect gestures to commands.
+- [x] Render sampled filmstrips for video clips and let clicks seek and select
+  clips; add search and source-type filters to the media bin.
+- [ ] Connect direct timeline gestures for moving and trimming clips to
+  project commands; split and ripple delete currently use inspector buttons.
+- [ ] Generate filmstrips lazily for clips beyond the bounded first 64
+  cached source ranges in large projects.
 - [x] Decode video on a worker with a bounded frame buffer; support
   play/pause, frame stepping and frame-accurate timeline ruler seeks.
 - [x] Present video and still-image frames through CreamUI's GPU viewport.

@@ -42,17 +42,21 @@ exist yet; optional probe metadata keeps version 1 files readable. Media
 probing and bounded first-frame thumbnails use the `ffmpeg-next` library on
 workers. `media/preview.rs` decodes and scales frames off the UI thread,
 maintaining a small frame buffer during playback and seeking to source frames
-after an edit. The UI transfers decoded frames to textures on CreamUI's own
-GPU device and presents them through its viewport. `export.rs` decodes
+after an edit. It also generates three representative thumbnails per video
+clip's current source range on workers; `ui::state` keeps a bounded, transient
+cache and drops obsolete entries when clips change. The UI transfers decoded
+frames to textures on CreamUI's own GPU device and presents them through its
+viewport. `export.rs` decodes
 video and still-image clips sequentially with bounded frame storage and
 encodes a silent H.264 MP4 from one continuous video track. It refuses audio,
 titles, gaps, and multiple active tracks rather than dropping them silently.
-The UI supports video play/pause, frame stepping, timeline ruler scrubbing and
-title text display. It does not composite simultaneous video/title layers;
-title edits, split/move/trim/delete, audio clip settings, and ripple delete
-use project commands. Video sources with audio add aligned clips to both
-tracks; later edits to those clips are not linked yet. Audio, the preview
-compositor, title rendering, and full A/V export remain unimplemented.
+The UI supports video play/pause, frame stepping, monitor and timeline
+scrubbing, source filtering, filmstrip clips and title text display. It does
+not composite simultaneous video/title layers; title edits, split/move/trim/delete,
+audio clip settings, and ripple delete use project commands. Video sources
+with audio add aligned clips to both tracks; later edits to those clips are
+not linked yet. Audio, the preview compositor, title rendering, and full
+A/V export remain unimplemented.
 
 ## Where new work belongs
 

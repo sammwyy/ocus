@@ -21,6 +21,58 @@ pub struct FrameImage {
     pub pixels: Vec<u8>,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct StoryboardKey {
+    pub path: PathBuf,
+    pub kind: MediaKind,
+    pub source_start: u64,
+    pub duration: u64,
+    pub fps: (u32, u32),
+}
+
+pub fn storyboard(
+    key: &StoryboardKey,
+    cancelled: Arc<AtomicBool>,
+) -> Result<Vec<FrameImage>, String> {
+    ffmpeg::init().map_err(|error| error.to_string())?;
+    if key.duration == 0 || key.fps.0 == 0 || key.fps.1 == 0 || key.kind == MediaKind::Audio {
+        return Err("Invalid storyboard source".into());
+    }
+    let offsets = if key.kind == MediaKind::Image {
+        vec![0]
+    } else {
+        vec![0, key.duration / 2, key.duration - 1]
+    };
+    let source = FrameSource {
+        clip_id: 0,
+        path: key.path.clone(),
+        kind: key.kind,
+        start: 0,
+        source_start: key.source_start,
+        duration: key.duration,
+    };
+    let mut frames = Vec::new();
+    for offset in offsets {
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+        let target = key
+            .source_start
+            .checked_add(offset)
+            .ok_or("Storyboard frame range overflows")?;
+        let mut reader = FrameReader::open(&source, target, key.fps, (160, 90), cancelled.clone())?;
+        let mut image = reader.frame_at(target, &cancelled)?;
+        for pixel in image.pixels.chunks_exact_mut(4) {
+            for channel in 0..3 {
+                pixel[channel] =
+                    ((u16::from(pixel[channel]) * u16::from(pixel[3]) + 127) / 255) as u8;
+            }
+        }
+        frames.push(image);
+    }
+    Ok(frames)
+}
+
 pub struct PreviewPlan {
     pub sources: Vec<FrameSource>,
     pub end: u64,
@@ -313,6 +365,20 @@ mod tests {
         .unwrap();
         assert_eq!(result.len(), 6);
         assert!(result[0].1 < 120 && result[5].1 > 140, "{result:?}");
+        let storyboard_frames = storyboard(
+            &StoryboardKey {
+                path: path.clone(),
+                kind: MediaKind::Video,
+                source_start: 2,
+                duration: 3,
+                fps: (30, 1),
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert_eq!(storyboard_frames.len(), 3);
+        assert!(storyboard_frames[0].pixels[0] < 120);
+        assert!(storyboard_frames[2].pixels[0] > 140);
         let cut = PreviewPlan {
             sources: vec![FrameSource {
                 clip_id: 2,

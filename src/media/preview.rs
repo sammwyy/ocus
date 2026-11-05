@@ -204,26 +204,35 @@ pub fn decode_sequence(
         .clone()
         .map(|plan| Compositor::new(plan, output.0, output.1, fps));
     let mut position = start;
+    let elapsed = || {
+        let wall = started.elapsed();
+        match &clock {
+            Some(clock) => wall.saturating_sub(MAX_AUDIO_LAG).max(clock.elapsed()),
+            None => wall,
+        }
+    };
     while position < *end && !cancelled.load(Ordering::Relaxed) {
         if playing {
+            let due = elapsed().as_nanos().saturating_mul(u128::from(fps.0))
+                / (u128::from(fps.1) * 1_000_000_000);
+            let due = start
+                .saturating_add(u64::try_from(due).unwrap_or(u64::MAX))
+                .min(end.saturating_sub(1));
+            position = position.max(due);
             let nanos = u128::from(position - start) * u128::from(fps.1) * 1_000_000_000
                 / u128::from(fps.0);
             let deadline = Duration::from_nanos(nanos.min(u128::from(u64::MAX)) as u64);
             loop {
-                let wall = started.elapsed();
                 // Audio output is the master clock, but a stalled device must
                 // not freeze the picture for more than MAX_AUDIO_LAG.
-                let elapsed = match &clock {
-                    Some(clock) => wall.saturating_sub(MAX_AUDIO_LAG).max(clock.elapsed()),
-                    None => wall,
-                };
-                if elapsed >= deadline {
+                let current = elapsed();
+                if current >= deadline {
                     break;
                 }
                 if cancelled.load(Ordering::Relaxed) {
                     return Ok(());
                 }
-                std::thread::sleep((deadline - elapsed).min(Duration::from_millis(10)));
+                std::thread::sleep((deadline - current).min(Duration::from_millis(10)));
             }
         }
         let image = match &mut compositor {
@@ -420,6 +429,36 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn slow_frame_delivery_does_not_slow_timeline_playback() {
+        let plan = PreviewPlan {
+            sources: Vec::new(),
+            visual: None,
+            end: 30,
+            fps: (30, 1),
+            resolution: (2, 2),
+        };
+        let started = Instant::now();
+        let mut frames = Vec::new();
+        decode_sequence(
+            &plan,
+            0,
+            true,
+            Arc::new(AtomicBool::new(false)),
+            None,
+            |event| {
+                if let PreviewEvent::Frame(position, _) = event {
+                    frames.push(position);
+                    std::thread::sleep(Duration::from_millis(80));
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(frames.first(), Some(&0));
+        assert_eq!(frames.last(), Some(&29));
+        assert!(started.elapsed() < Duration::from_secs(2), "{frames:?}");
+    }
+
+    #[test]
     fn seek_and_play_use_source_timestamps() {
         let path = std::env::temp_dir().join(format!("ocus-preview-{}.y4m", std::process::id()));
         let mut source = b"YUV4MPEG2 W2 H2 F30:1 Ip A1:1 C420jpeg\n".to_vec();
@@ -474,8 +513,36 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(result.len(), 6);
-        assert!(result[0].1 < 120 && result[5].1 > 140, "{result:?}");
+        assert!(result.first().is_some_and(|frame| frame.1 < 120));
+        assert!(
+            result
+                .last()
+                .is_some_and(|frame| frame.0 == 5 && frame.1 > 140),
+            "{result:?}"
+        );
+        let mut late_frames = Vec::new();
+        decode_sequence(
+            &plan,
+            0,
+            true,
+            Arc::new(AtomicBool::new(false)),
+            None,
+            |event| {
+                if let PreviewEvent::Frame(position, Some(image)) = event {
+                    late_frames.push((position, image.pixels[0]));
+                    if position == 0 {
+                        std::thread::sleep(Duration::from_millis(80));
+                    }
+                }
+            },
+        )
+        .unwrap();
+        assert!(late_frames.len() < 6, "{late_frames:?}");
+        assert!(
+            late_frames
+                .last()
+                .is_some_and(|frame| frame.0 == 5 && frame.1 > 140)
+        );
         let storyboard_frames = storyboard(
             &StoryboardKey {
                 path: path.clone(),

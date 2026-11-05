@@ -916,6 +916,7 @@ impl UiState {
         };
         let state = self.clone();
         let monitor = monitor.clone();
+        let end = plan.end;
         let pending = Arc::new(AtomicUsize::new(0));
         let worker_pending = pending.clone();
         app.spawn_stream(
@@ -953,6 +954,10 @@ impl UiState {
                         image
                     }
                     PreviewEvent::Finished => {
+                        monitor.position.set(end - 1);
+                        if follow_timeline {
+                            state.follow_playhead(end - 1);
+                        }
                         state.stop(&monitor);
                         return;
                     }

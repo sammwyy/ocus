@@ -506,6 +506,20 @@ impl TimelineView {
             true,
             false,
         );
+        if lane.kind == TrackKind::Video {
+            painter.fill_text(
+                Rect {
+                    x: header.x + 75.0,
+                    y: picture.y + picture.height / 2.0 - 13.0,
+                    width: 46.0,
+                    height: 13.0,
+                },
+                if lane.label == "V1" { "BASE" } else { "ABOVE" },
+                color.mix(muted(), 0.3),
+                9.0,
+                TextAlign::Start,
+            );
+        }
         painter.fill_text(
             Rect {
                 x: icon.x + 22.0,

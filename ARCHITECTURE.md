@@ -18,9 +18,10 @@ src/
     format.rs       versioned JSON string format
   media.rs          source references, probing and thumbnail decoding
   media/preview.rs  background video decoding and frame-accurate seek
+  media/composite.rs  shared preview/export visual composition
   media/audio.rs    background audio decoding, mixing and the playback clock
   playback.rs       default output device and monitor sound sessions
-  export.rs         silent H.264 MP4 encoding with cancellation
+  export.rs         H.264/AAC MP4 encoding with cancellation
   timeline.rs       tracks, clips, and title data
   ui/
     window.rs       integrated titlebar, editor layout, and clip controls
@@ -59,10 +60,14 @@ after an edit. It also generates three representative thumbnails per video
 clip's current source range on workers; `ui::state` keeps a bounded, transient
 cache and drops obsolete entries when clips change. The UI transfers decoded
 frames to textures on CreamUI's own GPU device and presents them through its
-viewport. `export.rs` decodes
-video and still-image clips sequentially with bounded frame storage and
-encodes a silent H.264 MP4 from one continuous video track. It refuses audio,
-titles, gaps, and multiple active tracks rather than dropping them silently.
+viewport. `media/composite.rs` decodes active video and still-image clips with
+bounded frame storage and alpha-composites video tracks in timeline order:
+V1 is the base and lower rows appear above it. It draws styled titles in their
+own track's Z order with the same markup parser and font shaping in preview
+and export; gaps show black. `export.rs` encodes
+the result as H.264 MP4; it mixes sound from audio tracks and linked video
+sound through the bounded stereo queue used by preview playback, and encodes
+AAC in the MP4. Audio-only timelines use black video.
 The UI has independent source and program monitors, each with its own
 decode stream, position and GPU frame slot; only one plays at a time. It
 supports video play/pause, frame stepping, monitor and timeline scrubbing,
@@ -71,12 +76,12 @@ Clip selection may hold several clips; dragging, pasting, nudging, splitting
 and deleting a selection is planned in `ui/edits.rs` against the current
 project and applied as one `ReplaceTracks` command, so it undoes in one step
 and the project's own validation still rejects overlaps. Drag previews and
-the rubber band are transient UI state. The Program monitor overlays title
-text over the first active video/still layer; the selected title has a draggable
+the rubber band are transient UI state. The Program monitor shows the composed
+frame; the selected title has a draggable
 frame and resize handle, with a transient draft committed as one `SetTitle`
 command on release. `ui/title_markup.rs` parses only the supported HTML and
-Markdown syntax when their respective switches are enabled. The preview does
-not composite simultaneous video layers; title edits, split/move/trim/delete,
+Markdown syntax when their respective switches are enabled. The preview
+composites simultaneous video layers; title edits, split/move/trim/delete,
 audio clip settings, track creation/removal and ripple delete use project
 commands. A video with sound is inserted as one clip with `linked_audio`, an
 optional field that keeps version 1 files readable (absent means false), so
@@ -88,8 +93,8 @@ absolutely positioned layers above the workspace. During playback
 any clip on audio tracks, honoring volume and mute), resamples and mixes it to
 48 kHz stereo on a worker, and `playback.rs` streams it through rodio to the
 default output device; video pacing follows the consumed-sample clock so
-picture and sound stay aligned. Multi-video compositing, titles in exports, and
-full A/V export remain unimplemented.
+picture and sound stay aligned. Source preview decodes one clip; the Program
+monitor and export share the layered composition rules.
 
 ## Where new work belongs
 

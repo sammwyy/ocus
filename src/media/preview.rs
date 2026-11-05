@@ -1,6 +1,8 @@
 use super::MediaKind;
 use super::audio::Clock;
+use super::composite::{Compositor, VisualPlan};
 use ffmpeg_next as ffmpeg;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -76,9 +78,87 @@ pub fn storyboard(
 
 pub struct PreviewPlan {
     pub sources: Vec<FrameSource>,
+    pub visual: Option<VisualPlan>,
     pub end: u64,
     pub fps: (u32, u32),
     pub resolution: (u32, u32),
+}
+
+pub(crate) struct VideoLayers {
+    fps: (u32, u32),
+    output: (u32, u32),
+    readers: HashMap<u64, FrameReader>,
+}
+
+impl VideoLayers {
+    pub(crate) fn new(fps: (u32, u32), output: (u32, u32)) -> Self {
+        Self {
+            fps,
+            output,
+            readers: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn frame_at(
+        &mut self,
+        sources: &[FrameSource],
+        position: u64,
+        cancelled: &Arc<AtomicBool>,
+    ) -> Result<Option<FrameImage>, String> {
+        let mut active = Vec::new();
+        let mut pixels = vec![0; self.output.0 as usize * self.output.1 as usize * 4];
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+        for source in sources.iter().rev() {
+            if source.start > position || position - source.start >= source.duration {
+                continue;
+            }
+            active.push(source.clip_id);
+            let image = self.layer_at(source, position, cancelled)?;
+            for (dst, src) in pixels.chunks_exact_mut(4).zip(image.pixels.chunks_exact(4)) {
+                blend(dst, src);
+            }
+        }
+        self.retain(&active);
+        Ok((!active.is_empty()).then_some(FrameImage {
+            width: self.output.0,
+            height: self.output.1,
+            pixels,
+        }))
+    }
+
+    pub(crate) fn layer_at(
+        &mut self,
+        source: &FrameSource,
+        position: u64,
+        cancelled: &Arc<AtomicBool>,
+    ) -> Result<FrameImage, String> {
+        let target = source.source_start + position - source.start;
+        if !self.readers.contains_key(&source.clip_id) {
+            self.readers.insert(
+                source.clip_id,
+                FrameReader::open(source, target, self.fps, self.output, cancelled.clone())?,
+            );
+        }
+        self.readers
+            .get_mut(&source.clip_id)
+            .unwrap()
+            .frame_at(target, cancelled)
+    }
+
+    pub(crate) fn retain(&mut self, active: &[u64]) {
+        self.readers.retain(|id, _| active.contains(id));
+    }
+}
+
+pub(crate) fn blend(dst: &mut [u8], src: &[u8]) {
+    let alpha = u32::from(src[3]);
+    for channel in 0..3 {
+        dst[channel] =
+            ((u32::from(src[channel]) * alpha + u32::from(dst[channel]) * (255 - alpha) + 127)
+                / 255) as u8;
+    }
 }
 
 /// How far video may run ahead of a stalled audio clock before taking over.
@@ -101,6 +181,7 @@ pub fn decode_sequence(
     ffmpeg::init().map_err(|error| error.to_string())?;
     let PreviewPlan {
         sources,
+        visual,
         end,
         fps,
         resolution,
@@ -118,7 +199,10 @@ pub fn decode_sequence(
         (resolution.1 as f32 * scale).round().max(1.0) as u32,
     );
     let started = Instant::now();
-    let mut reader: Option<(u64, FrameReader)> = None;
+    let mut layers = VideoLayers::new(fps, output);
+    let mut compositor = visual
+        .clone()
+        .map(|plan| Compositor::new(plan, output.0, output.1, fps));
     let mut position = start;
     while position < *end && !cancelled.load(Ordering::Relaxed) {
         if playing {
@@ -142,21 +226,9 @@ pub fn decode_sequence(
                 std::thread::sleep((deadline - elapsed).min(Duration::from_millis(10)));
             }
         }
-        let source = sources
-            .iter()
-            .find(|source| position >= source.start && position - source.start < source.duration);
-        let image = if let Some(source) = source {
-            let target = source.source_start + position - source.start;
-            if reader.as_ref().is_none_or(|(id, _)| *id != source.clip_id) {
-                reader = Some((
-                    source.clip_id,
-                    FrameReader::open(source, target, fps, output, cancelled.clone())?,
-                ));
-            }
-            Some(reader.as_mut().unwrap().1.frame_at(target, &cancelled)?)
-        } else {
-            reader = None;
-            None
+        let image = match &mut compositor {
+            Some(compositor) => compositor.frame(position, &cancelled)?,
+            None => layers.frame_at(sources, position, &cancelled)?,
         };
         if cancelled.load(Ordering::Relaxed) {
             break;
@@ -366,6 +438,7 @@ mod tests {
         }];
         let plan = PreviewPlan {
             sources: clips.to_vec(),
+            visual: None,
             end: 6,
             fps: (30, 1),
             resolution: (2, 2),
@@ -426,6 +499,7 @@ mod tests {
                 source_start: 2,
                 duration: 2,
             }],
+            visual: None,
             end: 5,
             fps: (30, 1),
             resolution: (2, 2),

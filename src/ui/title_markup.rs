@@ -2,7 +2,7 @@ use crate::timeline::Title;
 use creamui::Color;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Run {
+pub(crate) struct Run {
     pub text: String,
     pub bold: bool,
     pub italic: bool,
@@ -32,7 +32,7 @@ fn named_color(value: &str) -> Option<Color> {
     }
 }
 
-pub(super) fn parse(title: &Title) -> Vec<Run> {
+pub(crate) fn parse(title: &Title) -> Vec<Run> {
     let source = title.text.as_str();
     let base = Style {
         bold: title.bold,

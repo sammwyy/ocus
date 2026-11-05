@@ -32,7 +32,7 @@ and ripple-deleting the middle keeps picture and sound 1:1. **Detach audio**
 (inspector or right-click) moves that sound to an audio track that is free for
 the same range, creating a new one if needed, and **Link audio** folds a
 matching pair back together. Clip volume and mute are editable, saved, and
-honored during preview playback (export stays silent). Previously saved references without probe
+honored during preview playback and export. Previously saved references without probe
 metadata can be re-imported.
 
 The workspace has two GPU monitors: **Source** shows the selected timeline
@@ -87,20 +87,23 @@ Orange is the initial custom accent. Preferences are saved independently of
 project files in `Ocus/settings.toml` under the platform configuration
 directory (XDG config on Linux, AppData on Windows).
 
-**Export** (disabled while the timeline is empty) encodes H.264 from a
-continuous sequence of video-only
-clips and still images on one video track. Cuts and trims are honored; export
-runs in the background, shows progress, can be cancelled, and publishes a
-completed file atomically. The button reports unsupported sequences rather
-than silently omitting content. Audio, titles, gaps and multiple active tracks
-are **not** exported, and output has no AAC audio stream. Titles appear over
-footage in the Program monitor but cannot be exported yet.
+**Export** (disabled while the timeline is empty) encodes an MP4 with H.264
+video composited from every video track (V1 is the base; V2 and lower rows are
+drawn above it), transparent
+still images and all title overlays, plus AAC stereo audio from audio tracks and
+linked clip sound. Titles honor font, size, position, color, transparency,
+bold/italic, outline and enabled HTML/Markdown styling. Cuts, trims, gaps
+(black video/silent audio), per-clip volume and mute are honored. Audio-only
+timelines export with black video. Export runs in the background, shows
+progress, can be cancelled, and publishes a completed file atomically.
+Available H.264 and AAC encoders are required in FFmpeg.
 
-This is not a completed v0.1 video editor. Preview renders a single active
-video layer or still image with transparent title text from other video tracks
-and plays clip audio mixed through the default output device, with picture timed
-to the audio clock; it does not yet composite multiple video layers, and export
-still has no audio stream or title overlays.
+The Program monitor uses the same visual compositor as export, including
+overlapping video, transparent images and titles. The Source monitor shows a
+single source. Preview sound plays through the default output device, with
+picture timed to the audio clock. New titles are placed above existing footage
+and create a video track if needed; V1 is marked BASE and other video tracks
+ABOVE in the timeline. This is not yet a completed v0.1 video editor.
 Building requires FFmpeg development libraries (available
 on the Fedora development machine) and a GPU-capable CreamUI window.
 
@@ -125,10 +128,10 @@ from crates.io. No local CreamUI checkout is needed.
 - `src/app.rs`: window startup and wiring.
 - `src/project/`: saved project, JSON format, and edit history/undo-redo.
 - `src/timeline.rs`: tracks, clips, and titles.
-- `src/media.rs`, `src/media/preview.rs` and `src/media/audio.rs`: source
-  references, FFmpeg probing, thumbnails and background video/audio decoding.
+- `src/media.rs`, `src/media/preview.rs`, `src/media/composite.rs` and
+  `src/media/audio.rs`: sources, decoding, and shared preview/export composition.
 - `src/playback.rs`: default audio device and playback sessions.
-- `src/export.rs`: limited H.264 MP4 encoding and cancellation.
+- `src/export.rs`: H.264/AAC MP4 encoding and cancellation.
 - `src/ui/`: compact CreamUI workspace and background file workflow.
 - `src/main.rs`: executable entry point.
 

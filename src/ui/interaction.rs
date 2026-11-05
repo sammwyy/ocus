@@ -301,32 +301,54 @@ impl UiState {
             let duration = u64::from(project.settings().frame_rate.numerator).saturating_mul(3)
                 / u64::from(project.settings().frame_rate.denominator);
             let end = frame.saturating_add(duration);
-            let footage_here = project.tracks().iter().any(|track| {
-                track.kind == TrackKind::Video
-                    && track.clips.iter().any(|clip| {
-                        matches!(clip.content, ClipContent::Media { .. })
-                            && clip.start_frame <= frame
-                            && frame - clip.start_frame < clip.duration_frames
-                    })
-            });
-            if footage_here {
-                let Some(track) = project
-                    .tracks()
-                    .iter()
-                    .filter(|track| track.kind == TrackKind::Video)
-                    .rev()
-                    .find(|track| {
-                        track.clips.iter().all(|clip| {
+            let top_footage = project
+                .tracks()
+                .iter()
+                .enumerate()
+                .filter(|(_, track)| {
+                    track.kind == TrackKind::Video
+                        && track.clips.iter().any(|clip| {
+                            matches!(clip.content, ClipContent::Media { .. })
+                                && clip.start_frame <= frame
+                                && frame - clip.start_frame < clip.duration_frames
+                        })
+                })
+                .map(|(index, _)| index)
+                .max();
+            if let Some(top) = top_footage {
+                if let Some(track) = project.tracks().iter().skip(top + 1).find(|track| {
+                    track.kind == TrackKind::Video
+                        && track.clips.iter().all(|clip| {
                             clip.start_frame >= end
                                 || clip.start_frame.saturating_add(clip.duration_frames) <= frame
                         })
-                    })
-                else {
-                    self.status
-                        .set("Add a free video track for the title overlay".into());
+                }) {
+                    Some((track.id, frame))
+                } else {
+                    let Some((mut tracks, track_id)) = edits::add_track(project, TrackKind::Video)
+                    else {
+                        self.status.set("Cannot add an overlay track".into());
+                        return false;
+                    };
+                    let Some((_, mut clip)) = edits::title_clip(project, None) else {
+                        return false;
+                    };
+                    clip.start_frame = frame;
+                    let id = clip.id;
+                    tracks
+                        .iter_mut()
+                        .find(|track| track.id == track_id)
+                        .unwrap()
+                        .clips
+                        .push(clip);
+                    drop(editor);
+                    if self.edit(Command::ReplaceTracks(tracks)) {
+                        self.select_clip(Some((track_id, id)));
+                        self.focus_frame(frame);
+                        return true;
+                    }
                     return false;
-                };
-                Some((track.id, frame))
+                }
             } else {
                 None
             }
@@ -1319,6 +1341,7 @@ fn label_of_clip(state: &UiState, (track_id, clip_id): ClipRef) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::timeline::Clip;
     use std::collections::HashSet;
 
     fn starts(state: &UiState, track: usize) -> Vec<u64> {
@@ -1353,6 +1376,43 @@ mod tests {
         assert_eq!(bound(Key::Delete, false, true), Some(Action::RippleDelete));
         assert_eq!(bound(Key::Char(' '), false, false), Some(Action::PlayPause));
         assert_eq!(bound(Key::Char('a'), true, false), Some(Action::SelectAll));
+    }
+
+    #[test]
+    fn adding_a_title_creates_an_overlay_above_occupied_video_tracks_in_one_edit() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(crate::media::Media {
+            id: 1,
+            path: "/tmp/footage.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(3_000_000),
+            has_audio: false,
+        })));
+        for (track_id, clip_id) in [(0, 1), (1, 2)] {
+            assert!(state.edit(Command::InsertClip {
+                track_id,
+                clip: Clip {
+                    id: clip_id,
+                    start_frame: 0,
+                    source_start_frame: 0,
+                    duration_frames: 90,
+                    content: ClipContent::Media { media_id: 1 },
+                    volume: 1.0,
+                    muted: false,
+                    linked_audio: false,
+                },
+            }));
+        }
+        assert!(state.add_title());
+        let project = state.editor.borrow();
+        assert_eq!(project.project().tracks().len(), 5);
+        let overlay = &project.project().tracks()[2];
+        assert_eq!(overlay.kind, TrackKind::Video);
+        assert!(matches!(overlay.clips[0].content, ClipContent::Title(_)));
+        drop(project);
+        state.undo();
+        assert_eq!(state.editor.borrow().project().tracks().len(), 4);
+        assert!(state.editor.borrow().project().tracks()[2].kind == TrackKind::Audio);
     }
 
     #[test]

@@ -2,9 +2,11 @@
 
 These instructions build the **current** Ocus desktop application. The [roadmap](ROADMAP.md)
 describes a video editor in progress, not features already available. Media files
-are probed with FFmpeg; a single video layer can be previewed through CreamUI's
-GPU viewport with clip audio playing through the default output device, and a
-limited silent H.264 MP4 can be exported. Audio export is not yet implemented. The current `Cargo.toml` uses the
+are probed with FFmpeg; layered video and titles can be previewed through
+CreamUI's GPU viewport with clip audio playing through the default output
+device, and an H.264/AAC MP4 can be exported from all video, title and audio
+tracks using the same compositor. The current
+`Cargo.toml` uses the
 `ffmpeg-next = "=7.1.0"` bindings, so FFmpeg development headers and shared
 libraries **are required** to build, even when running headless tests.
 
@@ -77,10 +79,9 @@ The native file pickers use the desktop's XDG portal backend on Linux. Ensure
 an appropriate portal implementation is running; `zenity` provides a fallback
 for file and confirmation dialogs on desktops without that backend.
 
-The limited silent MP4 exporter also needs an H.264 encoder enabled in the
+The MP4 exporter also needs H.264 and AAC encoders enabled in the
 installed FFmpeg build (such as `libx264`). Video preview requires a GPU
-rendering backend; preview audio plays through the default output device and
-audio export is not available yet.
+rendering backend; preview audio plays through the default output device.
 CreamUI is pinned to a tested GitHub commit for the GPU viewport and worker
 stream APIs, rather than to the older crates.io release.
 

@@ -37,23 +37,23 @@ clip commands do not complete the corresponding editor workflows.
 - [x] Decode video on a worker with a bounded frame buffer; support
   play/pause, frame stepping and frame-accurate timeline ruler seeks.
 - [x] Present video and still-image frames through CreamUI's GPU viewport.
-- [ ] Composite overlapping video layers and titles consistently between
+- [x] Composite overlapping video layers and titles consistently between
   preview and export; support transition effects.
 
 ## Audio, titles, and export
 
 - [ ] Decode and play audio with an audio master clock; synchronize video
   playback and seeking to it.
-- [ ] Add per-clip volume and mute controls that affect both preview and
+- [x] Add per-clip volume and mute controls that affect both preview and
   export, with tests.
 - [ ] Draw audio waveforms in timeline clips and the source monitor; both
   currently show only the clip's volume level.
 - [x] Extend editable title text with font, size, color, position, style and
   opt-in markup controls; drag to move or resize titles in the video preview.
-- [ ] Include title overlays in exported video; export currently rejects them.
-- [ ] Export the edited project to MP4 with H.264 video and AAC audio.
-- [x] Encode silent H.264 MP4 from contiguous video and still-image clips
-  on one track; reject unsupported sequences instead of dropping them.
+- [x] Include title overlays in exported video.
+- [x] Export the full timeline to MP4 with H.264 video and AAC audio.
+- [x] Encode H.264 from layered video and still-image clips and AAC from the
+  edited audio tracks.
 - [ ] Add and test export presets for 1080p, 720p, and vertical 9:16.
 - [x] Run export off the UI thread with progress, cancellation, and cleanup
   of incomplete outputs.
@@ -72,5 +72,6 @@ clip commands do not complete the corresponding editor workflows.
 - [x] Pin CreamUI to a published GitHub commit with GPU viewport and
   background stream APIs. Do not add a sibling path dependency.
 - [x] Integrate FFmpeg library bindings for background probing, thumbnails,
-  and limited H.264 export; see [DEVELOPMENT.md](DEVELOPMENT.md). Audio
-  processing and full A/V encoding remain open.
+  audio processing and full-timeline H.264/AAC export; see
+  [DEVELOPMENT.md](DEVELOPMENT.md). The Program monitor uses the same visual
+  compositor as export.

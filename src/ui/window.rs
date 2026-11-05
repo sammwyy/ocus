@@ -448,6 +448,9 @@ impl Widget for ProgramCanvas {
         let scale = width / self.resolution.0.max(1) as f32;
         painter.push_clip_rounded(bounds, 0.0);
         for (_, title) in &self.titles {
+            if self.picture {
+                continue;
+            }
             let size = (title.font_size * scale).max(1.0).min(height * 2.0);
             let runs = title_markup::parse(title);
             let lines: Vec<Vec<_>> = {
@@ -602,6 +605,7 @@ impl Widget for ProgramCanvas {
                 (gesture.clip, draft)
             };
             state.title_preview.set(Some((key, draft)));
+            state.request_preview();
         }))
     }
 
@@ -612,6 +616,7 @@ impl Widget for ProgramCanvas {
                 return;
             };
             let draft = state.title_preview.peek();
+            let had_draft = draft.is_some();
             state.title_preview.set(None);
             if let Some((clip, title)) = draft
                 && clip == gesture.clip
@@ -623,6 +628,8 @@ impl Widget for ProgramCanvas {
                     clip_id: clip.1,
                     title,
                 });
+            } else if had_draft {
+                state.request_preview();
             }
         }))
     }
@@ -1534,7 +1541,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     } else {
                         Box::new(Flex::row().height(0.0))
                     },
-                    text("Volume and mute affect playback.", faint(), 10.0),
+                    text("Volume and mute affect playback and export.", faint(), 10.0),
                 ],
             ));
         }
@@ -2029,7 +2036,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
     } else if picture || !titles.is_empty() {
         Box::new(ProgramCanvas {
             slot: state.program.slot.clone(),
-            picture: picture && gpu_preview,
+            picture: (picture || !titles.is_empty()) && gpu_preview,
             titles,
             selected: state.selected.get().last().copied(),
             state: state.clone(),
@@ -2800,7 +2807,7 @@ mod tests {
         let mut painter = TestPainter::default();
         ProgramCanvas {
             slot: GpuFrameSlot::new(),
-            picture: true,
+            picture: false,
             titles: vec![((0, 1), title)],
             selected: None,
             state: UiState::new(),
@@ -2808,8 +2815,7 @@ mod tests {
             resolution: (1920, 1080),
         }
         .paint(&mut painter, stage);
-        assert_eq!(painter.fills.len(), 1);
-        assert_eq!(painter.fills[0].1, Color::rgb(32, 32, 32));
+        assert!(painter.fills.is_empty());
         assert!(painter.labels.iter().all(|label| label == "Over footage"));
         let (_, rect) = painter.bounds.last().unwrap();
         assert!(rect.y > stage.height / 2.0);
@@ -3265,6 +3271,9 @@ mod tests {
                 assert!(painter.labels.iter().any(|text| text == label), "{label}");
             }
             for label in ["V1", "V2", "A1", "A2"] {
+                assert!(painter.labels.iter().any(|text| text == label));
+            }
+            for label in ["BASE", "ABOVE"] {
                 assert!(painter.labels.iter().any(|text| text == label));
             }
         }

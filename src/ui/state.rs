@@ -2,6 +2,7 @@ use super::edits::{self, ClipRef};
 use super::interaction::{DragState, Gesture, MenuState};
 use crate::export::{self, ExportControl};
 use crate::media::audio::{self, AudioPlan, AudioSource, Clock};
+use crate::media::composite::VisualPlan;
 use crate::media::preview::{
     FrameImage, FrameSource, PreviewEvent, PreviewPlan, StoryboardKey, decode_sequence, storyboard,
 };
@@ -635,6 +636,7 @@ impl UiState {
         self.title_gesture.borrow_mut().take();
         if self.title_preview.peek().is_some() {
             self.title_preview.set(None);
+            self.request_preview();
         }
     }
 
@@ -763,7 +765,7 @@ impl UiState {
         self.request_source_preview();
     }
 
-    fn request_preview(&self) {
+    pub(super) fn request_preview(&self) {
         let editor = self.editor.borrow();
         let project = editor.project();
         let mut sources = Vec::new();
@@ -802,10 +804,15 @@ impl UiState {
             project.settings().frame_rate.denominator,
         );
         let resolution = (project.settings().width, project.settings().height);
+        let mut visual = VisualPlan::from_project(project);
+        if let Some(((.., clip_id), title)) = self.title_preview.peek() {
+            visual.replace_title(clip_id, title);
+        }
         drop(editor);
         let end = self.sequence_end();
         let plan = PreviewPlan {
             sources,
+            visual: Some(visual),
             end,
             fps,
             resolution,
@@ -829,6 +836,7 @@ impl UiState {
         let end = range.as_ref().map_or(0, |range| range.duration);
         let plan = PreviewPlan {
             end,
+            visual: None,
             sources: range
                 .iter()
                 .filter(|range| range.kind != MediaKind::Audio)
@@ -948,6 +956,11 @@ impl UiState {
                         state.status.set(format!("Preview failed: {error}"));
                         return;
                     }
+                };
+                let image = if follow_timeline && !state.preview_available.peek() {
+                    None
+                } else {
+                    image
                 };
                 match image.map(|image| upload_preview_frame(&window, image)) {
                     Some(Ok(texture)) => monitor.slot.publish(texture, &window),
@@ -1322,11 +1335,11 @@ impl UiState {
         }
         let project = self.editor.borrow().project().clone();
         if !export::can_render(&project) {
-            self.status.set("MP4 export supports one continuous video track without titles or audio; other sequences are not yet supported".into());
+            self.status.set("Nothing to export".into());
             return;
         }
         let Some(selected) = FileDialog::new()
-            .set_title("Export video-only MP4")
+            .set_title("Export MP4")
             .add_filter("MP4 video", &["mp4"])
             .set_file_name("export")
             .save_file()
@@ -1364,13 +1377,14 @@ impl UiState {
                 .tracks()
                 .iter()
                 .flat_map(|track| &track.clips)
-                .map(|clip| clip.duration_frames)
-                .sum(),
+                .map(|clip| clip.start_frame + clip.duration_frames)
+                .max()
+                .unwrap_or(0),
         );
         *self.export_control.borrow_mut() = Some(control.clone());
         self.exporting.set(true);
         self.busy.set(true);
-        self.status.set("Encoding silent MP4…".into());
+        self.status.set("Encoding MP4…".into());
         let state = self.clone();
         app.spawn_background(
             move || {
@@ -1391,7 +1405,7 @@ impl UiState {
                 state.export_control.borrow_mut().take();
                 state.busy.set(false);
                 state.status.set(match result {
-                    Ok(()) => format!("Silent MP4 exported: {}", path.display()),
+                    Ok(()) => format!("MP4 exported: {}", path.display()),
                     Err(ref error) if error == "Export cancelled" => error.clone(),
                     Err(error) => format!("Export failed: {error}"),
                 });

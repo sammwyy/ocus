@@ -613,16 +613,20 @@ impl UiState {
                 let duration =
                     super::state::media_frames(media, (rate.numerator, rate.denominator))
                         .unwrap_or(0);
-                let start = pointer_frame.max(0.0).round() as i64;
-                let start = (start
-                    + edits::snap(
-                        project,
-                        &[],
-                        &[start, start + duration as i64],
-                        playhead,
-                        tolerance,
-                    ))
-                .max(0) as u64;
+                let start = if pointer_frame < 0.0 {
+                    0
+                } else {
+                    let start = pointer_frame.round() as i64;
+                    (start
+                        + edits::snap(
+                            project,
+                            &[],
+                            &[start, start + duration as i64],
+                            playhead,
+                            tolerance,
+                        ))
+                    .max(0) as u64
+                };
                 Some(
                     match edits::insert_media(project, media_id, Some((track_id, start))) {
                         Ok(insertion) => DropPlan {
@@ -679,7 +683,20 @@ impl UiState {
                     .into_iter()
                     .map(|edge| edge + delta)
                     .collect();
-                let delta = delta + edits::snap(project, &selection, &edges, playhead, tolerance);
+                let first = selection
+                    .iter()
+                    .filter_map(|&(track_id, clip_id)| {
+                        tracks
+                            .iter()
+                            .find(|track| track.id == track_id)?
+                            .clips
+                            .iter()
+                            .find(|clip| clip.id == clip_id)
+                            .map(|clip| clip.start_frame)
+                    })
+                    .min()?;
+                let delta = (delta + edits::snap(project, &selection, &edges, playhead, tolerance))
+                    .max(-(first.min(i64::MAX as u64) as i64));
                 let plan = edits::move_clips(project, &selection, anchor.0, shift, delta);
                 let ghosts = selection
                     .iter()
@@ -1342,6 +1359,7 @@ fn label_of_clip(state: &UiState, (track_id, clip_id): ClipRef) -> String {
 mod tests {
     use super::*;
     use crate::timeline::Clip;
+    use creamui::core::Rect;
     use std::collections::HashSet;
 
     fn starts(state: &UiState, track: usize) -> Vec<u64> {
@@ -1413,6 +1431,68 @@ mod tests {
         state.undo();
         assert_eq!(state.editor.borrow().project().tracks().len(), 4);
         assert!(state.editor.borrow().project().tracks()[2].kind == TrackKind::Audio);
+    }
+
+    #[test]
+    fn dragging_clips_or_media_before_the_start_places_them_at_zero() {
+        let state = UiState::new();
+        state.timeline_rect.set(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1128.0,
+            height: 300.0,
+        });
+        assert!(state.add_title());
+        assert!(state.add_title());
+        assert!(state.edit(Command::Move {
+            track_id: 0,
+            target_track_id: 0,
+            clip_id: 2,
+            to_frame: 135,
+        }));
+        assert!(state.edit(Command::Move {
+            track_id: 0,
+            target_track_id: 0,
+            clip_id: 1,
+            to_frame: 45,
+        }));
+        state.select_clips(vec![(0, 1), (0, 2)]);
+        let geometry = state.timeline_geometry();
+        state.drag.set(Some(DragState {
+            payload: DragPayload::Clips {
+                anchor: (0, 1),
+                grab: 0.0,
+            },
+            pointer: Point {
+                x: geometry.left() - 300.0,
+                y: geometry.top() + 10.0,
+            },
+        }));
+        assert!(state.drop_plan().unwrap().valid);
+        state.finish_drag();
+        assert_eq!(starts(&state, 0), vec![0, 90]);
+        state.undo();
+        assert_eq!(starts(&state, 0), vec![45, 135]);
+
+        assert!(state.edit(Command::ImportMedia(crate::media::Media {
+            id: 3,
+            path: "other.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(1_000_000),
+            has_audio: false,
+        })));
+        state.drag.set(Some(DragState {
+            payload: DragPayload::Media(3),
+            pointer: Point {
+                x: geometry.left() - 80.0,
+                y: geometry.top() + 75.0,
+            },
+        }));
+        let plan = state.drop_plan().unwrap();
+        assert!(plan.valid, "{}", plan.label);
+        assert_eq!(plan.ghosts[0].start, 0);
+        state.finish_drag();
+        assert_eq!(starts(&state, 1), vec![0]);
     }
 
     #[test]

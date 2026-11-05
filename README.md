@@ -6,7 +6,8 @@ and exporting an MP4 in v0.1. **The end-to-end video workflow is not implemented
 yet.** Today the repository builds a CreamUI desktop shell with an integrated
 titlebar, four timeline tracks, a versioned JSON project representation, and
 undo/redo commands for renaming projects and inserting/removing clips. The
-timeline toolbar's **Title** tool adds a three-second text clip; over footage
+timeline toolbar's **Title** tool adds a text clip initially three seconds long,
+whose duration can be changed in the inspector; over footage
 it places the title on a free video track at the playhead. Selecting a title
 shows a frame around it in the Program monitor: drag inside to move it or drag
 its bottom-right handle to resize it. The inspector edits its multiline text,

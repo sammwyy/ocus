@@ -113,6 +113,7 @@ pub(crate) struct UiState {
     pub preview_available: Signal<bool>,
     pub project_path: Signal<Option<PathBuf>>,
     pub title_text: TextController,
+    pub title_duration: TextController,
     pub title_font: TextController,
     pub title_size: TextController,
     pub title_color: TextController,
@@ -177,6 +178,7 @@ impl UiState {
             preview_available: Signal::new(false),
             project_path: Signal::new(None),
             title_text: TextController::default(),
+            title_duration: TextController::default(),
             title_font: TextController::default(),
             title_size: TextController::default(),
             title_color: TextController::default(),
@@ -616,13 +618,16 @@ impl UiState {
             .find(|track| track.id == track_id)
             .and_then(|track| track.clips.iter().find(|clip| clip.id == clip_id))
             .and_then(|clip| match &clip.content {
-                ClipContent::Title(title) => Some(title.clone()),
+                ClipContent::Title(title) => Some((title.clone(), clip.duration_frames)),
                 ClipContent::Media { .. } => None,
             });
         drop(editor);
-        let Some(title) = title else {
+        let Some((title, duration)) = title else {
             return;
         };
+        let fps = self.frame_rate();
+        self.title_duration
+            .set_value((duration as f64 * f64::from(fps.1) / f64::from(fps.0)).to_string());
         self.title_text.set_value(title.text);
         self.title_font.set_value(title.font_family);
         self.title_size.set_value(title.font_size.to_string());

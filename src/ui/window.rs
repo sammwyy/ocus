@@ -79,11 +79,64 @@ fn edit_selection(state: &UiState, edit: impl FnOnce(&Clip, u64, u64) -> Command
         .max()
         .unwrap_or(0)
         .saturating_add(1);
-    state.edit(edit(&clip, track_id, next_id));
+    let command = edit(&clip, track_id, next_id);
+    let title_duration = match (&clip.content, &command) {
+        (
+            ClipContent::Title(_),
+            Command::Trim {
+                duration_frames, ..
+            },
+        ) => Some(*duration_frames),
+        _ => None,
+    };
+    if state.edit(command)
+        && let Some(frames) = title_duration
+    {
+        let fps = state.frame_rate();
+        state
+            .title_duration
+            .set_value((frames as f64 * f64::from(fps.1) / f64::from(fps.0)).to_string());
+    }
 }
 
 fn set_title_text(state: &UiState) {
     change_title(state, |title| title.text = state.title_text.peek());
+}
+
+fn set_title_duration(state: &UiState) {
+    let Some((track_id, clip)) = selected_clip(state) else {
+        return;
+    };
+    if !matches!(clip.content, ClipContent::Title(_)) {
+        return;
+    }
+    let seconds = state.title_duration.peek().trim().parse::<f64>();
+    let fps = state.frame_rate();
+    let frames = seconds
+        .ok()
+        .map(|value| value * f64::from(fps.0) / f64::from(fps.1));
+    let Some(frames) =
+        frames.filter(|frames| frames.is_finite() && *frames >= 0.5 && *frames < u64::MAX as f64)
+    else {
+        state
+            .status
+            .set("Enter a title duration of at least one frame in seconds".into());
+        return;
+    };
+    let frames = frames.round() as u64;
+    if frames != clip.duration_frames
+        && state.edit(Command::Trim {
+            track_id,
+            clip_id: clip.id,
+            start_frame: clip.start_frame,
+            source_start_frame: clip.source_start_frame,
+            duration_frames: frames,
+        })
+    {
+        state
+            .title_duration
+            .set_value((frames as f64 * f64::from(fps.1) / f64::from(fps.0)).to_string());
+    }
 }
 
 fn change_title(state: &UiState, change: impl FnOnce(&mut Title)) {
@@ -1376,6 +1429,15 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
             rows.push(section(
                 "Title",
                 vec![
+                    text("Duration (seconds)", muted(), 11.0),
+                    input(&state.title_duration, inner),
+                    inline(secondary_button(
+                        None,
+                        "Apply duration",
+                        true,
+                        state,
+                        set_title_duration,
+                    )),
                     text("Text", muted(), 11.0),
                     Box::new(
                         TextArea::controlled(&state.title_text)
@@ -2974,6 +3036,29 @@ mod tests {
             .iter()
             .any(|clip| matches!(&clip.content, ClipContent::Title(title) if title.parse_markdown)));
         assert_eq!(state.title_size.peek(), "92");
+    }
+
+    #[test]
+    fn title_duration_is_editable_in_seconds_and_undoable() {
+        let state = UiState::new();
+        assert!(state.add_title());
+        assert_eq!(state.title_duration.peek(), "3");
+        let painter = render(&state, 1280.0, 1600.0);
+        assert!(
+            painter
+                .labels
+                .iter()
+                .any(|label| label == "Duration (seconds)")
+        );
+        state.title_duration.set_value("5.5");
+        set_title_duration(&state);
+        assert_eq!(selected_clip(&state).unwrap().1.duration_frames, 165);
+        state.title_duration.set_value("-1");
+        set_title_duration(&state);
+        assert_eq!(selected_clip(&state).unwrap().1.duration_frames, 165);
+        state.undo();
+        assert_eq!(selected_clip(&state).unwrap().1.duration_frames, 90);
+        assert_eq!(state.title_duration.peek(), "3");
     }
 
     #[test]

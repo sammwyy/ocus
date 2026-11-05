@@ -246,7 +246,7 @@ impl Geometry {
     }
 
     pub(super) fn in_lanes(&self, point: Point) -> bool {
-        point.x >= self.left && point.x <= self.right() && self.lane_at(point.y).is_some()
+        point.x <= self.right() && self.lane_at(point.y).is_some()
     }
 }
 

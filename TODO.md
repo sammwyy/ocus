@@ -15,8 +15,8 @@ clip commands do not complete the corresponding editor workflows.
   back. Add and delete video and audio tracks.
 - [ ] Name, reorder, lock and hide tracks; the project format does not store
   track names or flags yet.
-- [ ] Extend ripple delete across overlapping clips that span the removed range;
-  existing implementation rejects these instead of silently dropping footage.
+- [x] Extend ripple delete across overlapping clips that span the removed range;
+  preserve the surviving source frames on both sides as separate clips.
 - [ ] Make all video and audio tracks selectable as destinations from the UI;
   current import appends to the first compatible track.
 

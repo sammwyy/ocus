@@ -264,27 +264,12 @@ pub(crate) fn remove_clips(project: &Project, selection: &[ClipRef]) -> Vec<Trac
     tracks
 }
 
-/// Ripple-deletes each selected clip, latest first, closing every gap.
+/// Ripple-deletes the original selection's time ranges as one edit.
 pub(crate) fn ripple_remove_clips(project: &Project, selection: &[ClipRef]) -> Option<Vec<Track>> {
-    let mut ordered: Vec<_> = selection
-        .iter()
-        .filter_map(|&(track_id, clip_id)| {
-            let track = project.tracks().iter().find(|track| track.id == track_id)?;
-            let clip = track.clips.iter().find(|clip| clip.id == clip_id)?;
-            Some((clip.start_frame, track_id, clip_id))
-        })
-        .collect();
-    ordered.sort_by(|a, b| b.cmp(a));
     let mut editor = Editor::new(project.clone());
-    for (_, track_id, clip_id) in ordered {
-        let exists =
-            editor.project().tracks().iter().any(|track| {
-                track.id == track_id && track.clips.iter().any(|clip| clip.id == clip_id)
-            });
-        if exists && !editor.apply(Command::RippleDelete { track_id, clip_id }) {
-            return None;
-        }
-    }
+    editor
+        .apply(Command::RippleDeleteSelection(selection.to_vec()))
+        .then_some(())?;
     Some(editor.project().tracks().to_vec())
 }
 
@@ -642,6 +627,39 @@ mod tests {
         assert_eq!(pasted.selection, vec![(0, 4), (1, 5)]);
         assert_eq!(pasted.tracks[1].clips[1].start_frame, 150);
         assert!(paste_clips(&project, &copied, 10).is_none());
+    }
+
+    #[test]
+    fn ripple_selection_across_tracks_uses_original_overlapping_ranges() {
+        let project = project_with(&[
+            (0, title(1, 20)),
+            (0, title(2, 50)),
+            (1, title(3, 30)),
+            (1, title(4, 80)),
+        ]);
+        let selection = [(0, 1), (1, 3)];
+        let tracks = ripple_remove_clips(&project, &selection).unwrap();
+        assert_eq!(
+            tracks[0]
+                .clips
+                .iter()
+                .map(|clip| (clip.id, clip.start_frame))
+                .collect::<Vec<_>>(),
+            vec![(2, 20)]
+        );
+        assert_eq!(
+            tracks[1]
+                .clips
+                .iter()
+                .map(|clip| (clip.id, clip.start_frame))
+                .collect::<Vec<_>>(),
+            vec![(4, 40)]
+        );
+        let mut editor = Editor::new(project);
+        assert!(editor.apply(Command::ReplaceTracks(tracks)));
+        assert!(editor.undo());
+        assert_eq!(editor.project().tracks()[0].clips[0].start_frame, 20);
+        assert_eq!(editor.project().tracks()[1].clips[1].start_frame, 80);
     }
 
     #[test]

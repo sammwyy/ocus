@@ -83,9 +83,12 @@ command on release. `ui/title_markup.rs` parses only the supported HTML and
 Markdown syntax when their respective switches are enabled. The preview
 composites simultaneous video layers; title edits, split/move/trim/delete,
 audio clip settings, track creation/removal and ripple delete use project
-commands. A video with sound is inserted as one clip with `linked_audio`, an
-optional field that keeps version 1 files readable (absent means false), so
-any edit of the clip also edits its sound; validation only allows it on video
+commands. Ripple delete merges the original selected time ranges and closes
+them across every track; clips spanning a removed range split with distinct IDs,
+preserving both source ranges in one undoable edit. A video with sound is
+inserted as one clip with `linked_audio`, an optional field that keeps version 1
+files readable (absent means false), so any edit of the clip also edits its
+sound; validation only allows it on video
 tracks for video sources with audio. Detaching turns it into an aligned clip on
 an audio track. Context menus and the drag label are UI overlays drawn as
 absolutely positioned layers above the workspace. During playback

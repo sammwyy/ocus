@@ -1,6 +1,7 @@
 use super::Project;
 use crate::media::{Media, MediaKind};
 use crate::timeline::{Clip, ClipContent, Title, Track, TrackKind};
+use std::collections::HashSet;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
@@ -50,7 +51,96 @@ pub enum Command {
         track_id: u64,
         clip_id: u64,
     },
+    RippleDeleteSelection(Vec<(u64, u64)>),
     ReplaceTracks(Vec<Track>),
+}
+
+fn ripple_delete(project: &Project, selection: &[(u64, u64)]) -> Option<Vec<Track>> {
+    if selection.is_empty() {
+        return None;
+    }
+    let selected: HashSet<_> = selection.iter().copied().collect();
+    if selected.len() != selection.len() {
+        return None;
+    }
+    let mut ranges = Vec::with_capacity(selection.len());
+    for &(track_id, clip_id) in selection {
+        let clip = project
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)?
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)?;
+        ranges.push((
+            clip.start_frame,
+            clip.start_frame.checked_add(clip.duration_frames)?,
+        ));
+    }
+    ranges.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for (start, end) in ranges {
+        if let Some(last) = merged.last_mut()
+            && start <= last.1
+        {
+            last.1 = last.1.max(end);
+        } else {
+            merged.push((start, end));
+        }
+    }
+    let mut tracks = project.tracks.clone();
+    let mut next_id = tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .map(|clip| clip.id)
+        .max()
+        .unwrap_or(0);
+    for track in &mut tracks {
+        track
+            .clips
+            .retain(|clip| !selected.contains(&(track.id, clip.id)));
+    }
+    for (start, end) in merged.into_iter().rev() {
+        let length = end - start;
+        for track in &mut tracks {
+            let mut kept = Vec::with_capacity(track.clips.len());
+            for mut clip in std::mem::take(&mut track.clips) {
+                let clip_end = clip.start_frame.checked_add(clip.duration_frames)?;
+                if clip_end <= start {
+                    kept.push(clip);
+                } else if clip.start_frame >= end {
+                    clip.start_frame -= length;
+                    kept.push(clip);
+                } else if clip.start_frame < start {
+                    if clip_end > end {
+                        let mut right = clip.clone();
+                        next_id = next_id.checked_add(1)?;
+                        right.id = next_id;
+                        right.source_start_frame = right
+                            .source_start_frame
+                            .checked_add(end - clip.start_frame)?;
+                        right.start_frame = start;
+                        right.duration_frames = clip_end - end;
+                        clip.duration_frames = start - clip.start_frame;
+                        kept.push(clip);
+                        kept.push(right);
+                    } else {
+                        clip.duration_frames = start - clip.start_frame;
+                        kept.push(clip);
+                    }
+                } else if clip_end > end {
+                    clip.source_start_frame = clip
+                        .source_start_frame
+                        .checked_add(end - clip.start_frame)?;
+                    clip.duration_frames = clip_end - end;
+                    clip.start_frame = start;
+                    kept.push(clip);
+                }
+            }
+            track.clips = kept;
+        }
+    }
+    Some(tracks)
 }
 
 pub struct Editor {
@@ -332,41 +422,11 @@ impl Editor {
                 })
             }
             Command::RippleDelete { track_id, clip_id } => {
-                let mut tracks = self.project.tracks.clone();
-                let track = tracks.iter_mut().find(|t| t.id == track_id)?;
-                let index = track.clips.iter().position(|c| c.id == clip_id)?;
-                let removed = track.clips.remove(index);
-                let start = removed.start_frame;
-                let end = start.checked_add(removed.duration_frames)?;
-                if tracks.iter().flat_map(|track| &track.clips).any(|clip| {
-                    clip.start_frame < start
-                        && clip
-                            .start_frame
-                            .checked_add(clip.duration_frames)
-                            .is_some_and(|clip_end| clip_end > end)
-                }) {
-                    return None;
-                }
-                for track in &mut tracks {
-                    track.clips.retain_mut(|clip| {
-                        let clip_end = clip.start_frame + clip.duration_frames;
-                        if clip_end <= start {
-                            return true;
-                        }
-                        if clip.start_frame >= end {
-                            clip.start_frame -= removed.duration_frames;
-                        } else if clip.start_frame < start {
-                            clip.duration_frames = start - clip.start_frame;
-                        } else if clip_end > end {
-                            clip.source_start_frame += end - clip.start_frame;
-                            clip.start_frame = start;
-                            clip.duration_frames = clip_end - end;
-                        } else {
-                            return false;
-                        }
-                        true
-                    });
-                }
+                let tracks = ripple_delete(&self.project, &[(track_id, clip_id)])?;
+                self.execute(Command::ReplaceTracks(tracks))
+            }
+            Command::RippleDeleteSelection(selection) => {
+                let tracks = ripple_delete(&self.project, &selection)?;
                 self.execute(Command::ReplaceTracks(tracks))
             }
         }
@@ -677,8 +737,15 @@ mod tests {
     }
 
     #[test]
-    fn ripple_delete_rejects_spanning_clips_without_losing_source_frames() {
+    fn ripple_delete_splits_spanning_clips_without_losing_source_frames() {
         let mut editor = Editor::new(Project::new("Film"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "footage.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: true,
+        })));
         for (track_id, id, start_frame, duration_frames) in [(0, 1, 20, 20), (1, 2, 0, 60)] {
             assert!(editor.apply(Command::InsertClip {
                 track_id,
@@ -687,27 +754,160 @@ mod tests {
                     start_frame,
                     duration_frames,
                     source_start_frame: 0,
-                    content: ClipContent::Title(crate::timeline::Title {
-                        text: "Test".into(),
-                        font_family: "Sans".into(),
-                        font_size: 48.0,
-                        color: [255; 4],
-                        x: 0.5,
-                        y: 0.5,
-                        ..Default::default()
-                    }),
+                    content: if id == 2 {
+                        ClipContent::Media { media_id: 1 }
+                    } else {
+                        ClipContent::Title(Title::default())
+                    },
+                    volume: if id == 2 { 0.4 } else { 1.0 },
+                    muted: id == 2,
+                    linked_audio: id == 2,
+                },
+            }));
+        }
+        let before = editor.project().tracks().to_vec();
+        assert!(editor.apply(Command::RippleDelete {
+            track_id: 0,
+            clip_id: 1
+        }));
+        let pieces = &editor.project().tracks()[1].clips;
+        assert_eq!(
+            pieces
+                .iter()
+                .map(|clip| (
+                    clip.start_frame,
+                    clip.source_start_frame,
+                    clip.duration_frames
+                ))
+                .collect::<Vec<_>>(),
+            vec![(0, 0, 20), (20, 40, 20)]
+        );
+        assert_ne!(pieces[0].id, pieces[1].id);
+        assert!(
+            pieces
+                .iter()
+                .all(|clip| clip.linked_audio && clip.muted && clip.volume == 0.4)
+        );
+        let after = editor.project().tracks().to_vec();
+        assert!(editor.undo());
+        assert_eq!(editor.project().tracks(), before);
+        assert!(editor.redo());
+        assert_eq!(editor.project().tracks(), after);
+    }
+
+    #[test]
+    fn ripple_delete_selection_merges_ranges_and_preserves_audio_source_offsets() {
+        let mut editor = Editor::new(Project::new("Film"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "sound.wav".into(),
+            kind: MediaKind::Audio,
+            duration_us: Some(4_000_000),
+            has_audio: true,
+        })));
+        let title = |id, start_frame, duration_frames| Clip {
+            id,
+            start_frame,
+            source_start_frame: 0,
+            duration_frames,
+            content: ClipContent::Title(Title::default()),
+            volume: 1.0,
+            muted: false,
+            linked_audio: false,
+        };
+        for (track_id, clip) in [
+            (0, title(1, 20, 20)),
+            (0, title(2, 80, 10)),
+            (0, title(3, 95, 15)),
+            (0, title(7, 45, 5)),
+            (1, title(4, 30, 30)),
+            (1, title(5, 70, 10)),
+            (1, title(8, 10, 20)),
+            (
+                2,
+                Clip {
+                    id: 6,
+                    start_frame: 0,
+                    source_start_frame: 0,
+                    duration_frames: 120,
+                    content: ClipContent::Media { media_id: 1 },
+                    volume: 0.5,
+                    muted: true,
+                    linked_audio: false,
+                },
+            ),
+        ] {
+            assert!(editor.apply(Command::InsertClip { track_id, clip }));
+        }
+        let original = editor.project().tracks().to_vec();
+        let selection = vec![(0, 2), (1, 4), (0, 1)];
+        assert!(editor.apply(Command::RippleDeleteSelection(selection)));
+        editor.project().validate().unwrap();
+        let tracks = editor.project().tracks();
+        assert_eq!(
+            tracks[0]
+                .clips
+                .iter()
+                .map(|clip| (clip.id, clip.start_frame, clip.duration_frames))
+                .collect::<Vec<_>>(),
+            vec![(3, 45, 15)]
+        );
+        assert_eq!(
+            tracks[1]
+                .clips
+                .iter()
+                .map(|clip| (clip.id, clip.start_frame, clip.duration_frames))
+                .collect::<Vec<_>>(),
+            vec![(8, 10, 10), (5, 30, 10)]
+        );
+        let audio = &tracks[2].clips;
+        assert_eq!(
+            audio
+                .iter()
+                .map(|clip| (
+                    clip.start_frame,
+                    clip.source_start_frame,
+                    clip.duration_frames
+                ))
+                .collect::<Vec<_>>(),
+            vec![(0, 0, 20), (20, 60, 20), (40, 90, 30)]
+        );
+        assert_eq!(audio[0].id, 6);
+        assert!(audio[0].id != audio[1].id && audio[1].id != audio[2].id);
+        assert!(audio.iter().all(|clip| clip.volume == 0.5 && clip.muted));
+        let after = tracks.to_vec();
+        assert!(editor.undo());
+        assert_eq!(editor.project().tracks(), original);
+        assert!(editor.redo());
+        assert_eq!(editor.project().tracks(), after);
+        assert!(!editor.apply(Command::RippleDeleteSelection(vec![(0, 1)])));
+        assert_eq!(editor.project().tracks(), after);
+    }
+
+    #[test]
+    fn ripple_delete_rejects_new_id_overflow_without_changing_project() {
+        let mut editor = Editor::new(Project::new("Film"));
+        for (track_id, id, start_frame, duration_frames) in [(0, u64::MAX, 20, 20), (1, 1, 0, 60)] {
+            assert!(editor.apply(Command::InsertClip {
+                track_id,
+                clip: Clip {
+                    id,
+                    start_frame,
+                    source_start_frame: 0,
+                    duration_frames,
+                    content: ClipContent::Title(Title::default()),
                     volume: 1.0,
                     muted: false,
                     linked_audio: false,
                 },
             }));
         }
-        let before = editor.project().tracks().to_vec();
+        let original = editor.project().tracks().to_vec();
         assert!(!editor.apply(Command::RippleDelete {
             track_id: 0,
-            clip_id: 1
+            clip_id: u64::MAX,
         }));
-        assert_eq!(editor.project().tracks(), before);
+        assert_eq!(editor.project().tracks(), original);
     }
 
     #[test]

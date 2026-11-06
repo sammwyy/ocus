@@ -70,33 +70,33 @@ Rough targets to track from the first release onward. They will be measured on m
 The smallest version that can take raw footage and produce a finished video.
 
 **Media**
-- [ ] Import video, audio and image files
-- [ ] Media bin with thumbnails
+- [x] Import video, audio and image files
+- [x] Media bin with thumbnails
 
 **Timeline**
-- [ ] At least 2 video tracks and 2 audio tracks
-- [ ] Split, move, trim and delete clips
-- [ ] Ripple delete
-- [ ] Undo and redo
+- [x] At least 2 video tracks and 2 audio tracks
+- [x] Split, move, trim and delete clips
+- [x] Ripple delete
+- [x] Undo and redo
 
 **Preview**
-- [ ] Play, pause and seek
-- [ ] Frame-accurate scrubbing
+- [x] Play, pause and seek
+- [x] Frame-accurate scrubbing
 
 **Audio**
-- [ ] Volume and mute per clip
+- [x] Volume and mute per clip
 
 **Titles**
-- [ ] Basic text clips (font, size, color, position)
+- [x] Basic text clips (font, size, color, position)
 
 **Export**
-- [ ] MP4 output (H.264 video, AAC audio)
+- [x] MP4 output (H.264 video, AAC audio)
 - [ ] Presets: 1080p, 720p and vertical 9:16
-- [ ] Progress bar and cancel
+- [x] Progress bar and cancel
 
 **Project**
-- [ ] Save and open projects
-- [ ] Keyboard shortcuts for the main actions
+- [x] Save and open projects
+- [x] Keyboard shortcuts for the main actions
 
 **Done when:** a user can import a few clips, cut and arrange them, add a title, adjust volume and export a watchable MP4 without leaving the app.
 

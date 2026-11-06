@@ -390,7 +390,7 @@ impl UiState {
             }
             None => self
                 .status
-                .set("Ripple delete would cut through a clip spanning the gap".into()),
+                .set("Cannot ripple delete this selection".into()),
         }
     }
 
@@ -1528,6 +1528,36 @@ mod tests {
         state.run(Action::ToEnd);
         state.run(Action::StepBack);
         assert_eq!(state.program.position.peek(), 0);
+    }
+
+    #[test]
+    fn ripple_delete_action_splits_a_spanning_clip_and_undoes_in_one_step() {
+        let state = UiState::new();
+        for (track_id, id, start_frame, duration_frames) in [(0, 1, 20, 20), (1, 2, 0, 60)] {
+            assert!(state.edit(Command::InsertClip {
+                track_id,
+                clip: Clip {
+                    id,
+                    start_frame,
+                    source_start_frame: 0,
+                    duration_frames,
+                    content: ClipContent::Title(crate::timeline::Title::default()),
+                    volume: 1.0,
+                    muted: false,
+                    linked_audio: false,
+                },
+            }));
+        }
+        state.select_clip(Some((0, 1)));
+        state.run(Action::RippleDelete);
+        assert!(starts(&state, 0).is_empty());
+        assert_eq!(starts(&state, 1), vec![0, 20]);
+        assert!(state.selected.peek().is_empty());
+        state.run(Action::Undo);
+        assert_eq!(starts(&state, 0), vec![20]);
+        assert_eq!(starts(&state, 1), vec![0]);
+        state.run(Action::Redo);
+        assert_eq!(starts(&state, 1), vec![0, 20]);
     }
 
     #[test]

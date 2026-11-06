@@ -16,10 +16,13 @@ HTML and Markdown switches parse `<b>` / `<bold>`, `<i>` / `<italic>`,
 `<color=red>` / `<color=#ff0000>`, `**bold**` and `_italic_` in the preview;
 other HTML remains literal text. These edits can be undone and are saved with
 the project. The workspace also supports splitting, moving, trimming, deleting
-and ripple-deleting clips. **Open** and **Save as…** use native
-file dialogs instead of requiring typed paths; **Save** reuses the chosen
-path. **New** asks before discarding unsaved changes. Saves are atomic and
-file operations run in the background. **Import** accepts multiple
+and ripple-deleting clips. Ripple delete closes the selected clips' time ranges
+across all tracks; a clip spanning a removed range keeps its surviving source
+frames as two clips, and the whole edit is one undo step. **Open** and
+**Save as…** use native file dialogs instead of requiring typed paths;
+**Save** reuses the chosen path. **New** asks before discarding unsaved
+changes. Saves are atomic and file operations run in the background.
+**Import** accepts multiple
 files from the native picker and probes video, audio, and images with FFmpeg
 on a worker thread. Video and still-image sources get small, regenerable
 first-frame thumbnails. The media bin offers search, a segmented

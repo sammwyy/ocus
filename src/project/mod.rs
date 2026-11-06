@@ -4,10 +4,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 mod edit;
+pub mod export_settings;
 pub mod format;
 pub mod store;
 
 pub use edit::{Command, Editor};
+use export_settings::LastExport;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Project {
@@ -15,6 +17,8 @@ pub struct Project {
     settings: VideoSettings,
     media: Vec<Media>,
     tracks: Vec<Track>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_export: Option<LastExport>,
 }
 
 impl Project {
@@ -38,6 +42,7 @@ impl Project {
             settings: VideoSettings::default(),
             media: Vec::new(),
             tracks,
+            last_export: None,
         }
     }
 
@@ -57,6 +62,10 @@ impl Project {
         &self.tracks
     }
 
+    pub fn last_export(&self) -> Option<&LastExport> {
+        self.last_export.as_ref()
+    }
+
     pub(crate) fn replace_name(&mut self, name: String) -> String {
         std::mem::replace(&mut self.name, name)
     }
@@ -69,6 +78,9 @@ impl Project {
             || self.settings.frame_rate.denominator == 0
         {
             return Err("Invalid project name or video settings".into());
+        }
+        if let Some(last) = &self.last_export {
+            last.validate()?;
         }
         let mut media_ids = HashSet::new();
         for media in &self.media {
@@ -172,7 +184,7 @@ impl Default for VideoSettings {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameRate {
     pub numerator: u32,
     pub denominator: u32,

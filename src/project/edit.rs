@@ -1,4 +1,5 @@
 use super::Project;
+use super::export_settings::LastExport;
 use crate::media::{Media, MediaKind};
 use crate::timeline::{Clip, ClipContent, Title, Track, TrackKind};
 use std::collections::HashSet;
@@ -6,6 +7,7 @@ use std::collections::HashSet;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     RenameProject(String),
+    SetLastExport(Option<LastExport>),
     InsertClip {
         track_id: u64,
         clip: Clip,
@@ -178,6 +180,19 @@ impl Editor {
                 Some(Command::RenameProject(self.project.replace_name(name)))
             }
             Command::RenameProject(_) => None,
+            Command::SetLastExport(export) => {
+                if export == self.project.last_export
+                    || export
+                        .as_ref()
+                        .is_some_and(|value| value.validate().is_err())
+                {
+                    return None;
+                }
+                Some(Command::SetLastExport(std::mem::replace(
+                    &mut self.project.last_export,
+                    export,
+                )))
+            }
             Command::InsertClip { track_id, clip } => {
                 let end = clip.start_frame.checked_add(clip.duration_frames)?;
                 if clip.duration_frames == 0

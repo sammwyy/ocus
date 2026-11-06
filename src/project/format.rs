@@ -99,6 +99,58 @@ mod tests {
     }
 
     #[test]
+    fn export_options_round_trip_without_breaking_existing_projects() {
+        use crate::project::export_settings::{
+            AudioCodec, Container, ExportSettings, LastExport, VideoCodec,
+        };
+        let old = to_json(&Project::new("Old")).unwrap();
+        assert!(from_json(&old).unwrap().last_export().is_none());
+        let mut editor = crate::project::Editor::new(Project::new("New"));
+        let mut settings =
+            ExportSettings::for_project(1920, 1080, editor.project().settings().frame_rate.clone());
+        settings.container = Container::WebM;
+        settings.video_codec = VideoCodec::Vp9;
+        settings.audio_codec = AudioCodec::Opus;
+        let last = LastExport {
+            settings: settings.clone(),
+            path: std::env::temp_dir().join("video.webm"),
+        };
+        assert!(editor.apply(crate::project::Command::SetLastExport(Some(last.clone()))));
+        assert_eq!(
+            from_json(&to_json(editor.project()).unwrap())
+                .unwrap()
+                .last_export(),
+            Some(&last)
+        );
+        let mut older_export: serde_json::Value =
+            serde_json::from_str(&to_json(editor.project()).unwrap()).unwrap();
+        let fields = older_export["last_export"]["settings"]
+            .as_object_mut()
+            .unwrap();
+        fields.remove("video_quality");
+        fields.remove("speed");
+        assert_eq!(
+            from_json(&older_export.to_string())
+                .unwrap()
+                .last_export()
+                .unwrap()
+                .settings,
+            settings
+        );
+        assert!(editor.undo());
+        assert!(editor.project().last_export().is_none());
+        assert!(editor.redo());
+        assert!(editor.project().last_export().is_some());
+        let mut malformed: serde_json::Value =
+            serde_json::from_str(&to_json(editor.project()).unwrap()).unwrap();
+        malformed["last_export"]["settings"]["audio_codec"] = "aac".into();
+        assert!(from_json(&malformed.to_string()).is_err());
+        malformed["last_export"]["settings"]["audio_codec"] = "opus".into();
+        malformed["last_export"]["path"] = "relative.mp4".into();
+        assert!(from_json(&malformed.to_string()).is_err());
+    }
+
+    #[test]
     fn older_titles_load_without_new_style_fields() {
         let mut document: serde_json::Value =
             serde_json::from_str(&to_json(&Project::new("Legacy title")).unwrap()).unwrap();

@@ -1,7 +1,10 @@
+pub mod presets;
+
 use crate::media::MediaKind;
 use crate::media::audio::{self, AudioPlan, AudioQueue, AudioSource};
 use crate::media::composite::{Compositor, VisualPlan};
 use crate::project::Project;
+use crate::project::export_settings::{AudioCodec, EncodingSpeed, ExportSettings, VideoCodec};
 use crate::timeline::{ClipContent, TrackKind};
 use ffmpeg_next as ffmpeg;
 use std::fs::{self, OpenOptions};
@@ -49,16 +52,31 @@ pub fn render_with_control(
     path: &Path,
     control: Arc<ExportControl>,
 ) -> Result<(), String> {
+    let video = project.settings();
+    let settings = ExportSettings::for_project(video.width, video.height, video.frame_rate.clone());
+    render_with_settings(project, path, &settings, control)
+}
+
+pub fn render_with_settings(
+    project: &Project,
+    path: &Path,
+    settings: &ExportSettings,
+    control: Arc<ExportControl>,
+) -> Result<(), String> {
     control.check()?;
     if !can_render(project) {
         return Err("Nothing to export".into());
     }
     project.validate()?;
+    settings.validate()?;
     if !path
         .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(settings.container.extension()))
     {
-        return Err("Export filename must end in .mp4".into());
+        return Err(format!(
+            "Export filename must end in .{}",
+            settings.container.extension()
+        ));
     }
     if path.exists() {
         let destination = fs::canonicalize(path).map_err(|error| error.to_string())?;
@@ -79,9 +97,10 @@ pub fn render_with_control(
     let mut temporary: Option<PathBuf> = None;
     for _ in 0..8 {
         let candidate = parent.join(format!(
-            ".{name}.{}.{}.mp4",
+            ".{name}.{}.{}.{}",
             std::process::id(),
-            NEXT_EXPORT.fetch_add(1, Ordering::Relaxed)
+            NEXT_EXPORT.fetch_add(1, Ordering::Relaxed),
+            settings.container.extension()
         ));
         match OpenOptions::new()
             .create_new(true)
@@ -98,9 +117,10 @@ pub fn render_with_control(
         }
     }
     let temporary = temporary.ok_or("Cannot create temporary export file")?;
-    let result = render_to(project, &temporary, control.clone()).and_then(|()| {
+    let result = render_to(project, &temporary, settings, control.clone()).and_then(|()| {
         control.check()?;
-        fs::rename(&temporary, path).map_err(|error| error.to_string())
+        fs::hard_link(&temporary, path).map_err(|error| error.to_string())?;
+        fs::remove_file(&temporary).map_err(|error| error.to_string())
     });
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -108,16 +128,13 @@ pub fn render_with_control(
     result
 }
 
-fn render_to(project: &Project, path: &Path, control: Arc<ExportControl>) -> Result<(), String> {
+fn render_to(
+    project: &Project,
+    path: &Path,
+    settings: &ExportSettings,
+    control: Arc<ExportControl>,
+) -> Result<(), String> {
     ffmpeg::init().map_err(|error| error.to_string())?;
-    let settings = project.settings();
-    if !settings.width.is_multiple_of(2)
-        || !settings.height.is_multiple_of(2)
-        || settings.width > 8192
-        || settings.height > 8192
-    {
-        return Err("H.264 export requires even dimensions no greater than 8192".into());
-    }
     let fps = ffmpeg::Rational(
         i32::try_from(settings.frame_rate.numerator)
             .map_err(|_| "Export frame rate is out of range")?,
@@ -125,8 +142,13 @@ fn render_to(project: &Project, path: &Path, control: Arc<ExportControl>) -> Res
             .map_err(|_| "Export frame rate is out of range")?,
     );
     let time_base = ffmpeg::Rational(fps.denominator(), fps.numerator());
-    let codec =
-        ffmpeg::encoder::find(ffmpeg::codec::Id::H264).ok_or("H.264 encoder not available")?;
+    let video_id = match settings.video_codec {
+        VideoCodec::H264 => ffmpeg::codec::Id::H264,
+        VideoCodec::Hevc => ffmpeg::codec::Id::HEVC,
+        VideoCodec::Vp9 => ffmpeg::codec::Id::VP9,
+    };
+    let codec = ffmpeg::encoder::find(video_id)
+        .ok_or_else(|| format!("{video_id:?} encoder not available"))?;
     let mut output = ffmpeg::format::output(path).map_err(|error| error.to_string())?;
     let mut encoder = ffmpeg::codec::context::Context::new_with_codec(codec)
         .encoder()
@@ -137,6 +159,11 @@ fn render_to(project: &Project, path: &Path, control: Arc<ExportControl>) -> Res
     encoder.set_format(ffmpeg::format::Pixel::YUV420P);
     encoder.set_time_base(time_base);
     encoder.set_frame_rate(Some(fps));
+    encoder.set_bit_rate(
+        settings
+            .video_quality
+            .map_or(settings.video_bitrate_kbps as usize * 1_000, |_| 0),
+    );
     if output
         .format()
         .flags()
@@ -145,7 +172,45 @@ fn render_to(project: &Project, path: &Path, control: Arc<ExportControl>) -> Res
         encoder.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
     }
     let mut options = ffmpeg::Dictionary::new();
-    options.set("preset", "veryfast");
+    match (settings.video_codec, settings.speed) {
+        (VideoCodec::H264, speed) => options.set(
+            "preset",
+            match speed {
+                EncodingSpeed::Fast => "veryfast",
+                EncodingSpeed::Balanced => "medium",
+                EncodingSpeed::Quality => "slow",
+            },
+        ),
+        (VideoCodec::Hevc, speed) => options.set(
+            "preset",
+            match speed {
+                EncodingSpeed::Fast => "fast",
+                EncodingSpeed::Balanced => "medium",
+                EncodingSpeed::Quality => "slow",
+            },
+        ),
+        (VideoCodec::Vp9, speed) => {
+            options.set(
+                "deadline",
+                if speed == EncodingSpeed::Fast {
+                    "realtime"
+                } else {
+                    "good"
+                },
+            );
+            options.set(
+                "cpu-used",
+                match speed {
+                    EncodingSpeed::Fast => "6",
+                    EncodingSpeed::Balanced => "4",
+                    EncodingSpeed::Quality => "1",
+                },
+            );
+        }
+    }
+    if let Some(quality) = settings.video_quality {
+        options.set("crf", &quality.to_string());
+    }
     let encoder = encoder
         .open_with(options)
         .map_err(|error| error.to_string())?;
@@ -165,8 +230,8 @@ fn render_to(project: &Project, path: &Path, control: Arc<ExportControl>) -> Res
         .max()
         .ok_or("Nothing to export")?;
     let fps_pair = (
-        settings.frame_rate.numerator,
-        settings.frame_rate.denominator,
+        project.settings().frame_rate.numerator,
+        project.settings().frame_rate.denominator,
     );
     let sources: Vec<_> = project
         .tracks()
@@ -206,10 +271,17 @@ fn render_to(project: &Project, path: &Path, control: Arc<ExportControl>) -> Res
     let audio_encoder = if sources.is_empty() {
         None
     } else {
-        let codec =
-            ffmpeg::encoder::find(ffmpeg::codec::Id::AAC).ok_or("AAC encoder not available")?;
+        let audio_id = match settings.audio_codec {
+            AudioCodec::Aac => ffmpeg::codec::Id::AAC,
+            AudioCodec::Opus => ffmpeg::codec::Id::OPUS,
+        };
+        let codec = ffmpeg::encoder::find(audio_id)
+            .ok_or_else(|| format!("{audio_id:?} encoder not available"))?;
         let formats = codec.audio().map_err(|error| error.to_string())?;
-        let format = ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Planar);
+        let format = ffmpeg::format::Sample::F32(match settings.audio_codec {
+            AudioCodec::Aac => ffmpeg::format::sample::Type::Planar,
+            AudioCodec::Opus => ffmpeg::format::sample::Type::Packed,
+        });
         if !formats
             .formats()
             .is_some_and(|mut formats| formats.any(|f| f == format))
@@ -217,7 +289,9 @@ fn render_to(project: &Project, path: &Path, control: Arc<ExportControl>) -> Res
                 .rates()
                 .is_some_and(|mut rates| rates.any(|r| r == audio::RATE as i32))
         {
-            return Err("AAC encoder cannot accept 48 kHz planar float stereo".into());
+            return Err(format!(
+                "{audio_id:?} encoder cannot accept 48 kHz float stereo"
+            ));
         }
         let mut encoder = ffmpeg::codec::context::Context::new_with_codec(codec)
             .encoder()
@@ -227,7 +301,7 @@ fn render_to(project: &Project, path: &Path, control: Arc<ExportControl>) -> Res
         encoder.set_channel_layout(ffmpeg::ChannelLayout::STEREO);
         encoder.set_format(format);
         encoder.set_time_base(ffmpeg::Rational(1, audio::RATE as i32));
-        encoder.set_bit_rate(192_000);
+        encoder.set_bit_rate(settings.audio_bitrate_kbps as usize * 1_000);
         if output
             .format()
             .flags()
@@ -262,7 +336,12 @@ fn render_to(project: &Project, path: &Path, control: Arc<ExportControl>) -> Res
             pending: Vec::new(),
         }),
         queue: None,
-        fps: fps_pair,
+        fps: (
+            settings.frame_rate.numerator,
+            settings.frame_rate.denominator,
+        ),
+        audio_end: (u128::from(end) * u128::from(audio::RATE) * u128::from(fps_pair.1)
+            / u128::from(fps_pair.0)) as u64,
     };
     let queue = (!sources.is_empty()).then(|| Arc::new(AudioQueue::new()));
     muxer.queue = queue.clone();
@@ -285,10 +364,16 @@ fn render_to(project: &Project, path: &Path, control: Arc<ExportControl>) -> Res
             })
         });
         let result = (|| {
-            let mut compositor = Compositor::new(
-                VisualPlan::from_project(project),
+            let (picture_width, picture_height) = fitted_dimensions(
+                project.settings().width,
+                project.settings().height,
                 settings.width,
                 settings.height,
+            );
+            let mut compositor = Compositor::new(
+                VisualPlan::from_project(project),
+                picture_width,
+                picture_height,
                 fps_pair,
             );
             let mut rgba = ffmpeg::frame::Video::new(
@@ -306,21 +391,30 @@ fn render_to(project: &Project, path: &Path, control: Arc<ExportControl>) -> Res
                 ffmpeg::software::scaling::flag::Flags::BILINEAR,
             )
             .map_err(|error| error.to_string())?;
-            for position in 0..end {
+            let out_end = output_frames(end, fps_pair, muxer.fps)?;
+            for position in 0..out_end {
                 muxer.control.check()?;
-                let image = compositor.frame(position, &muxer.control.cancelled)?;
+                let source_position =
+                    (u128::from(position) * u128::from(fps_pair.0) * u128::from(muxer.fps.1)
+                        / (u128::from(fps_pair.1) * u128::from(muxer.fps.0)))
+                    .min(u128::from(end - 1)) as u64;
+                let image = compositor.frame(source_position, &muxer.control.cancelled)?;
                 for row in 0..settings.height as usize {
                     let stride = rgba.stride(0);
                     let dest = &mut rgba.data_mut(0)
                         [row * stride..row * stride + settings.width as usize * 4];
-                    if let Some(image) = &image {
-                        let source = &image.pixels[row * settings.width as usize * 4
-                            ..(row + 1) * settings.width as usize * 4];
-                        dest.copy_from_slice(source);
-                    } else {
-                        for pixel in dest.chunks_exact_mut(4) {
-                            pixel.copy_from_slice(&[0, 0, 0, 255]);
-                        }
+                    for pixel in dest.chunks_exact_mut(4) {
+                        pixel.copy_from_slice(&[0, 0, 0, 255]);
+                    }
+                    let top = (settings.height - picture_height) as usize / 2;
+                    if let Some(image) = &image
+                        && row >= top
+                        && row < top + picture_height as usize
+                    {
+                        let left = (settings.width - picture_width) as usize / 2;
+                        let source = &image.pixels[(row - top) * picture_width as usize * 4
+                            ..(row - top + 1) * picture_width as usize * 4];
+                        dest[left * 4..(left + picture_width as usize) * 4].copy_from_slice(source);
                     }
                 }
                 let mut frame = ffmpeg::frame::Video::empty();
@@ -357,6 +451,26 @@ fn render_to(project: &Project, path: &Path, control: Arc<ExportControl>) -> Res
     })
 }
 
+fn fitted_dimensions(source_width: u32, source_height: u32, width: u32, height: u32) -> (u32, u32) {
+    if u64::from(width) * u64::from(source_height) <= u64::from(height) * u64::from(source_width) {
+        let fitted = (u64::from(width) * u64::from(source_height) / u64::from(source_width)) as u32;
+        (width, fitted.max(2) & !1)
+    } else {
+        let fitted =
+            (u64::from(height) * u64::from(source_width) / u64::from(source_height)) as u32;
+        (fitted.max(2) & !1, height)
+    }
+}
+
+pub fn output_frames(end: u64, source: (u32, u32), target: (u32, u32)) -> Result<u64, String> {
+    let numerator = u128::from(end) * u128::from(source.1) * u128::from(target.0);
+    let denominator = u128::from(source.0) * u128::from(target.1);
+    if denominator == 0 {
+        return Err("Invalid output frame rate".into());
+    }
+    u64::try_from(numerator.div_ceil(denominator)).map_err(|_| "Output is too long".into())
+}
+
 struct Muxer {
     encoder: ffmpeg::encoder::video::Encoder,
     output: ffmpeg::format::context::Output,
@@ -366,6 +480,7 @@ struct Muxer {
     audio: Option<AudioEncoder>,
     queue: Option<Arc<AudioQueue>>,
     fps: (u32, u32),
+    audio_end: u64,
 }
 
 impl Muxer {
@@ -382,7 +497,8 @@ impl Muxer {
         if let (Some(audio), Some(queue)) = (&mut self.audio, &self.queue) {
             let samples =
                 ((u128::from(position + 1) * u128::from(audio::RATE) * u128::from(self.fps.1))
-                    / u128::from(self.fps.0)) as u64;
+                    / u128::from(self.fps.0))
+                .min(u128::from(self.audio_end)) as u64;
             audio.advance(samples, queue, &self.control, &mut self.output)?;
         }
         self.control.progress.fetch_add(1, Ordering::Relaxed);
@@ -454,13 +570,19 @@ impl AudioEncoder {
         frame.set_pts(Some(
             i64::try_from(self.encoded_samples).map_err(|_| "Audio timeline too long")?,
         ));
-        for channel in 0..2 {
-            for (dst, sample) in frame
-                .plane_mut::<f32>(channel)
-                .iter_mut()
-                .zip(self.pending.chunks_exact(2))
-            {
-                *dst = sample[channel];
+        if self.encoder.format().is_planar() {
+            for channel in 0..2 {
+                for (dst, sample) in frame
+                    .plane_mut::<f32>(channel)
+                    .iter_mut()
+                    .zip(self.pending.chunks_exact(2))
+                {
+                    *dst = sample[channel];
+                }
+            }
+        } else {
+            for (dest, sample) in frame.plane_mut::<f32>(0).iter_mut().zip(&self.pending) {
+                *dest = *sample;
             }
         }
         self.encoder
@@ -503,12 +625,29 @@ impl AudioEncoder {
 
 #[cfg(test)]
 mod tests {
+    use super::{ExportControl, render_with_settings};
     use crate::media::{Media, MediaKind};
     use crate::project::{Command, Editor, Project, format};
     use crate::timeline::{Clip, ClipContent, Title, Track, TrackKind};
     use ffmpeg_next as ffmpeg;
     use std::fs;
+    use std::sync::Arc;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn output_frame_mapping_and_aspect_fit_are_bounded() {
+        assert_eq!(super::output_frames(7, (30, 1), (24, 1)), Ok(6));
+        assert_eq!(super::output_frames(7, (30, 1), (60, 1)), Ok(14));
+        assert_eq!(
+            super::fitted_dimensions(1920, 1080, 1080, 1920),
+            (1080, 606)
+        );
+        assert_eq!(super::fitted_dimensions(1920, 1080, 1280, 720), (1280, 720));
+        assert_eq!(
+            super::fitted_dimensions(1080, 1920, 1920, 1080),
+            (606, 1080)
+        );
+    }
 
     #[test]
     fn exports_a_video_clip_as_playable_h264_mp4() {
@@ -859,8 +998,45 @@ mod tests {
             ffmpeg::format::input(&target).unwrap().duration(),
             1_000_000
         );
+        let portrait = dir.join("portrait.mp4");
+        let settings = crate::project::export_settings::ExportSettings::for_project(
+            96,
+            160,
+            editor.project().settings().frame_rate.clone(),
+        );
+        render_with_settings(
+            editor.project(),
+            &portrait,
+            &settings,
+            Arc::new(ExportControl::default()),
+        )
+        .unwrap();
+        let mut output = ffmpeg::format::input(&portrait).unwrap();
+        let stream = output.streams().best(ffmpeg::media::Type::Video).unwrap();
+        let video_index = stream.index();
+        let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+            .unwrap()
+            .decoder()
+            .video()
+            .unwrap();
+        let mut frame = ffmpeg::frame::Video::empty();
+        let mut decoded = false;
+        for (stream, packet) in output.packets() {
+            if stream.index() == video_index {
+                decoder.send_packet(&packet).unwrap();
+                if decoder.receive_frame(&mut frame).is_ok() {
+                    decoded = true;
+                    break;
+                }
+            }
+        }
+        assert!(decoded);
+        let luma = frame.data(0);
+        assert!(luma[frame.stride(0) * 10 + 48] < 30);
+        assert!(luma[frame.stride(0) * 80 + 48] > 50);
         fs::remove_file(source).unwrap();
         fs::remove_file(target).unwrap();
+        fs::remove_file(portrait).unwrap();
         fs::remove_dir(dir).unwrap();
     }
 
@@ -920,6 +1096,215 @@ mod tests {
         }
         assert!(bright);
         fs::remove_file(target).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn custom_frame_rate_container_and_opus_audio_export_correctly() {
+        use crate::project::export_settings::{
+            AudioCodec, Container, EncodingSpeed, ExportSettings, VideoCodec,
+        };
+        ffmpeg::init().unwrap();
+        if ffmpeg::encoder::find(ffmpeg::codec::Id::VP9).is_none()
+            || ffmpeg::encoder::find(ffmpeg::codec::Id::OPUS).is_none()
+        {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "ocus-custom-export-{}-{}",
+            std::process::id(),
+            super::NEXT_EXPORT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        let wav_path = dir.join("audio.wav");
+        let mut wav = b"RIFF".to_vec();
+        wav.extend((48_000 + 36_u32).to_le_bytes());
+        wav.extend(b"WAVEfmt ");
+        wav.extend(16_u32.to_le_bytes());
+        wav.extend(1_u16.to_le_bytes());
+        wav.extend(2_u16.to_le_bytes());
+        wav.extend(48_000_u32.to_le_bytes());
+        wav.extend(192_000_u32.to_le_bytes());
+        wav.extend(4_u16.to_le_bytes());
+        wav.extend(16_u16.to_le_bytes());
+        wav.extend(b"data");
+        wav.extend(48_000_u32.to_le_bytes());
+        for _ in 0..12_000 {
+            wav.extend(5_000_i16.to_le_bytes());
+            wav.extend((-5_000_i16).to_le_bytes());
+        }
+        fs::write(&wav_path, wav).unwrap();
+        let mut editor = Editor::new(Project::new("Custom"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: wav_path.clone(),
+            kind: MediaKind::Audio,
+            duration_us: Some(250_000),
+            has_audio: true,
+        })));
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 2,
+            clip: Clip {
+                id: 1,
+                start_frame: 0,
+                source_start_frame: 0,
+                duration_frames: 7,
+                content: ClipContent::Media { media_id: 1 },
+                volume: 1.0,
+                muted: false,
+                linked_audio: false,
+            },
+        }));
+        let mut settings = ExportSettings::for_project(
+            96,
+            54,
+            crate::project::FrameRate {
+                numerator: 24,
+                denominator: 1,
+            },
+        );
+        settings.container = Container::WebM;
+        settings.video_codec = VideoCodec::Vp9;
+        settings.audio_codec = AudioCodec::Opus;
+        settings.video_quality = Some(32);
+        settings.speed = EncodingSpeed::Balanced;
+        let output = dir.join("output.webm");
+        let control = Arc::new(ExportControl::default());
+        render_with_settings(editor.project(), &output, &settings, control.clone()).unwrap();
+        assert_eq!(control.frames_done(), 6);
+        let input = ffmpeg::format::input(&output).unwrap();
+        let video = input.streams().best(ffmpeg::media::Type::Video).unwrap();
+        assert_eq!(video.parameters().id(), ffmpeg::codec::Id::VP9);
+        let decoder = ffmpeg::codec::context::Context::from_parameters(video.parameters())
+            .unwrap()
+            .decoder()
+            .video()
+            .unwrap();
+        assert_eq!((decoder.width(), decoder.height()), (96, 54));
+        assert_eq!(
+            input
+                .streams()
+                .best(ffmpeg::media::Type::Audio)
+                .unwrap()
+                .parameters()
+                .id(),
+            ffmpeg::codec::Id::OPUS
+        );
+        let audio = input.streams().best(ffmpeg::media::Type::Audio).unwrap();
+        let audio_index = audio.index();
+        let mut decoder = ffmpeg::codec::context::Context::from_parameters(audio.parameters())
+            .unwrap()
+            .decoder()
+            .audio()
+            .unwrap();
+        let mut decoded_sound = false;
+        let mut input = input;
+        for (stream, packet) in input.packets() {
+            if stream.index() != audio_index {
+                continue;
+            }
+            decoder.send_packet(&packet).unwrap();
+            let mut frame = ffmpeg::frame::Audio::empty();
+            while decoder.receive_frame(&mut frame).is_ok() {
+                decoded_sound |= frame.data(0).iter().any(|sample| *sample != 0);
+            }
+        }
+        assert!(decoded_sound);
+        let original = fs::read(&output).unwrap();
+        assert!(
+            render_with_settings(
+                editor.project(),
+                &output,
+                &settings,
+                Arc::new(ExportControl::default())
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(&output).unwrap(), original);
+        settings.container = Container::Matroska;
+        settings.video_codec = VideoCodec::H264;
+        settings.audio_codec = AudioCodec::Aac;
+        settings.video_quality = None;
+        let mkv = dir.join("output.mkv");
+        render_with_settings(
+            editor.project(),
+            &mkv,
+            &settings,
+            Arc::new(ExportControl::default()),
+        )
+        .unwrap();
+        let input = ffmpeg::format::input(&mkv).unwrap();
+        assert_eq!(
+            input
+                .streams()
+                .best(ffmpeg::media::Type::Audio)
+                .unwrap()
+                .parameters()
+                .id(),
+            ffmpeg::codec::Id::AAC
+        );
+        assert_eq!(
+            input
+                .streams()
+                .best(ffmpeg::media::Type::Video)
+                .unwrap()
+                .parameters()
+                .id(),
+            ffmpeg::codec::Id::H264
+        );
+        settings.frame_rate = crate::project::FrameRate {
+            numerator: 60,
+            denominator: 1,
+        };
+        let high_fps = dir.join("high-fps.mkv");
+        let high_fps_control = Arc::new(ExportControl::default());
+        render_with_settings(
+            editor.project(),
+            &high_fps,
+            &settings,
+            high_fps_control.clone(),
+        )
+        .unwrap();
+        assert_eq!(high_fps_control.frames_done(), 14);
+        assert!(
+            ffmpeg::format::input(&high_fps)
+                .unwrap()
+                .streams()
+                .best(ffmpeg::media::Type::Audio)
+                .is_some()
+        );
+        settings.frame_rate = crate::project::FrameRate {
+            numerator: 24,
+            denominator: 1,
+        };
+        if ffmpeg::encoder::find(ffmpeg::codec::Id::HEVC).is_some() {
+            settings.container = Container::Mp4;
+            settings.video_codec = VideoCodec::Hevc;
+            settings.video_quality = Some(24);
+            let hevc = dir.join("output-hevc.mp4");
+            render_with_settings(
+                editor.project(),
+                &hevc,
+                &settings,
+                Arc::new(ExportControl::default()),
+            )
+            .unwrap();
+            assert_eq!(
+                ffmpeg::format::input(&hevc)
+                    .unwrap()
+                    .streams()
+                    .best(ffmpeg::media::Type::Video)
+                    .unwrap()
+                    .parameters()
+                    .id(),
+                ffmpeg::codec::Id::HEVC
+            );
+            fs::remove_file(hevc).unwrap();
+        }
+        fs::remove_file(wav_path).unwrap();
+        fs::remove_file(output).unwrap();
+        fs::remove_file(mkv).unwrap();
+        fs::remove_file(high_fps).unwrap();
         fs::remove_dir(dir).unwrap();
     }
 }

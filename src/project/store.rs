@@ -96,6 +96,7 @@ pub fn save(path: &Path, project: &Project) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::export_settings::{ExportSettings, LastExport};
     use crate::project::{Command, Editor};
     use crate::timeline::{Clip, ClipContent, Title};
 
@@ -130,8 +131,18 @@ mod tests {
                 linked_audio: false,
             },
         }));
+        let last_export = LastExport {
+            settings: ExportSettings::for_project(
+                1280,
+                720,
+                editor.project().settings().frame_rate.clone(),
+            ),
+            path: dir.join("film-2.mp4"),
+        };
+        assert!(editor.apply(Command::SetLastExport(Some(last_export.clone()))));
         save(&path, editor.project()).unwrap();
         assert_eq!(load(&path).unwrap(), *editor.project());
+        assert_eq!(load(&path).unwrap().last_export(), Some(&last_export));
         let original = fs::read(&path).unwrap();
         assert!(save(&dir, editor.project()).is_err());
         assert_eq!(fs::read(&path).unwrap(), original);

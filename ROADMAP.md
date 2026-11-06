@@ -91,7 +91,7 @@ The smallest version that can take raw footage and produce a finished video.
 
 **Export**
 - [x] MP4 output (H.264 video, AAC audio)
-- [ ] Presets: 1080p, 720p and vertical 9:16
+- [x] Presets: 1080p, 720p and vertical 9:16
 - [x] Progress bar and cancel
 
 **Project**
@@ -136,7 +136,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [ ] Crash recovery
 
 ### v0.9: Formats and stabilization
-- [ ] WebM export
+- [x] WebM export
 - [ ] GIF export
 - [ ] Audio-only export
 - [ ] Bug fixing, UX cleanup and feature freeze
@@ -161,7 +161,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 
 **Export**
 - [ ] Export queue
-- [ ] Custom export presets
+- [x] Custom export presets
 
 **Extensibility**
 - [ ] Effects written as WGSL shaders, used as the base for a future plugin system
@@ -188,7 +188,7 @@ Ideas under consideration, in no particular order:
 - Audio ducking and basic mixing tools
 - Text-based editing from transcripts
 - Scene detection
-- Additional export targets (ProRes, AV1, HEVC)
+- Additional export targets (ProRes, AV1)
 - Color scopes (waveform, vectorscope, histogram)
 - Mobile or web companion apps
 

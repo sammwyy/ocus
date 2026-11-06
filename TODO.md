@@ -54,7 +54,7 @@ clip commands do not complete the corresponding editor workflows.
 - [x] Export the full timeline to MP4 with H.264 video and AAC audio.
 - [x] Encode H.264 from layered video and still-image clips and AAC from the
   edited audio tracks.
-- [ ] Add and test export presets for 1080p, 720p, and vertical 9:16.
+- [x] Add and test export presets for 1080p, 720p, and vertical 9:16.
 - [x] Run export off the UI thread with progress, cancellation, and cleanup
   of incomplete outputs.
 

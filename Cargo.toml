@@ -2,6 +2,8 @@
 name = "ocus"
 version = "0.1.0"
 edition = "2024"
+authors = ["sammwy"]
+repository = "https://github.com/sammwyy/ocus"
 
 [dependencies]
 creamui = { git = "https://github.com/sammwyy/creamui.git", rev = "a20e43ebe5940c01151c76d3b89cb1e36b3e9379", version = "0.3.0", features = ["image", "system-theme", "theme-watch"] }

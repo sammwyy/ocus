@@ -41,9 +41,6 @@ pub fn run_app() {
                             return false;
                         }
                         if close.confirm_discard() {
-                            if let Some(window) = close.settings_window() {
-                                window.close();
-                            }
                             close.pause();
                             close.pause_source();
                             true

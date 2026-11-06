@@ -2,17 +2,21 @@ use super::controls::{
     AUDIO, DragOverlay, ExportMeter, Glyph, IMAGE, Layer, PLAYHEAD, STAGE, Scrubber, TITLE, Thumb,
     VIDEO, ZoomSlider, accent, accent_button, background, border, chip, faint, fit, glyph, heading,
     icon_button, kind_color, list_row, media_item, menu_row, muted, panel, panel_raised,
-    play_button, secondary_button, segment, short_duration, sized_icon_button, surface, text,
-    text_color, timecode, tool_button,
+    play_button, secondary_button, segment, short_duration, sized_icon_button, surface,
+    surface_hover, text, text_color, timecode, tool_button,
 };
 use super::edits::ClipRef;
 use super::interaction::{Action, DragPayload, MenuState};
-use super::state::{MediaView, SourceRange, TitleGesture, ZOOM_SECONDS, audible, media_frames};
+use super::state::{
+    ExportPage, MediaView, SettingsPage, SourceRange, TitleGesture, ZOOM_SECONDS, audible,
+    media_frames,
+};
 use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
 use super::title_markup;
 use super::{MediaFilter, Sidebar, UiState};
 use crate::media::preview::StoryboardKey;
 use crate::media::{Media, MediaKind};
+use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, VideoCodec};
 use crate::project::{Command, Project};
 use crate::settings::ThemeMode;
 use crate::timeline::{Clip, ClipContent, Title, TrackKind};
@@ -22,9 +26,11 @@ use creamui::fonts::{FontWeight, HorizontalAlign, LayoutSettings, cached_layout,
 use creamui::widgets::layout::Flex;
 use creamui::widgets::layout::{Align, Grid, Justify, StyleExt};
 use creamui::widgets::{
-    AppTitlebar, Checkbox, ColorPicker, RawScrollView, TextArea, TextController, TextInput,
+    AppTitlebar, Checkbox, ColorPicker, RawButton, RawLink, RawScrollView, TextArea,
+    TextController, TextInput,
 };
-use creamui::{BoxedWidget, Color, GpuFrameSlot, GpuViewport, ImageData, Size, Styled};
+use creamui::{BoxedWidget, Color, GpuFrameSlot, GpuViewport, ImageData, Size, StateStyle, Styled};
+use std::process::Command as ProcessCommand;
 use std::rc::Rc;
 use std::sync::OnceLock;
 
@@ -2070,12 +2076,23 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 } else {
                     accent_button(
                         Some(Glyph::Export),
-                        "Export",
+                        if project.last_export().is_some() {
+                            "Export again"
+                        } else {
+                            "Export"
+                        },
                         !busy && state.sequence_end() > 0,
                         state,
-                        UiState::export_dialog,
+                        UiState::quick_export,
                     )
-                }),
+                })
+                .child(
+                    if project.last_export().is_some() && !state.exporting.get() {
+                        secondary_button(None, "Options…", !busy, state, UiState::export_dialog)
+                    } else {
+                        Box::new(Flex::row().width(0.0)) as BoxedWidget
+                    },
+                ),
         ));
 
     let frame = state.program.position.get();
@@ -2603,75 +2620,969 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             .child(match state.menu.get() {
                 Some(menu) => context_menu(state, menu, viewport),
                 None => Box::new(Flex::row().size(0.0, 0.0)),
+            })
+            .child(if state.export_modal.get() {
+                export_modal(state, project, viewport)
+            } else {
+                Box::new(Flex::row().size(0.0, 0.0)) as BoxedWidget
+            })
+            .child(if state.settings_modal.get() {
+                settings_modal(state, viewport)
+            } else {
+                Box::new(Flex::row().size(0.0, 0.0)) as BoxedWidget
             }),
     )
 }
 
-pub(crate) fn build_settings(state: &UiState, viewport: Size) -> BoxedWidget {
-    state.sync_system_theme();
-    let settings = state.settings.get();
-    let theme = creamui::use_theme();
-    let colors = theme.colors;
-    let options = [
-        ("System", ThemeMode::System),
-        ("Light", ThemeMode::Light),
-        ("Dark", ThemeMode::Dark),
-        ("Midnight", ThemeMode::Midnight),
-    ]
-    .into_iter()
-    .map(|(label, mode)| {
-        chip(label, settings.theme == mode, state, move |state| {
-            state.set_theme_mode(mode)
-        })
-    })
-    .collect::<Vec<_>>();
+fn export_field(
+    label: &str,
+    controller: &TextController,
+    label_width: f32,
+    input_width: f32,
+) -> BoxedWidget {
+    Box::new(
+        Flex::row()
+            .gap(8.0)
+            .align(Align::Center)
+            .child(Box::new(Flex::row().width(label_width).child(text(
+                label,
+                muted(),
+                11.0,
+            ))))
+            .child(input(controller, input_width)),
+    )
+}
+
+fn form_section(title: &str, content: BoxedWidget, width: f32) -> BoxedWidget {
     Box::new(
         Flex::column()
-            .size(viewport.width, viewport.height)
-            .padding(24.0)
-            .gap(16.0)
-            .background(colors.surface)
-            .child(heading("Editor settings", colors.text_primary, 20.0))
-            .child(text("Appearance", colors.text_secondary, 13.0))
-            .child(Box::new(append(Flex::row().gap(6.0), options)))
-            .child(text("Accent color", colors.text_secondary, 13.0))
-            .child(Box::new(append(
-                Flex::column().gap(6.0),
-                creamui::ThemeDefinition::builtin_default()
-                    .accent_presets
-                    .chunks(3)
-                    .map(|row| {
-                        Box::new(append(
-                            Flex::row().gap(6.0),
-                            row.iter()
-                                .map(|preset| {
-                                    let id = preset.id.clone();
-                                    if settings.theme == ThemeMode::System {
-                                        secondary_button(None, &preset.name, false, state, |_| {})
-                                    } else {
-                                        chip(
-                                            &preset.name,
-                                            settings.accent.as_deref().unwrap_or("orange") == id,
-                                            state,
-                                            move |state| state.set_accent(&id),
-                                        )
-                                    }
-                                })
-                                .collect(),
-                        )) as BoxedWidget
-                    })
-                    .collect(),
-            )))
-            .child(text(
-                if settings.theme == ThemeMode::System {
-                    "System theme and accent are provided by CreamUI"
-                } else {
-                    "Changes are saved automatically"
-                },
-                colors.text_secondary,
-                11.0,
+            .width(width)
+            .gap(8.0)
+            .child(heading(title, text_color(), 12.0))
+            .child(Box::new(
+                Flex::row().height(1.0).full_width().background(border()),
+            ))
+            .child(content),
+    )
+}
+
+fn export_tab(
+    label: &str,
+    active: bool,
+    width: f32,
+    state: &UiState,
+    action: impl Fn(&UiState) + 'static,
+) -> BoxedWidget {
+    let state = state.clone();
+    Box::new(
+        Flex::column()
+            .width(width)
+            .gap(3.0)
+            .child(Box::new(
+                RawButton::new(
+                    Style::default()
+                        .flex_row()
+                        .align(Align::Center)
+                        .justify(Justify::Center)
+                        .size(width, 30.0),
+                    move || action(&state),
+                )
+                .with_children(vec![text(
+                    fit(label, width - 12.0, 11.0),
+                    if active { text_color() } else { muted() },
+                    11.0,
+                )])
+                .background(panel_raised())
+                .corner_radius(5.0)
+                .hover_style(StateStyle::new().background(surface_hover()))
+                .focus_style(StateStyle::new().outline(accent(), 2.0)),
+            ))
+            .child(Box::new(
+                Flex::row()
+                    .size(width, 2.0)
+                    .background(if active { accent() } else { border() }),
             )),
     )
+}
+
+fn export_choice(
+    label: &str,
+    selected: bool,
+    width: f32,
+    state: &UiState,
+    action: impl Fn(&UiState) + 'static,
+) -> BoxedWidget {
+    let state = state.clone();
+    Box::new(
+        RawButton::new(
+            Style::default()
+                .flex_row()
+                .align(Align::Center)
+                .gap(7.0)
+                .size(width, 28.0)
+                .padding_xy(8.0, 0.0),
+            move || action(&state),
+        )
+        .with_children(vec![
+            dot(if selected { accent() } else { faint() }, 5.0),
+            text(
+                fit(label, width - 30.0, 11.0),
+                if selected { text_color() } else { muted() },
+                11.0,
+            ),
+        ])
+        .background(if selected { surface() } else { panel_raised() })
+        .corner_radius(5.0)
+        .hover_style(StateStyle::new().background(surface_hover()))
+        .focus_style(StateStyle::new().outline(accent(), 2.0)),
+    )
+}
+
+fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidget {
+    let width = 790.0_f32.min(viewport.width - 16.0);
+    let height = 520.0_f32.min(viewport.height - 16.0);
+    let x = (viewport.width - width) / 2.0;
+    let y = (viewport.height - height) / 2.0;
+    let inner = (width - 48.0).max(180.0);
+    let card_width = inner - 8.0;
+    let field_width = card_width;
+    let label_width = if inner < 360.0 { 84.0 } else { 170.0 };
+    let input_width = if inner < 360.0 { 70.0 } else { 104.0 };
+    let narrow = inner < 360.0;
+    let draft = state.export_draft.get();
+    let page = state.export_page.get();
+    let selected = state.export_preset.get();
+    let mut all = crate::export::presets::builtins(project);
+    all.extend(state.export_library.get().presets);
+    let selected_settings = if selected == "Last used" {
+        project.last_export().map(|last| &last.settings)
+    } else {
+        all.iter()
+            .find(|preset| preset.name == selected)
+            .map(|preset| &preset.settings)
+    };
+    let active = if state
+        .export_form()
+        .ok()
+        .is_some_and(|settings| selected_settings == Some(&settings))
+    {
+        selected
+    } else {
+        "Custom".into()
+    };
+    let preset_columns = if inner < 370.0 { 1 } else { 2 };
+    let preset_rows = all
+        .chunks(preset_columns)
+        .map(|row| {
+            Box::new(append(
+                Flex::row().gap(8.0),
+                row.iter()
+                    .map(|preset| {
+                        let name = preset.name.clone();
+                        export_choice(
+                            &preset.name,
+                            active == name,
+                            (field_width - if preset_columns == 2 { 8.0 } else { 0.0 })
+                                / preset_columns as f32,
+                            state,
+                            move |state| state.select_export_preset(&name),
+                        )
+                    })
+                    .collect(),
+            )) as BoxedWidget
+        })
+        .collect();
+    let formats = [
+        ("MP4", Container::Mp4),
+        ("MKV", Container::Matroska),
+        ("WebM", Container::WebM),
+    ]
+    .into_iter()
+    .map(|(name, container)| {
+        export_choice(
+            name,
+            draft.container == container,
+            if narrow {
+                field_width
+            } else {
+                (field_width - 12.0) / 3.0
+            },
+            state,
+            move |state| state.change_export_codecs(Some(container), None, None),
+        )
+    })
+    .collect();
+    let videos = [
+        ("H.264", VideoCodec::H264),
+        ("HEVC", VideoCodec::Hevc),
+        ("VP9", VideoCodec::Vp9),
+    ]
+    .into_iter()
+    .map(|(name, codec)| {
+        export_choice(
+            name,
+            draft.video_codec == codec,
+            if narrow {
+                field_width
+            } else {
+                (field_width - 12.0) / 3.0
+            },
+            state,
+            move |state| state.change_export_codecs(None, Some(codec), None),
+        )
+    })
+    .collect();
+    let audios = [("AAC", AudioCodec::Aac), ("Opus", AudioCodec::Opus)]
+        .into_iter()
+        .map(|(name, codec)| {
+            export_choice(
+                name,
+                draft.audio_codec == codec,
+                if narrow {
+                    field_width
+                } else {
+                    (field_width - 6.0) / 2.0
+                },
+                state,
+                move |state| state.change_export_codecs(None, None, Some(codec)),
+            )
+        })
+        .collect();
+    let body: BoxedWidget = match page {
+        ExportPage::Presets => Box::new(
+            Flex::column()
+                .width(inner)
+                .gap(16.0)
+                .child(form_section(
+                    "Choose a profile",
+                    Box::new(append(Flex::column().gap(6.0), preset_rows)),
+                    card_width,
+                ))
+                .child(text(format!("Selected: {active}"), muted(), 11.0))
+                .child(form_section(
+                    "Save a global preset",
+                    Box::new(
+                        if narrow { Flex::column() } else { Flex::row() }
+                            .gap(8.0)
+                            .child(Box::new(
+                                TextInput::controlled(&state.export_name)
+                                    .width(if narrow {
+                                        card_width
+                                    } else {
+                                        card_width - 138.0
+                                    })
+                                    .height(30.0)
+                                    .placeholder("Preset name"),
+                            ))
+                            .child(secondary_button(
+                                Some(Glyph::Save),
+                                "Save preset",
+                                !state.busy.get() && state.export_presets_ready.get(),
+                                state,
+                                UiState::save_export_preset,
+                            )),
+                    ),
+                    card_width,
+                )),
+        ),
+        ExportPage::Video => Box::new(
+            Flex::column()
+                .width(inner)
+                .gap(16.0)
+                .child(form_section(
+                    "Format",
+                    Box::new(
+                        Flex::column()
+                            .gap(8.0)
+                            .child(heading("Container", muted(), 11.0))
+                            .child(Box::new(append(
+                                if narrow { Flex::column() } else { Flex::row() }.gap(6.0),
+                                formats,
+                            )))
+                            .child(heading("Video codec", muted(), 11.0))
+                            .child(Box::new(append(
+                                if narrow { Flex::column() } else { Flex::row() }.gap(6.0),
+                                videos,
+                            ))),
+                    ),
+                    card_width,
+                ))
+                .child(form_section(
+                    "Output dimensions and frame rate",
+                    Box::new(
+                        Flex::column()
+                            .gap(9.0)
+                            .child(export_field(
+                                "Width (pixels)",
+                                &state.export_width,
+                                label_width,
+                                input_width,
+                            ))
+                            .child(export_field(
+                                "Height (pixels)",
+                                &state.export_height,
+                                label_width,
+                                input_width,
+                            ))
+                            .child(if narrow {
+                                Box::new(
+                                    Flex::column()
+                                        .gap(6.0)
+                                        .child(text("FPS (num / den)", muted(), 11.0))
+                                        .child(Box::new(
+                                            Flex::row()
+                                                .gap(8.0)
+                                                .align(Align::Center)
+                                                .child(input(&state.export_fps_num, 80.0))
+                                                .child(text("/", muted(), 12.0))
+                                                .child(input(&state.export_fps_den, 80.0)),
+                                        )),
+                                ) as BoxedWidget
+                            } else {
+                                Box::new(
+                                    Flex::row()
+                                        .gap(8.0)
+                                        .align(Align::Center)
+                                        .child(Box::new(
+                                            Flex::row().width(label_width).child(text(
+                                                "FPS (num / den)",
+                                                muted(),
+                                                11.0,
+                                            )),
+                                        ))
+                                        .child(input(&state.export_fps_num, 70.0))
+                                        .child(text("/", muted(), 12.0))
+                                        .child(input(&state.export_fps_den, 70.0)),
+                                )
+                            }),
+                    ),
+                    card_width,
+                ))
+                .child(form_section(
+                    "Quality and speed",
+                    Box::new(
+                        Flex::column()
+                            .gap(9.0)
+                            .child(Box::new(append(
+                                if narrow { Flex::column() } else { Flex::row() }.gap(6.0),
+                                vec![
+                                    export_choice(
+                                        "Target bitrate",
+                                        draft.video_quality.is_none(),
+                                        if narrow {
+                                            field_width
+                                        } else {
+                                            (field_width - 6.0) / 2.0
+                                        },
+                                        state,
+                                        |s| s.set_export_quality_mode(false),
+                                    ),
+                                    export_choice(
+                                        "Constant quality",
+                                        draft.video_quality.is_some(),
+                                        if narrow {
+                                            field_width
+                                        } else {
+                                            (field_width - 6.0) / 2.0
+                                        },
+                                        state,
+                                        |s| s.set_export_quality_mode(true),
+                                    ),
+                                ],
+                            )))
+                            .child(if draft.video_quality.is_some() {
+                                export_field(
+                                    "Quality (CRF)",
+                                    &state.export_quality,
+                                    label_width,
+                                    input_width,
+                                )
+                            } else {
+                                export_field(
+                                    "Video (kbps)",
+                                    &state.export_video_bitrate,
+                                    label_width,
+                                    input_width,
+                                )
+                            })
+                            .child(if draft.video_quality.is_some() {
+                                text("CRF: 0–51 (H.264/HEVC), 0–63 (VP9)", faint(), 10.0)
+                            } else {
+                                Box::new(Flex::row().size(0.0, 0.0))
+                            })
+                            .child(heading("Encoder speed", muted(), 11.0))
+                            .child(Box::new(append(
+                                if narrow { Flex::column() } else { Flex::row() }.gap(6.0),
+                                [
+                                    ("Fast", EncodingSpeed::Fast),
+                                    ("Balanced", EncodingSpeed::Balanced),
+                                    ("Quality", EncodingSpeed::Quality),
+                                ]
+                                .into_iter()
+                                .map(|(name, speed)| {
+                                    export_choice(
+                                        name,
+                                        draft.speed == speed,
+                                        if narrow {
+                                            field_width
+                                        } else {
+                                            (field_width - 12.0) / 3.0
+                                        },
+                                        state,
+                                        move |s| s.set_export_speed(speed),
+                                    )
+                                })
+                                .collect(),
+                            ))),
+                    ),
+                    card_width,
+                )),
+        ),
+        ExportPage::Audio => Box::new(
+            Flex::column()
+                .width(inner)
+                .gap(16.0)
+                .child(form_section(
+                    "Audio codec",
+                    Box::new(append(
+                        if narrow { Flex::column() } else { Flex::row() }.gap(6.0),
+                        audios,
+                    )),
+                    card_width,
+                ))
+                .child(form_section(
+                    "Audio bitrate",
+                    export_field(
+                        "Audio (kbps)",
+                        &state.export_audio_bitrate,
+                        label_width,
+                        input_width,
+                    ),
+                    card_width,
+                )),
+        ),
+        ExportPage::Output => Box::new(
+            Flex::column()
+                .width(inner)
+                .gap(16.0)
+                .child(form_section(
+                    "Output file",
+                    Box::new(
+                        Flex::column()
+                            .gap(10.0)
+                            .child(Box::new(
+                                TextInput::controlled(&state.export_path)
+                                    .width(card_width)
+                                    .height(30.0)
+                                    .placeholder("Absolute output path"),
+                            ))
+                            .child(secondary_button(
+                                Some(Glyph::Folder),
+                                "Browse…",
+                                !state.busy.get(),
+                                state,
+                                UiState::browse_export_path,
+                            )),
+                    ),
+                    card_width,
+                ))
+                .child(text(
+                    "Re-export creates a new numbered file.",
+                    faint(),
+                    10.0,
+                )),
+        ),
+    };
+    let tab_width = (inner - 18.0) / 4.0;
+    let tabs = Box::new(append(
+        Flex::row().gap(6.0),
+        [
+            ("Presets", ExportPage::Presets),
+            ("Video", ExportPage::Video),
+            ("Audio", ExportPage::Audio),
+            ("Destination", ExportPage::Output),
+        ]
+        .into_iter()
+        .map(|(label, target)| {
+            export_tab(label, page == target, tab_width, state, move |s| {
+                s.export_scroll.set(0.0);
+                s.export_page.set(target);
+            })
+        })
+        .collect(),
+    ));
+    let footer_actions = Box::new(
+        Flex::row()
+            .gap(8.0)
+            .child(spacer())
+            .child(secondary_button(
+                None,
+                "Cancel",
+                true,
+                state,
+                UiState::close_export_dialog,
+            ))
+            .child(accent_button(
+                Some(Glyph::Export),
+                "Export",
+                !state.busy.get(),
+                state,
+                UiState::submit_export,
+            )),
+    );
+    let status = state.status.get();
+    let footer = if narrow {
+        Box::new(
+            Flex::column()
+                .gap(5.0)
+                .child(text(fit(&status, inner, 11.0), muted(), 11.0))
+                .child(footer_actions),
+        ) as BoxedWidget
+    } else {
+        Box::new(
+            Flex::row()
+                .gap(8.0)
+                .align(Align::Center)
+                .child(text(fit(&status, inner - 200.0, 11.0), muted(), 11.0))
+                .child(footer_actions),
+        )
+    };
+    let close = state.clone();
+    Box::new(Layer {
+        style: Layer::at(0.0, 0.0, viewport.width, viewport.height),
+        on_click: Some(Rc::new(move || close.close_export_dialog())),
+        children: vec![
+            Box::new(
+                Flex::row()
+                    .size(viewport.width, viewport.height)
+                    .background(Color::rgba(0, 0, 0, 180)),
+            ),
+            Box::new(Layer {
+                style: Layer::at(x, y, width, height),
+                on_click: Some(Rc::new(|| {})),
+                children: vec![Box::new(
+                    Flex::column()
+                        .size(width, height)
+                        .padding(20.0)
+                        .background(panel_raised())
+                        .border(border(), 1.0)
+                        .corner_radius(12.0)
+                        .child(Box::new(
+                            Flex::column()
+                                .width(width - 40.0)
+                                .gap(12.0)
+                                .child(Box::new(
+                                    Flex::row()
+                                        .align(Align::Center)
+                                        .child(heading("Export video", text_color(), 18.0))
+                                        .child(spacer())
+                                        .child(icon_button(
+                                            Glyph::Close,
+                                            true,
+                                            state,
+                                            UiState::close_export_dialog,
+                                        )),
+                                ))
+                                .child(tabs)
+                                .child(Box::new(
+                                    Flex::column().grow(1.0).child(Box::new(
+                                        RawScrollView::controlled(
+                                            fill_style(),
+                                            state.export_scroll.clone(),
+                                        )
+                                        .child(body),
+                                    )),
+                                ))
+                                .child(footer),
+                        )),
+                )],
+            }),
+        ],
+    })
+}
+
+fn settings_nav(
+    label: &str,
+    selected: bool,
+    width: f32,
+    state: &UiState,
+    page: SettingsPage,
+) -> BoxedWidget {
+    let state = state.clone();
+    Box::new(
+        RawButton::new(
+            Style::default()
+                .flex_row()
+                .align(Align::Center)
+                .gap(10.0)
+                .size(width, 36.0)
+                .padding_xy(10.0, 0.0),
+            move || {
+                state.settings_scroll.set(0.0);
+                state.settings_page.set(page);
+            },
+        )
+        .with_children(vec![
+            dot(if selected { accent() } else { faint() }, 7.0),
+            text(label, if selected { text_color() } else { muted() }, 12.0),
+        ])
+        .background(if selected {
+            creamui::use_theme().colors.selection_background
+        } else {
+            panel()
+        })
+        .corner_radius(8.0)
+        .hover_style(StateStyle::new().background(surface_hover()))
+        .focus_style(StateStyle::new().outline(accent(), 2.0)),
+    )
+}
+
+fn about_row(label: &str, value: &str, width: f32) -> BoxedWidget {
+    Box::new(
+        Flex::row()
+            .width(width)
+            .height(32.0)
+            .align(Align::Center)
+            .child(text(label, muted(), 11.0))
+            .child(spacer())
+            .child(text(fit(value, width - 100.0, 11.0), text_color(), 11.0)),
+    )
+}
+
+fn open_project_link(url: &'static str, state: &UiState) {
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = ProcessCommand::new("cmd");
+        command.args(["/C", "start", ""]);
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = ProcessCommand::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = ProcessCommand::new("xdg-open");
+    match command.arg(url).spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(error) => state.status.set(format!("Could not open browser: {error}")),
+    }
+}
+
+fn about_settings(state: &UiState, width: f32) -> BoxedWidget {
+    let light = creamui::use_theme().colors.surface.r > 128;
+    let link_color = if light {
+        Color::rgb(16, 94, 190)
+    } else {
+        Color::rgb(91, 173, 255)
+    };
+    let hover_color = if light {
+        Color::rgb(0, 78, 170)
+    } else {
+        Color::rgb(130, 199, 255)
+    };
+    let links = [
+        ("Source code", env!("CARGO_PKG_REPOSITORY")),
+        (
+            "Report an issue",
+            concat!(env!("CARGO_PKG_REPOSITORY"), "/issues"),
+        ),
+        (
+            "Releases",
+            concat!(env!("CARGO_PKG_REPOSITORY"), "/releases"),
+        ),
+    ]
+    .into_iter()
+    .map(|(label, url)| {
+        let state = state.clone();
+        Box::new(
+            Flex::row()
+                .height(28.0)
+                .align(Align::Center)
+                .child(Box::new(
+                    RawLink::new(
+                        Style::default().size(width, 26.0),
+                        label,
+                        link_color,
+                        12.0,
+                        move || open_project_link(url, &state),
+                    )
+                    .hover_color(hover_color)
+                    .focus_style(StateStyle::new().outline(link_color, 2.0)),
+                )),
+        ) as BoxedWidget
+    })
+    .collect();
+    Box::new(
+        Flex::column()
+            .width(width)
+            .gap(16.0)
+            .child(Box::new(
+                Flex::row()
+                    .gap(16.0)
+                    .align(Align::Center)
+                    .child(Box::new(
+                        Flex::row()
+                            .size(56.0, 56.0)
+                            .align(Align::Center)
+                            .justify(Justify::Center)
+                            .background(surface())
+                            .corner_radius(14.0)
+                            .child(Box::new(Logo)),
+                    ))
+                    .child(Box::new(
+                        Flex::column()
+                            .gap(4.0)
+                            .child(heading("Ocus", text_color(), 24.0))
+                            .child(text("Video editor", muted(), 12.0)),
+                    )),
+            ))
+            .child(form_section(
+                "Build",
+                Box::new(
+                    Flex::column()
+                        .child(about_row("Version", env!("CARGO_PKG_VERSION"), width))
+                        .child(about_row("Commit", env!("OCUS_COMMIT"), width))
+                        .child(about_row("Author", env!("CARGO_PKG_AUTHORS"), width)),
+                ),
+                width,
+            ))
+            .child(form_section(
+                "Project",
+                Box::new(append(Flex::column().gap(2.0), links)),
+                width,
+            ))
+            .child(
+                if state.status.get().starts_with("Could not open browser:") {
+                    text(state.status.get(), muted(), 11.0)
+                } else {
+                    Box::new(Flex::row().size(0.0, 0.0))
+                },
+            ),
+    )
+}
+
+fn settings_modal(state: &UiState, viewport: Size) -> BoxedWidget {
+    let settings = state.settings.get();
+    let page = state.settings_page.get();
+    let width = 750.0_f32.min(viewport.width - 24.0);
+    let height = 480.0_f32.min(viewport.height - 24.0);
+    let nav_width = if width < 590.0 { 126.0 } else { 158.0 };
+    let content_width = (width - nav_width - 48.0).max(170.0);
+    let compact = content_width < 360.0;
+    let theme_options = [
+        ("System", "Follow your desktop", ThemeMode::System),
+        ("Light", "Bright workspace", ThemeMode::Light),
+        ("Dark", "Reduced glare", ThemeMode::Dark),
+        ("Midnight", "Deep contrast", ThemeMode::Midnight),
+    ];
+    let theme_rows = theme_options
+        .into_iter()
+        .map(|(name, detail, mode)| {
+            let palette = if mode == ThemeMode::System {
+                creamui::use_theme()
+            } else {
+                crate::settings::Settings {
+                    theme: mode,
+                    accent: None,
+                }
+                .theme()
+            }
+            .colors;
+            let selected = settings.theme == mode;
+            let state = state.clone();
+            Box::new(
+                RawButton::new(
+                    Style::default()
+                        .flex_row()
+                        .align(Align::Center)
+                        .gap(10.0)
+                        .size(content_width, 40.0)
+                        .padding_xy(10.0, 0.0),
+                    move || state.set_theme_mode(mode),
+                )
+                .with_children(vec![
+                    Box::new(
+                        Flex::row()
+                            .size(27.0, 19.0)
+                            .background(palette.surface)
+                            .corner_radius(4.0)
+                            .child(Box::new(
+                                Flex::row().size(8.0, 19.0).background(palette.accent),
+                            )),
+                    ),
+                    heading(name, text_color(), 11.0),
+                    if compact {
+                        Box::new(Flex::row().size(0.0, 0.0))
+                    } else {
+                        text(detail, muted(), 11.0)
+                    },
+                    spacer(),
+                    dot(if selected { accent() } else { faint() }, 6.0),
+                ])
+                .background(if selected { surface() } else { panel_raised() })
+                .corner_radius(6.0)
+                .hover_style(StateStyle::new().background(surface_hover()))
+                .focus_style(StateStyle::new().outline(accent(), 2.0)),
+            ) as BoxedWidget
+        })
+        .collect();
+    let content: BoxedWidget = {
+        let presets = creamui::ThemeDefinition::builtin_default().accent_presets;
+        let columns = if compact { 2 } else { 3 };
+        let tile_width = (content_width - (columns - 1) as f32 * 8.0) / columns as f32;
+        Box::new(
+            Flex::column()
+                .width(content_width)
+                .gap(12.0)
+                .child(heading("Appearance", text_color(), 16.0))
+                .child(Box::new(append(Flex::column().gap(6.0), theme_rows)))
+                .child(heading("Accent color", text_color(), 16.0))
+                .child(if settings.theme == ThemeMode::System {
+                    text("Choose a manual theme to change the accent.", muted(), 11.0)
+                } else {
+                    Box::new(Flex::row().size(0.0, 0.0))
+                })
+                .child(Box::new(append(
+                    Flex::column().gap(8.0),
+                    presets
+                        .chunks(columns)
+                        .map(|row| {
+                            Box::new(append(
+                                Flex::row().gap(8.0),
+                                row.iter()
+                                    .map(|preset| {
+                                        let id = preset.id.clone();
+                                        let selected =
+                                            settings.accent.as_deref().unwrap_or("orange") == id
+                                                && settings.theme != ThemeMode::System;
+                                        let state = state.clone();
+                                        Box::new(
+                                            RawButton::new(
+                                                Style::default()
+                                                    .flex_row()
+                                                    .align(Align::Center)
+                                                    .gap(8.0)
+                                                    .size(tile_width, 36.0)
+                                                    .padding_xy(8.0, 0.0),
+                                                move || state.set_accent(&id),
+                                            )
+                                            .with_children(vec![
+                                                dot(preset.color, 14.0),
+                                                text(
+                                                    fit(&preset.name, tile_width - 36.0, 11.0),
+                                                    text_color(),
+                                                    11.0,
+                                                ),
+                                            ])
+                                            .disabled(settings.theme == ThemeMode::System)
+                                            .background(if selected {
+                                                surface()
+                                            } else {
+                                                panel_raised()
+                                            })
+                                            .corner_radius(6.0)
+                                            .hover_style(
+                                                StateStyle::new().background(surface_hover()),
+                                            )
+                                            .focus_style(StateStyle::new().outline(accent(), 2.0)),
+                                        ) as BoxedWidget
+                                    })
+                                    .collect(),
+                            )) as BoxedWidget
+                        })
+                        .collect(),
+                ))),
+        )
+    };
+    let nav = Box::new(
+        Flex::column()
+            .width(nav_width)
+            .height(height)
+            .gap(6.0)
+            .padding(12.0)
+            .background(panel())
+            .child(heading("OCUS", text_color(), 13.0))
+            .child(Box::new(Flex::row().height(12.0)))
+            .child(heading("SETTINGS", faint(), 10.0))
+            .child(settings_nav(
+                "Appearance",
+                page == SettingsPage::Appearance,
+                nav_width - 24.0,
+                state,
+                SettingsPage::Appearance,
+            ))
+            .child(settings_nav(
+                "About",
+                page == SettingsPage::About,
+                nav_width - 24.0,
+                state,
+                SettingsPage::About,
+            )),
+    );
+    let close = state.clone();
+    Box::new(Layer {
+        style: Layer::at(0.0, 0.0, viewport.width, viewport.height),
+        on_click: Some(Rc::new(move || close.close_settings())),
+        children: vec![
+            Box::new(
+                Flex::row()
+                    .size(viewport.width, viewport.height)
+                    .background(Color::rgba(0, 0, 0, 180)),
+            ),
+            Box::new(Layer {
+                style: Layer::at(
+                    (viewport.width - width) / 2.0,
+                    (viewport.height - height) / 2.0,
+                    width,
+                    height,
+                ),
+                on_click: Some(Rc::new(|| {})),
+                children: vec![Box::new(
+                    Flex::row()
+                        .size(width, height)
+                        .background(panel_raised())
+                        .border(border(), 1.0)
+                        .corner_radius(12.0)
+                        .child(nav)
+                        .child(Box::new(
+                            Flex::column()
+                                .width(width - nav_width)
+                                .gap(12.0)
+                                .padding(20.0)
+                                .child(Box::new(
+                                    Flex::row()
+                                        .align(Align::Center)
+                                        .child(heading("Settings", text_color(), 18.0))
+                                        .child(spacer())
+                                        .child(icon_button(
+                                            Glyph::Close,
+                                            true,
+                                            state,
+                                            UiState::close_settings,
+                                        )),
+                                ))
+                                .child(Box::new(
+                                    Flex::column().grow(1.0).child(Box::new(
+                                        RawScrollView::controlled(
+                                            fill_style(),
+                                            state.settings_scroll.clone(),
+                                        )
+                                        .child(
+                                            if page == SettingsPage::Appearance {
+                                                content
+                                            } else {
+                                                about_settings(state, content_width)
+                                            },
+                                        ),
+                                    )),
+                                )),
+                        )),
+                )],
+            }),
+        ],
+    })
 }
 
 /// The open context menu over a full-window layer that closes it when
@@ -3084,22 +3995,200 @@ mod tests {
             state.settings.peek().theme().colors.accent,
             creamui::Color::rgb(224, 165, 46)
         );
-        let viewport = Size {
-            width: 420.0,
-            height: 310.0,
-        };
+        state.open_settings();
+        assert!(state.settings_modal.peek());
         creamui::reactive::with_context_scope(|| {
-            creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
-                state.settings.peek().theme(),
-            ));
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
             let mut painter = TestPainter::default();
-            Renderer::new().render(build_settings(&state, viewport), viewport, &mut painter);
-            for preset in creamui::ThemeDefinition::builtin_default().accent_presets {
-                assert!(painter.labels.contains(&preset.name));
-            }
+            let viewport = Size {
+                width: 1280.0,
+                height: 760.0,
+            };
+            let scene = Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+            scene.hit_test(Point { x: 650.0, y: 215.0 }).unwrap()();
+            assert!(state.settings_modal.peek());
+            scene.hit_test(Point { x: 8.0, y: 8.0 }).unwrap()();
+            assert!(!state.settings_modal.peek());
         });
+        state.open_settings();
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(
+            painter
+                .fills
+                .iter()
+                .any(|(rect, _)| rect.width >= 640.0 && rect.height >= 460.0)
+        );
+        for label in [
+            "Settings",
+            "Appearance",
+            "Accent color",
+            "System",
+            "Midnight",
+        ] {
+            assert!(painter.labels.iter().any(|item| item == label), "{label}");
+        }
+        assert!(
+            !painter
+                .labels
+                .iter()
+                .any(|item| item == "Changes are saved automatically")
+        );
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let viewport = Size {
+                width: 1280.0,
+                height: 760.0,
+            };
+            let mut painter = TestPainter::default();
+            let scene = Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+            let light = painter
+                .bounds
+                .iter()
+                .rev()
+                .find(|(label, rect)| label == "Light" && rect.x > 360.0)
+                .unwrap()
+                .1;
+            scene
+                .hit_test(Point {
+                    x: light.x - 14.0,
+                    y: light.y + light.height / 2.0,
+                })
+                .expect("theme row must be clickable beyond its text")();
+            assert!(state.settings.peek().theme == ThemeMode::Light);
+            assert!(state.settings_modal.peek());
+        });
+        state.run(Action::AddTitle);
+        assert!(state.editor.borrow().project().tracks()[0].clips.is_empty());
+        let painter = render(&state, 1280.0, 760.0);
+        for preset in creamui::ThemeDefinition::builtin_default().accent_presets {
+            assert!(painter.labels.contains(&preset.name));
+        }
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let viewport = Size {
+                width: 1280.0,
+                height: 760.0,
+            };
+            let mut painter = TestPainter::default();
+            let scene = Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+            let purple = painter
+                .bounds
+                .iter()
+                .rev()
+                .find(|(label, rect)| label == "Purple" && rect.x > 360.0)
+                .unwrap()
+                .1;
+            scene
+                .hit_test(Point {
+                    x: purple.x - 16.0,
+                    y: purple.y + purple.height / 2.0,
+                })
+                .expect("accent row must be clickable beyond its text")();
+            assert_eq!(state.settings.peek().accent.as_deref(), Some("purple"));
+            assert!(state.settings_modal.peek());
+        });
+        let small = render(&state, 420.0, 220.0);
+        assert!(small.labels.iter().any(|label| label == "Settings"));
+        assert!(state.settings_scroll.max_offset() > 0.0);
+        state
+            .settings_scroll
+            .set(state.settings_scroll.max_offset());
+        let painter = render(&state, 420.0, 220.0);
+        assert!(
+            creamui::ThemeDefinition::builtin_default()
+                .accent_presets
+                .iter()
+                .any(|preset| painter.labels.contains(&preset.name))
+        );
+        state.run(Action::Escape);
+        assert!(!state.settings_modal.peek());
+        state.open_settings();
+        assert_eq!(state.settings_scroll.offset(), 0.0);
+        state.close_settings();
         state.set_theme_mode(ThemeMode::System);
         assert!(state.settings.peek().accent.is_none());
+    }
+
+    #[test]
+    fn settings_about_shows_build_metadata_and_clickable_project_links() {
+        let state = UiState::new();
+        state.open_settings();
+        let viewport = Size {
+            width: 1280.0,
+            height: 760.0,
+        };
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let mut painter = TestPainter::default();
+            let scene = Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+            let about = painter
+                .bounds
+                .iter()
+                .find(|(label, _)| label == "About")
+                .unwrap()
+                .1;
+            scene
+                .hit_test(Point {
+                    x: about.x + 2.0,
+                    y: about.y + about.height / 2.0,
+                })
+                .expect("About navigation must be clickable")();
+            assert!(state.settings_modal.peek());
+            assert!(state.settings_page.peek() == SettingsPage::About);
+        });
+        let painter = render(&state, 1280.0, 760.0);
+        for label in [
+            "Ocus",
+            "Version",
+            env!("CARGO_PKG_VERSION"),
+            "Commit",
+            env!("OCUS_COMMIT"),
+            "Author",
+            env!("CARGO_PKG_AUTHORS"),
+            "Source code",
+            "Report an issue",
+            "Releases",
+        ] {
+            assert!(painter.labels.iter().any(|item| item == label), "{label}");
+        }
+        assert!(painter.text_colors.iter().any(|(label, color)| {
+            label == "Source code" && *color == Color::rgb(91, 173, 255)
+        }));
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(
+                creamui::ThemeProvider::new(creamui::Theme::light()),
+            );
+            let mut painter = TestPainter::default();
+            let scene = Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+            assert!(painter.text_colors.iter().any(|(label, color)| {
+                label == "Source code" && *color == Color::rgb(16, 94, 190)
+            }));
+            let appearance = painter
+                .bounds
+                .iter()
+                .find(|(label, rect)| label == "Appearance" && rect.x < 450.0)
+                .unwrap()
+                .1;
+            scene
+                .hit_test(Point {
+                    x: appearance.x + 2.0,
+                    y: appearance.y + appearance.height / 2.0,
+                })
+                .expect("Appearance navigation must be clickable")();
+            assert!(state.settings_page.peek() == SettingsPage::Appearance);
+        });
+        state.settings_page.set(SettingsPage::About);
+        let small = render(&state, 420.0, 260.0);
+        assert!(small.labels.iter().any(|label| label == "Ocus"));
+        assert!(state.settings_scroll.max_offset() > 0.0);
+        state
+            .settings_scroll
+            .set(state.settings_scroll.max_offset());
+        let small = render(&state, 420.0, 260.0);
+        assert!(small.labels.iter().any(|label| label == "Releases"));
+        state.open_settings();
+        assert!(state.settings_page.peek() == SettingsPage::Appearance);
+        assert_eq!(state.settings_scroll.offset(), 0.0);
     }
 
     #[test]
@@ -3469,6 +4558,177 @@ mod tests {
         assert!(!painter.labels.iter().any(|label| label.contains("silent")));
         state.run(Action::Export);
         assert_eq!(state.status.peek(), "Ready · Project not saved");
+    }
+
+    #[test]
+    fn export_modal_shows_presets_and_custom_fields_at_small_window_sizes() {
+        let state = UiState::new();
+        assert!(state.add_title());
+        state.export_dialog();
+        assert!(state.export_modal.peek());
+        let painter = render(&state, 680.0, 480.0);
+        for label in [
+            "Export video",
+            "Full HD 1080p",
+            "HD 720p",
+            "Portrait 9:16",
+            "Video",
+            "Audio",
+            "Destination",
+            "Export",
+        ] {
+            assert!(
+                painter.labels.iter().any(|item| item == label),
+                "missing {label}: {:?}",
+                painter.labels
+            );
+        }
+        let button = painter
+            .bounds
+            .iter()
+            .rev()
+            .find(|(label, _)| label == "Export")
+            .unwrap()
+            .1;
+        assert!(button.y >= 0.0 && button.y + button.height <= 480.0);
+        let narrow = render(&state, 420.0, 480.0);
+        assert!(narrow.labels.iter().any(|label| label == "Presets"));
+        assert!(narrow.labels.iter().any(|label| label == "Export"));
+        assert!(state.export_scroll.max_offset() > 0.0);
+        state.export_scroll.set(state.export_scroll.max_offset());
+        let painter = render(&state, 680.0, 480.0);
+        assert!(painter.labels.iter().any(|label| label == "Save preset"));
+        state.export_page.set(ExportPage::Video);
+        state.export_scroll.set(0.0);
+        let painter = render(&state, 680.0, 480.0);
+        assert!(painter.labels.iter().any(|label| label == "Video codec"));
+        state
+            .export_scroll
+            .set(state.export_scroll.max_offset() / 2.0);
+        let painter = render(&state, 680.0, 480.0);
+        assert!(painter.labels.iter().any(|label| label == "Width (pixels)"));
+        state.export_page.set(ExportPage::Audio);
+        state.export_scroll.set(0.0);
+        let painter = render(&state, 680.0, 480.0);
+        assert!(painter.labels.iter().any(|label| label == "Audio codec"));
+        state.export_scroll.set(state.export_scroll.max_offset());
+        let painter = render(&state, 680.0, 480.0);
+        assert!(painter.labels.iter().any(|label| label == "Audio (kbps)"));
+        state.export_page.set(ExportPage::Output);
+        state.export_scroll.set(0.0);
+        let painter = render(&state, 680.0, 480.0);
+        assert!(painter.labels.iter().any(|label| label == "Browse…"));
+        state.select_export_preset("Portrait 9:16");
+        assert_eq!(state.export_form().unwrap().width, 1080);
+        assert_eq!(state.export_form().unwrap().height, 1920);
+        state.change_export_codecs(Some(Container::WebM), None, None);
+        assert_eq!(state.export_form().unwrap().video_codec, VideoCodec::Vp9);
+        assert_eq!(state.export_form().unwrap().audio_codec, AudioCodec::Opus);
+        assert!(state.export_path.peek().ends_with(".webm"));
+        state.set_export_quality_mode(true);
+        state.export_quality.set_value("34");
+        state.set_export_speed(EncodingSpeed::Balanced);
+        assert_eq!(state.export_form().unwrap().video_quality, Some(34));
+        assert_eq!(state.export_form().unwrap().speed, EncodingSpeed::Balanced);
+        state.export_quality.set_value("invalid");
+        state.set_export_quality_mode(false);
+        assert_eq!(state.export_form().unwrap().video_quality, None);
+        state.export_width.set_value("oops");
+        assert!(state.export_form().is_err());
+        state.run(Action::Escape);
+        assert!(!state.export_modal.peek());
+
+        let mut library = crate::export::presets::PresetLibrary::default();
+        library
+            .insert(
+                "My vertical".into(),
+                crate::export::presets::builtins(state.editor.borrow().project())[3]
+                    .settings
+                    .clone(),
+            )
+            .unwrap();
+        let other_project = UiState::new();
+        other_project.export_library.set(library);
+        assert!(other_project.add_title());
+        other_project.export_dialog();
+        other_project.select_export_preset("My vertical");
+        assert_eq!(other_project.export_form().unwrap().height, 1920);
+        render(&other_project, 680.0, 480.0);
+        other_project
+            .export_scroll
+            .set(other_project.export_scroll.max_offset());
+        assert!(
+            render(&other_project, 680.0, 480.0)
+                .labels
+                .iter()
+                .any(|label| label == "My vertical")
+        );
+    }
+
+    #[test]
+    fn export_dialog_keeps_inside_clicks_and_switches_pages() {
+        let state = UiState::new();
+        assert!(state.add_title());
+        state.export_dialog();
+        let viewport = Size {
+            width: 1280.0,
+            height: 760.0,
+        };
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let mut painter = TestPainter::default();
+            let scene = Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+            scene
+                .hit_test(Point { x: 650.0, y: 140.0 })
+                .expect("modal header must capture pointer")();
+            assert!(state.export_modal.peek());
+            let video = painter
+                .bounds
+                .iter()
+                .rev()
+                .find(|(label, rect)| {
+                    label == "Video" && rect.x > 450.0 && rect.x < 650.0 && rect.y < 250.0
+                })
+                .unwrap()
+                .1;
+            scene
+                .hit_test(Point {
+                    x: video.x + 2.0,
+                    y: video.y + video.height / 2.0,
+                })
+                .expect("video tab must be clickable")();
+            assert!(state.export_modal.peek());
+            assert!(state.export_page.peek() == ExportPage::Video);
+            let mut painter = TestPainter::default();
+            let scene = Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+            let webm = painter
+                .bounds
+                .iter()
+                .rev()
+                .find(|(label, rect)| label == "WebM" && rect.x > 400.0)
+                .unwrap()
+                .1;
+            scene
+                .hit_test(Point {
+                    x: webm.x - 18.0,
+                    y: webm.y + webm.height / 2.0,
+                })
+                .expect("format option must be clickable beyond its text")();
+            assert!(state.export_modal.peek());
+            assert!(state.export_draft.peek().container == Container::WebM);
+            state.export_width.set_value("not a width");
+            assert!(state.export_form().is_err());
+            let mut painter = TestPainter::default();
+            let scene = Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+            scene
+                .hit_test(Point { x: 650.0, y: 140.0 })
+                .expect("empty header must capture pointer")();
+            assert!(state.export_modal.peek());
+            scene
+                .hit_test(Point { x: 8.0, y: 8.0 })
+                .expect("backdrop must close modal")();
+            assert!(!state.export_modal.peek());
+        });
     }
 
     #[test]

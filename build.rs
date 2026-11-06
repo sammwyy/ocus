@@ -1,4 +1,33 @@
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, path::PathBuf, process::Command};
+
+fn git_output(args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(env::var("CARGO_MANIFEST_DIR").ok()?)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|value| value.trim().to_owned())
+}
+
+fn embed_commit() {
+    if let Some(head) = git_output(&["rev-parse", "--git-path", "HEAD"]) {
+        println!("cargo:rerun-if-changed={head}");
+    }
+    if let Some(branch) = git_output(&["symbolic-ref", "-q", "HEAD"])
+        && let Some(reference) = git_output(&["rev-parse", "--git-path", &branch])
+    {
+        println!("cargo:rerun-if-changed={reference}");
+    }
+    let commit = git_output(&["rev-parse", "--verify", "HEAD"])
+        .filter(|hash| hash.len() == 40 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+        .unwrap_or_else(|| "unknown".into());
+    println!("cargo:rustc-env=OCUS_COMMIT={commit}");
+}
 
 fn ffmpeg_bin_dir() -> Option<PathBuf> {
     if let Ok(dir) = env::var("FFMPEG_DIR") {
@@ -28,6 +57,7 @@ fn is_ffmpeg_dll(name: &str) -> bool {
 }
 
 fn main() {
+    embed_commit();
     #[cfg(windows)]
     winres::WindowsResource::new()
         .set_icon("assets/ocus.ico")

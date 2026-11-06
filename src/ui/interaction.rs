@@ -212,6 +212,18 @@ impl UiState {
     }
 
     pub fn run(&self, action: Action) {
+        if self.settings_modal.peek() {
+            if action == Action::Escape {
+                self.close_settings();
+            }
+            return;
+        }
+        if self.export_modal.peek() {
+            if action == Action::Escape {
+                self.close_export_dialog();
+            }
+            return;
+        }
         let busy = self.busy.peek();
         let fps = self.frame_rate();
         let second = (u64::from(fps.0) / u64::from(fps.1.max(1))).max(1);
@@ -273,7 +285,7 @@ impl UiState {
             Action::SaveAs => self.save_as_dialog(),
             Action::Import => self.import_dialog(),
             Action::Export if !self.exporting.peek() && self.sequence_end() > 0 => {
-                self.export_dialog()
+                self.quick_export()
             }
             _ => {}
         }

@@ -1,6 +1,6 @@
 use super::edits::{self, ClipRef};
 use super::interaction::{DragState, Gesture, MenuState};
-use crate::export::{self, ExportControl};
+use crate::export::{self, ExportControl, presets};
 use crate::media::audio::{self, AudioPlan, AudioSource, Clock};
 use crate::media::composite::VisualPlan;
 use crate::media::preview::{
@@ -8,6 +8,9 @@ use crate::media::preview::{
 };
 use crate::media::{Media, MediaKind, MediaProbe, Thumbnail, probe, thumbnail};
 use crate::playback::{self, Session};
+use crate::project::export_settings::{
+    AudioCodec, Container, EncodingSpeed, ExportSettings, LastExport, VideoCodec,
+};
 use crate::project::{Command, Editor, Project, store};
 use crate::settings::{self, Settings, ThemeMode};
 use crate::timeline::{Clip, ClipContent, Title, TrackKind};
@@ -27,6 +30,20 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 pub(crate) enum Sidebar {
     Media,
     Inspector,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExportPage {
+    Presets,
+    Video,
+    Audio,
+    Output,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsPage {
+    Appearance,
+    About,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -128,6 +145,22 @@ pub(crate) struct UiState {
     pub busy: Signal<bool>,
     pub exporting: Signal<bool>,
     pub export_total: Signal<u64>,
+    pub export_modal: Signal<bool>,
+    pub export_page: Signal<ExportPage>,
+    pub export_draft: Signal<ExportSettings>,
+    pub export_preset: Signal<String>,
+    pub export_library: Signal<presets::PresetLibrary>,
+    pub export_presets_ready: Signal<bool>,
+    pub export_path: TextController,
+    pub export_name: TextController,
+    pub export_width: TextController,
+    pub export_height: TextController,
+    pub export_fps_num: TextController,
+    pub export_fps_den: TextController,
+    pub export_video_bitrate: TextController,
+    pub export_audio_bitrate: TextController,
+    pub export_quality: TextController,
+    pub export_scroll: ScrollController,
     pub thumbnails: Rc<RefCell<HashMap<PathBuf, Arc<RgbaImage>>>>,
     pub storyboards: Rc<RefCell<HashMap<StoryboardKey, Storyboard>>>,
     pub media_scroll: ScrollController,
@@ -148,11 +181,12 @@ pub(crate) struct UiState {
     pub menu: Signal<Option<MenuState>>,
     pub pointer: Rc<Cell<Point>>,
     pub sidebar: Signal<Sidebar>,
+    pub settings_modal: Signal<bool>,
+    pub settings_page: Signal<SettingsPage>,
+    pub settings_scroll: ScrollController,
     pub settings: Signal<Settings>,
     app: Rc<RefCell<Option<AppHandle>>>,
     window: Rc<RefCell<Option<WindowHandle>>>,
-    settings_window: Rc<RefCell<Option<WindowHandle>>>,
-    settings_open: Rc<Cell<bool>>,
     settings_serial: Arc<AtomicU64>,
     settings_write: Arc<Mutex<()>>,
     storyboard_cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
@@ -193,6 +227,29 @@ impl UiState {
             busy: Signal::new(false),
             exporting: Signal::new(false),
             export_total: Signal::new(0),
+            export_modal: Signal::new(false),
+            export_page: Signal::new(ExportPage::Presets),
+            export_draft: Signal::new(ExportSettings::for_project(
+                1920,
+                1080,
+                crate::project::FrameRate {
+                    numerator: 30,
+                    denominator: 1,
+                },
+            )),
+            export_preset: Signal::new("Project original".into()),
+            export_library: Signal::new(presets::PresetLibrary::default()),
+            export_presets_ready: Signal::new(false),
+            export_path: TextController::default(),
+            export_name: TextController::default(),
+            export_width: TextController::default(),
+            export_height: TextController::default(),
+            export_fps_num: TextController::default(),
+            export_fps_den: TextController::default(),
+            export_video_bitrate: TextController::default(),
+            export_audio_bitrate: TextController::default(),
+            export_quality: TextController::default(),
+            export_scroll: ScrollController::default(),
             thumbnails: Rc::new(RefCell::new(HashMap::new())),
             storyboards: Rc::new(RefCell::new(HashMap::new())),
             media_scroll: ScrollController::default(),
@@ -211,11 +268,12 @@ impl UiState {
             menu: Signal::new(None),
             pointer: Rc::new(Cell::new(Point::default())),
             sidebar: Signal::new(Sidebar::Media),
+            settings_modal: Signal::new(false),
+            settings_page: Signal::new(SettingsPage::Appearance),
+            settings_scroll: ScrollController::default(),
             settings: Signal::new(settings),
             app: Rc::new(RefCell::new(None)),
             window: Rc::new(RefCell::new(None)),
-            settings_window: Rc::new(RefCell::new(None)),
-            settings_open: Rc::new(Cell::new(false)),
             settings_serial: Arc::new(AtomicU64::new(0)),
             settings_write: Arc::new(Mutex::new(())),
             storyboard_cancel: Rc::new(RefCell::new(None)),
@@ -227,7 +285,22 @@ impl UiState {
     }
 
     pub fn connect(&self, app: AppHandle) {
-        *self.app.borrow_mut() = Some(app);
+        *self.app.borrow_mut() = Some(app.clone());
+        if let Some(path) = presets::path() {
+            let state = self.clone();
+            app.spawn_background(
+                move || presets::load(&path),
+                move |result| match result {
+                    Ok(library) => {
+                        state.export_library.set(library);
+                        state.export_presets_ready.set(true);
+                    }
+                    Err(error) => state
+                        .status
+                        .set(format!("Could not load export presets: {error}")),
+                },
+            );
+        }
     }
 
     pub fn connect_window(&self, window: WindowHandle) {
@@ -236,10 +309,6 @@ impl UiState {
         *self.window.borrow_mut() = Some(window);
         self.request_preview();
         self.request_source_preview();
-    }
-
-    pub fn settings_window(&self) -> Option<WindowHandle> {
-        self.settings_window.borrow().clone()
     }
 
     fn update_settings(&self, settings: Settings) {
@@ -251,13 +320,10 @@ impl UiState {
             return;
         }
         self.settings.set(settings.clone());
-        if settings.theme != ThemeMode::System {
-            if let Some(window) = self.window.borrow().as_ref() {
-                window.set_theme(settings.theme());
-            }
-            if let Some(window) = self.settings_window.borrow().as_ref() {
-                window.set_theme(settings.theme());
-            }
+        if settings.theme != ThemeMode::System
+            && let Some(window) = self.window.borrow().as_ref()
+        {
+            window.set_theme(settings.theme());
         }
         if let (Some(app), Some(path)) = (self.app.borrow().as_ref(), settings::path()) {
             let state = self.clone();
@@ -301,59 +367,31 @@ impl UiState {
     }
 
     pub fn sync_system_theme(&self) {
-        if self.settings.get().theme != ThemeMode::System
-            || (self.window.borrow().is_none() && self.settings_window.borrow().is_none())
-        {
+        if self.settings.get().theme != ThemeMode::System || self.window.borrow().is_none() {
             return;
         }
         let appearance = creamui::use_system_appearance().get();
         if let Ok(resolved) =
             creamui::theme_loader::SystemThemeLoader::new().load_with_system(&appearance)
+            && let Some(window) = self.window.borrow().as_ref()
+            && window.theme() != resolved.theme
         {
-            let main = self.window.borrow();
-            let preferences = self.settings_window.borrow();
-            for window in [main.as_ref(), preferences.as_ref()].into_iter().flatten() {
-                if window.theme() != resolved.theme {
-                    window.set_theme(resolved.theme);
-                }
-            }
+            window.set_theme(resolved.theme);
         }
     }
 
     pub fn open_settings(&self) {
-        if self.settings_open.get() {
+        if self.export_modal.peek() {
             return;
         }
-        let Some(app) = self.app.borrow().as_ref().cloned() else {
-            return;
-        };
-        self.settings_open.set(true);
-        let ready = self.clone();
-        let content = self.clone();
-        let theme = self.settings.peek().theme();
-        app.append_window(
-            creamui::WindowOptions {
-                title: "Ocus settings".into(),
-                width: 420,
-                height: 310,
-                theme,
-                ..Default::default()
-            },
-            theme.colors.surface,
-            move |window| {
-                if ready.settings.peek().theme != ThemeMode::System {
-                    window.set_theme(ready.settings.peek().theme());
-                }
-                *ready.settings_window.borrow_mut() = Some(window.clone());
-                let state = ready.clone();
-                window.on_close_requested(move || {
-                    *state.settings_window.borrow_mut() = None;
-                    state.settings_open.set(false);
-                    true
-                });
-            },
-            move |viewport| super::window::build_settings(&content, viewport),
-        );
+        self.close_menu();
+        self.settings_scroll.set(0.0);
+        self.settings_page.set(SettingsPage::Appearance);
+        self.settings_modal.set(true);
+    }
+
+    pub fn close_settings(&self) {
+        self.settings_modal.set(false);
     }
 
     fn refresh_after_edit(&self, status: &str) {
@@ -1151,6 +1189,7 @@ impl UiState {
             return;
         }
         *self.editor.borrow_mut() = Editor::new(Project::new("Untitled"));
+        self.export_modal.set(false);
         self.project_path.set(None);
         self.thumbnails.borrow_mut().clear();
         self.cancel_storyboards();
@@ -1206,6 +1245,7 @@ impl UiState {
                             .take(MAX_THUMBNAILS)
                             .collect();
                         *state.editor.borrow_mut() = Editor::new(project);
+                        state.export_modal.set(false);
                         state.thumbnails.borrow_mut().clear();
                         state.cancel_storyboards();
                         state.storyboards.borrow_mut().clear();
@@ -1299,6 +1339,10 @@ impl UiState {
     }
 
     pub fn save_to(&self, path: PathBuf) {
+        self.save_to_with_export(path, None);
+    }
+
+    fn save_to_with_export(&self, path: PathBuf, exported: Option<PathBuf>) {
         let Some(app) = self.app.borrow().clone() else {
             return;
         };
@@ -1321,10 +1365,21 @@ impl UiState {
                     Ok(()) if state.revision.peek() == revision => {
                         state.project_path.set(Some(path));
                         state.dirty.set(false);
-                        "Project saved".into()
+                        exported.map_or_else(
+                            || "Project saved".into(),
+                            |path| format!("Exported: {} · project saved", path.display()),
+                        )
                     }
                     Ok(()) => "Saved previous version · Unsaved changes".into(),
-                    Err(error) => format!("Save failed: {error}"),
+                    Err(error) => exported.map_or_else(
+                        || format!("Save failed: {error}"),
+                        |path| {
+                            format!(
+                                "Exported: {} · project save failed: {error}",
+                                path.display()
+                            )
+                        },
+                    ),
                 });
             },
         );
@@ -1340,82 +1395,412 @@ impl UiState {
     }
 
     pub fn export_dialog(&self) {
-        if self.busy.peek() {
+        if self.busy.peek() || !export::can_render(self.editor.borrow().project()) {
             return;
         }
-        let project = self.editor.borrow().project().clone();
-        if !export::can_render(&project) {
-            self.status.set("Nothing to export".into());
-            return;
-        }
-        let Some(selected) = FileDialog::new()
-            .set_title("Export MP4")
-            .add_filter("MP4 video", &["mp4"])
-            .set_file_name("export")
-            .save_file()
-        else {
-            return;
+        let (settings, path, has_last) = {
+            let editor = self.editor.borrow();
+            let project = editor.project();
+            let last = project.last_export();
+            let settings = last.map_or_else(
+                || {
+                    ExportSettings::for_project(
+                        project.settings().width,
+                        project.settings().height,
+                        project.settings().frame_rate.clone(),
+                    )
+                },
+                |last| last.settings.clone(),
+            );
+            let path = last.map_or_else(
+                || {
+                    self.project_path
+                        .peek()
+                        .and_then(|path| path.parent().map(Path::to_path_buf))
+                        .or_else(|| std::env::current_dir().ok())
+                        .unwrap_or_default()
+                        .join(format!("export.{}", settings.container.extension()))
+                },
+                |last| {
+                    if last.path.is_absolute() {
+                        next_export_path(&last.path)
+                    } else {
+                        self.project_path
+                            .peek()
+                            .and_then(|path| path.parent().map(Path::to_path_buf))
+                            .or_else(|| std::env::current_dir().ok())
+                            .unwrap_or_default()
+                            .join(format!("export.{}", settings.container.extension()))
+                    }
+                },
+            );
+            (settings, path, last.is_some())
         };
-        let path = match selected
+        self.set_export_draft(settings);
+        self.export_preset.set(if has_last {
+            "Last used".into()
+        } else {
+            "Project original".into()
+        });
+        self.export_path
+            .set_value(path.to_string_lossy().into_owned());
+        self.export_name.set_value(String::new());
+        self.export_page.set(ExportPage::Presets);
+        self.export_scroll.set(0.0);
+        self.export_modal.set(true);
+    }
+
+    pub fn close_export_dialog(&self) {
+        self.export_modal.set(false);
+    }
+
+    pub fn set_export_draft(&self, settings: ExportSettings) {
+        self.export_width.set_value(settings.width.to_string());
+        self.export_height.set_value(settings.height.to_string());
+        self.export_fps_num
+            .set_value(settings.frame_rate.numerator.to_string());
+        self.export_fps_den
+            .set_value(settings.frame_rate.denominator.to_string());
+        self.export_video_bitrate
+            .set_value(settings.video_bitrate_kbps.to_string());
+        self.export_audio_bitrate
+            .set_value(settings.audio_bitrate_kbps.to_string());
+        self.export_quality
+            .set_value(settings.video_quality.unwrap_or(23).to_string());
+        let old = self.export_draft.peek().container.extension();
+        let path = self.export_path.peek();
+        if Path::new(&path)
             .extension()
-            .and_then(|extension| extension.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case(old))
+            && settings.container.extension() != old
         {
-            None => selected.with_extension("mp4"),
-            Some(extension) if extension.eq_ignore_ascii_case("mp4") => {
-                if selected
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .is_some_and(|stem| stem.to_ascii_lowercase().ends_with(".mp4"))
-                {
-                    selected.with_extension("")
-                } else {
-                    selected.clone()
-                }
-            }
-            _ => {
-                self.status
-                    .set("Export destination must be an MP4 file".into());
+            self.export_path.set_value(
+                Path::new(&path)
+                    .with_extension(settings.container.extension())
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        self.export_draft.set(settings);
+    }
+
+    pub fn select_export_preset(&self, name: &str) {
+        let selected = {
+            let project = self.editor.borrow();
+            presets::builtins(project.project())
+                .into_iter()
+                .chain(self.export_library.peek().presets)
+                .find(|preset| preset.name == name)
+        };
+        if let Some(preset) = selected {
+            self.set_export_draft(preset.settings);
+            self.export_preset.set(preset.name);
+        }
+    }
+
+    pub fn export_form(&self) -> Result<ExportSettings, String> {
+        self.export_form_for_quality(self.export_draft.peek().video_quality.is_some())
+    }
+
+    fn export_form_for_quality(&self, constant_quality: bool) -> Result<ExportSettings, String> {
+        let mut settings = self.export_draft.peek();
+        let field = |controller: &TextController, label: &str| {
+            controller
+                .peek()
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| format!("Enter a valid {label}"))
+        };
+        settings.width = field(&self.export_width, "width")?;
+        settings.height = field(&self.export_height, "height")?;
+        settings.frame_rate.numerator = field(&self.export_fps_num, "frame rate numerator")?;
+        settings.frame_rate.denominator = field(&self.export_fps_den, "frame rate denominator")?;
+        settings.audio_bitrate_kbps = field(&self.export_audio_bitrate, "audio bitrate")?;
+        if constant_quality {
+            settings.video_quality = Some(
+                u8::try_from(field(&self.export_quality, "CRF quality")?)
+                    .map_err(|_| "CRF quality is out of range")?,
+            );
+        } else {
+            settings.video_quality = None;
+            settings.video_bitrate_kbps = field(&self.export_video_bitrate, "video bitrate")?;
+        }
+        settings.validate()?;
+        Ok(settings)
+    }
+
+    pub fn set_export_quality_mode(&self, constant_quality: bool) {
+        let settings = match self.export_form_for_quality(constant_quality) {
+            Ok(settings) => settings,
+            Err(error) => {
+                self.status.set(error);
                 return;
             }
         };
-        let Some(app) = self.app.borrow().clone() else {
+        self.set_export_draft(settings);
+        self.export_preset.set("Custom".into());
+    }
+
+    pub fn set_export_speed(&self, speed: EncodingSpeed) {
+        let Ok(mut settings) = self.export_form() else {
+            self.status.set("Fix the export fields first".into());
             return;
         };
-        let control = Arc::new(ExportControl::default());
-        self.export_total.set(
-            project
-                .tracks()
-                .iter()
-                .flat_map(|track| &track.clips)
-                .map(|clip| clip.start_frame + clip.duration_frames)
-                .max()
-                .unwrap_or(0),
+        settings.speed = speed;
+        self.set_export_draft(settings);
+        self.export_preset.set("Custom".into());
+    }
+
+    pub fn change_export_codecs(
+        &self,
+        container: Option<Container>,
+        video: Option<VideoCodec>,
+        audio: Option<AudioCodec>,
+    ) {
+        let Ok(mut settings) = self.export_form() else {
+            self.status
+                .set("Fix the numeric export fields first".into());
+            return;
+        };
+        if let Some(container) = container {
+            settings.container = container;
+            match container {
+                Container::Mp4 => {
+                    if settings.video_codec == VideoCodec::Vp9 {
+                        settings.video_codec = VideoCodec::H264;
+                    }
+                    settings.audio_codec = AudioCodec::Aac;
+                }
+                Container::WebM => {
+                    settings.video_codec = VideoCodec::Vp9;
+                    settings.audio_codec = AudioCodec::Opus;
+                }
+                Container::Matroska => {}
+            }
+        }
+        if let Some(video) = video {
+            settings.video_codec = video;
+            if settings.container == Container::WebM && video != VideoCodec::Vp9
+                || settings.container == Container::Mp4 && video == VideoCodec::Vp9
+            {
+                settings.container = Container::Matroska;
+            }
+        }
+        if let Some(audio) = audio {
+            settings.audio_codec = audio;
+            if settings.container == Container::WebM && audio != AudioCodec::Opus
+                || settings.container == Container::Mp4 && audio == AudioCodec::Opus
+            {
+                settings.container = Container::Matroska;
+            }
+        }
+        if let Some(quality) = &mut settings.video_quality {
+            *quality = (*quality).min(if settings.video_codec == VideoCodec::Vp9 {
+                63
+            } else {
+                51
+            });
+        }
+        self.set_export_draft(settings);
+        self.export_preset.set("Custom".into());
+    }
+
+    pub fn browse_export_path(&self) {
+        let settings = self.export_draft.peek();
+        let path = PathBuf::from(self.export_path.peek());
+        let mut dialog = FileDialog::new()
+            .set_title("Export video")
+            .add_filter("Video", &[settings.container.extension()])
+            .set_file_name(
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("export"),
+            );
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            dialog = dialog.set_directory(parent);
+        }
+        if let Some(selected) = dialog.save_file() {
+            self.export_path.set_value(
+                selected
+                    .with_extension(settings.container.extension())
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+
+    pub fn save_export_preset(&self) {
+        if !self.export_presets_ready.peek() {
+            self.status
+                .set("Preset library is not ready; check the config file".into());
+            return;
+        }
+        let settings = match self.export_form() {
+            Ok(settings) => settings,
+            Err(error) => {
+                self.status.set(error);
+                return;
+            }
+        };
+        let mut library = self.export_library.peek();
+        let name = self.export_name.peek().trim().to_owned();
+        if presets::builtins(self.editor.borrow().project())
+            .iter()
+            .any(|preset| preset.name.eq_ignore_ascii_case(&name))
+        {
+            self.status
+                .set("That name belongs to a built-in preset".into());
+            return;
+        }
+        if let Err(error) = library.insert(name.clone(), settings.clone()) {
+            self.status.set(error);
+            return;
+        }
+        let (Some(app), Some(path)) = (self.app.borrow().as_ref().cloned(), presets::path()) else {
+            self.status.set("Preset folder is not available".into());
+            return;
+        };
+        self.busy.set(true);
+        let state = self.clone();
+        let save_name = name.clone();
+        app.spawn_background(
+            move || -> Result<presets::PresetLibrary, String> {
+                let mut library = presets::load(&path)?;
+                library.insert(save_name, settings)?;
+                presets::save(&path, &library)?;
+                Ok(library)
+            },
+            move |result| {
+                state.busy.set(false);
+                match result {
+                    Ok(library) => {
+                        state.export_library.set(library);
+                        state.export_preset.set(name);
+                        state.export_name.set_value(String::new());
+                        state
+                            .status
+                            .set("Export preset saved for all projects".into());
+                    }
+                    Err(error) => state.status.set(format!("Could not save preset: {error}")),
+                }
+            },
         );
+    }
+
+    pub fn submit_export(&self) {
+        let settings = match self.export_form() {
+            Ok(settings) => settings,
+            Err(error) => {
+                self.status.set(error);
+                return;
+            }
+        };
+        let mut path = PathBuf::from(self.export_path.peek().trim());
+        if !path.is_absolute() {
+            self.status.set("Choose an absolute output path".into());
+            return;
+        }
+        if path.extension().is_none() {
+            path.set_extension(settings.container.extension());
+        }
+        self.start_export(path, settings, false);
+    }
+
+    pub fn quick_export(&self) {
+        if self.busy.peek() {
+            return;
+        }
+        let last = self.editor.borrow().project().last_export().cloned();
+        if let Some(last) = last.filter(|last| last.path.is_absolute()) {
+            self.start_export(next_export_path(&last.path), last.settings, true);
+        } else {
+            self.export_dialog();
+        }
+    }
+
+    fn start_export(&self, path: PathBuf, settings: ExportSettings, quick: bool) {
+        if self.busy.peek() || !export::can_render(self.editor.borrow().project()) {
+            return;
+        }
+        let last = LastExport {
+            settings: settings.clone(),
+            path: path.clone(),
+        };
+        if let Err(error) = last.validate() {
+            self.status.set(error);
+            return;
+        }
+        let Some(app) = self.app.borrow().clone() else {
+            self.status.set("Export requires a running app".into());
+            return;
+        };
+        let project = self.editor.borrow().project().clone();
+        let project_path = self.project_path.peek();
+        let was_modal = self.export_modal.peek();
+        let control = Arc::new(ExportControl::default());
+        let end = self.sequence_end();
+        let fps = &project.settings().frame_rate;
+        self.export_total.set(
+            export::output_frames(
+                end,
+                (fps.numerator, fps.denominator),
+                (
+                    settings.frame_rate.numerator,
+                    settings.frame_rate.denominator,
+                ),
+            )
+            .unwrap_or(0),
+        );
+        self.export_modal.set(false);
         *self.export_control.borrow_mut() = Some(control.clone());
         self.exporting.set(true);
         self.busy.set(true);
-        self.status.set("Encoding MP4…".into());
+        self.status
+            .set(format!("Encoding {}…", settings.container.extension()));
         let state = self.clone();
         app.spawn_background(
             move || {
-                if path != selected && path.exists() {
-                    return (
-                        path,
-                        Err(
-                            "Destination exists under the corrected .mp4 name; choose another name"
-                                .into(),
-                        ),
-                    );
-                }
-                let result = export::render_with_control(&project, &path, control);
-                (path, result)
+                let destination = if quick {
+                    unused_export_path(path)
+                } else {
+                    path
+                };
+                let result =
+                    export::render_with_settings(&project, &destination, &settings, control);
+                (destination, settings, result)
             },
-            move |(path, result)| {
+            move |(path, settings, result)| {
                 state.exporting.set(false);
                 state.export_control.borrow_mut().take();
                 state.busy.set(false);
+                if result
+                    .as_ref()
+                    .is_err_and(|error| error != "Export cancelled")
+                    && was_modal
+                {
+                    state.export_modal.set(true);
+                }
                 state.status.set(match result {
-                    Ok(()) => format!("MP4 exported: {}", path.display()),
+                    Ok(()) => {
+                        state.edit(Command::SetLastExport(Some(LastExport {
+                            settings,
+                            path: path.clone(),
+                        })));
+                        if let Some(project_path) = &project_path {
+                            state.save_to_with_export(project_path.clone(), Some(path.clone()));
+                        }
+                        if project_path.is_some() {
+                            format!("Exported: {}", path.display())
+                        } else {
+                            format!(
+                                "Exported: {} · Save project to keep settings",
+                                path.display()
+                            )
+                        }
+                    }
                     Err(ref error) if error == "Export cancelled" => error.clone(),
                     Err(error) => format!("Export failed: {error}"),
                 });
@@ -1691,6 +2076,38 @@ fn upload_preview_frame(window: &WindowHandle, image: FrameImage) -> Result<GpuF
     ))
 }
 
+fn next_export_path(path: &Path) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("export");
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("mp4");
+    let (prefix, next) = stem
+        .rsplit_once('-')
+        .and_then(|(prefix, number)| {
+            number
+                .parse::<u32>()
+                .ok()
+                .and_then(|n| n.checked_add(1))
+                .map(|next| (prefix, next))
+        })
+        .unwrap_or((stem, 2));
+    path.with_file_name(format!("{prefix}-{next}.{extension}"))
+}
+
+fn unused_export_path(mut path: PathBuf) -> PathBuf {
+    for _ in 0..10_000 {
+        if !path.exists() {
+            break;
+        }
+        path = next_export_path(&path);
+    }
+    path
+}
+
 fn project_file(path: PathBuf) -> Result<PathBuf, String> {
     match path.extension().and_then(|extension| extension.to_str()) {
         None => Ok(path.with_extension("ocus")),
@@ -1723,6 +2140,40 @@ fn inspect_source(path: &Path) -> Result<(PathBuf, MediaProbe, Option<Thumbnail>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quick_exports_get_new_numbered_names_without_file_access() {
+        let first = Path::new("/tmp/video.webm");
+        assert_eq!(next_export_path(first), Path::new("/tmp/video-2.webm"));
+        assert_eq!(
+            next_export_path(&next_export_path(first)),
+            Path::new("/tmp/video-3.webm")
+        );
+    }
+
+    #[test]
+    fn quick_export_skips_existing_files_in_background() {
+        let dir = std::env::temp_dir().join(format!(
+            "ocus-quick-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let first = dir.join("video-2.webm");
+        let second = dir.join("video-3.webm");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&second, b"second").unwrap();
+        assert_eq!(unused_export_path(first.clone()), dir.join("video-4.webm"));
+        assert_eq!(std::fs::read(&first).unwrap(), b"first");
+        assert_eq!(std::fs::read(&second).unwrap(), b"second");
+        std::fs::remove_file(first).unwrap();
+        std::fs::remove_file(second).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
     #[test]
     fn reference_import_checks_file_and_extension_without_modifying_source() {
         let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");

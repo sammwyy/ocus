@@ -1169,6 +1169,19 @@ fn input(controller: &TextController, width: f32) -> BoxedWidget {
     Box::new(TextInput::controlled(controller).width(width).height(30.0))
 }
 
+fn title_input(
+    controller: &TextController,
+    width: f32,
+    state: &UiState,
+    apply: fn(&UiState),
+) -> TextInput {
+    let state = state.clone();
+    TextInput::controlled(controller)
+        .width(width)
+        .height(30.0)
+        .on_submit(move || apply(&state))
+}
+
 /// The inspector for several selected clips: a summary, the actions that
 /// apply to all of them and the list of clips.
 fn selection_rows(state: &UiState, project: &Project, inner: f32) -> Vec<BoxedWidget> {
@@ -1545,7 +1558,12 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 "Title",
                 vec![
                     text("Duration (seconds)", muted(), 11.0),
-                    input(&state.title_duration, inner),
+                    Box::new(title_input(
+                        &state.title_duration,
+                        inner,
+                        state,
+                        set_title_duration,
+                    )),
                     inline(secondary_button(
                         None,
                         "Apply duration",
@@ -1568,9 +1586,19 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         set_title_text,
                     )),
                     text("Font family", muted(), 11.0),
-                    input(&state.title_font, inner),
+                    Box::new(title_input(
+                        &state.title_font,
+                        inner,
+                        state,
+                        apply_title_style,
+                    )),
                     text("Font size (px)", muted(), 11.0),
-                    input(&state.title_size, inner),
+                    Box::new(title_input(
+                        &state.title_size,
+                        inner,
+                        state,
+                        apply_title_style,
+                    )),
                     text("Color (#RRGGBB or #RRGGBBAA)", muted(), 11.0),
                     Box::new(
                         ColorPicker::controlled(
@@ -1595,7 +1623,12 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         )
                         .width(inner),
                     ),
-                    input(&state.title_color, inner),
+                    Box::new(title_input(
+                        &state.title_color,
+                        inner,
+                        state,
+                        apply_title_style,
+                    )),
                     inline(secondary_button(
                         None,
                         "Apply style",
@@ -4213,6 +4246,67 @@ mod tests {
             .iter()
             .any(|clip| matches!(&clip.content, ClipContent::Title(title) if title.parse_markdown)));
         assert_eq!(state.title_size.peek(), "92");
+    }
+
+    #[test]
+    fn title_inputs_submit_one_undoable_edit_and_reject_invalid_values() {
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
+                creamui::Theme::dark(),
+            ));
+            let state = UiState::new();
+            assert!(state.add_title());
+            for (controller, value, invalid, apply) in [
+                (
+                    &state.title_duration,
+                    "5",
+                    "",
+                    set_title_duration as fn(&UiState),
+                ),
+                (
+                    &state.title_font,
+                    "Serif",
+                    "",
+                    apply_title_style as fn(&UiState),
+                ),
+                (
+                    &state.title_size,
+                    "180",
+                    "-1",
+                    apply_title_style as fn(&UiState),
+                ),
+                (
+                    &state.title_color,
+                    "#FF0000",
+                    "invalid",
+                    apply_title_style as fn(&UiState),
+                ),
+            ] {
+                let before = selected_clip(&state).unwrap().1;
+                controller.set_value(value);
+                let field = title_input(controller, 180.0, &state, apply);
+                let submit = field.on_key().unwrap();
+                let enter = creamui::core::KeyInput {
+                    key: creamui::core::Key::Enter,
+                    modifiers: Default::default(),
+                };
+                submit(enter);
+                assert_ne!(selected_clip(&state).unwrap().1, before);
+                controller.set_value(invalid);
+                submit(enter);
+                state.undo();
+                assert_eq!(selected_clip(&state).unwrap().1, before);
+            }
+            state.undo();
+            assert!(selected_clip(&state).is_none());
+            state.title_size.set_value("180");
+            let field = title_input(&state.title_size, 180.0, &state, apply_title_style);
+            field.on_key().unwrap()(creamui::core::KeyInput {
+                key: creamui::core::Key::Enter,
+                modifiers: Default::default(),
+            });
+            assert!(selected_clip(&state).is_none());
+        });
     }
 
     #[test]

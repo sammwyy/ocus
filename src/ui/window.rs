@@ -848,15 +848,22 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         })
         .map(|media| {
             let id = media.id;
+            let missing = state.missing_media.get().contains(&id);
             let name = media_name(media);
-            let image = state.thumbnails.borrow().get(&media.path).cloned();
-            let insertable = !busy && media_frames(media, fps).is_some();
+            let image = (!missing)
+                .then(|| state.thumbnails.borrow().get(&media.path).cloned())
+                .flatten();
+            let insertable = !busy && !missing && media_frames(media, fps).is_some();
             let insert = sized_icon_button(Glyph::Plus, 24.0, insertable, false, state, move |s| {
                 s.insert_media(id)
             });
-            let badge = media
-                .duration_us
-                .map(|duration| short_duration(duration as f64 / 1_000_000.0));
+            let badge = if missing {
+                Some("Missing".into())
+            } else {
+                media
+                    .duration_us
+                    .map(|duration| short_duration(duration as f64 / 1_000_000.0))
+            };
             if view == MediaView::Grid {
                 let tile = (inner - 8.0) / 2.0;
                 media_item(
@@ -923,7 +930,15 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                                 .gap(3.0)
                                 .grow(1.0)
                                 .child(text(fit(&name, inner - 120.0, 12.0), text_color(), 12.0))
-                                .child(text(media_details(media), muted(), 10.0)),
+                                .child(text(
+                                    if missing {
+                                        "Missing · Relink to restore".into()
+                                    } else {
+                                        media_details(media)
+                                    },
+                                    muted(),
+                                    10.0,
+                                )),
                         ),
                         insert,
                     ],
@@ -1049,6 +1064,27 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     }),
                 ],
             ),
+            if state.missing_media.get().is_empty() {
+                Box::new(Flex::row())
+            } else {
+                Box::new(
+                    Flex::row()
+                        .align(Align::Center)
+                        .gap(8.0)
+                        .child(text(
+                            format!("{} files missing", state.missing_media.get().len()),
+                            text_color(),
+                            11.0,
+                        ))
+                        .child(accent_button(
+                            Some(Glyph::Locate),
+                            "Relink…",
+                            !busy,
+                            state,
+                            |s| s.relink_dialog(None),
+                        )),
+                )
+            },
             Box::new(
                 TextInput::controlled(&state.media_query)
                     .width(inner)
@@ -1927,6 +1963,9 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                         duration: clip.duration_frames,
                         name: match (&clip.content, media) {
                             (ClipContent::Title(title), _) => title.text.clone(),
+                            (_, Some(media)) if state.missing_media.get().contains(&media.id) => {
+                                format!("Missing source · {}", media_name(media))
+                            }
                             (_, Some(media)) => media_name(media),
                             _ => "Missing source".into(),
                         },
@@ -2105,7 +2144,20 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
     }
     let empty_timeline = project.tracks().iter().all(|track| track.clips.is_empty());
     let first_media = project.media().first();
-    let program_stage: BoxedWidget = if picture && !gpu_preview && titles.is_empty() {
+    let program_stage: BoxedWidget = if state.has_missing_timeline_media() {
+        stage_message(
+            Glyph::Film,
+            "Missing source",
+            "Relink missing media to restore your preview.",
+            Some(accent_button(
+                Some(Glyph::Locate),
+                "Relink media…",
+                !busy,
+                state,
+                |s| s.relink_dialog(None),
+            )),
+        )
+    } else if picture && !gpu_preview && titles.is_empty() {
         stage_message(
             Glyph::Film,
             "Video preview unavailable",

@@ -27,8 +27,9 @@ and ripple-deleting clips. Ripple delete closes the selected clips' time ranges
 across all tracks; a clip spanning a removed range keeps its surviving source
 frames as two clips, and the whole edit is one undo step. **Open** and
 **Save as…** use native file dialogs instead of requiring typed paths;
-**Save** reuses the chosen path. **New** asks before discarding unsaved
-changes. Saves are atomic and file operations run in the background.
+**Save** reuses the chosen path. **New**, **Open** and closing the window
+offer Save, Don't Save or Cancel when there are unsaved changes; Save finishes
+first and the action continues only if it succeeds. Saves are atomic and file operations run in the background.
 **Import** accepts multiple
 files from the native picker and probes video, audio, and images with FFmpeg
 on a worker thread. Video and still-image sources get small, regenerable

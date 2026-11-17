@@ -152,6 +152,86 @@ pub struct Editor {
     redo: Vec<Command>,
 }
 
+pub(crate) fn trim_edge(
+    project: &Project,
+    track_id: u64,
+    clip_id: u64,
+    left: bool,
+    frame: u64,
+) -> Option<Command> {
+    let track = project.tracks().iter().find(|track| track.id == track_id)?;
+    let clip = track.clips.iter().find(|clip| clip.id == clip_id)?;
+    let end = clip.start_frame.checked_add(clip.duration_frames)?;
+    let previous = track
+        .clips
+        .iter()
+        .filter(|other| other.id != clip_id && other.start_frame < clip.start_frame)
+        .map(|other| other.start_frame + other.duration_frames)
+        .max()
+        .unwrap_or(0);
+    let next = track
+        .clips
+        .iter()
+        .filter(|other| other.start_frame > clip.start_frame)
+        .map(|other| other.start_frame)
+        .min()
+        .unwrap_or(u64::MAX);
+    let available = match clip.content {
+        ClipContent::Media { media_id } => project
+            .media()
+            .iter()
+            .find(|media| media.id == media_id)
+            .and_then(|media| {
+                if media.kind == MediaKind::Image {
+                    return None;
+                }
+                media.duration_us.map(|duration| {
+                    (u128::from(duration) * u128::from(project.settings().frame_rate.numerator)
+                        / (1_000_000 * u128::from(project.settings().frame_rate.denominator)))
+                    .min(u128::from(u64::MAX)) as u64
+                })
+            }),
+        _ => None,
+    };
+    let (start_frame, source_start_frame, duration_frames) = if left {
+        let minimum = if matches!(clip.content, ClipContent::Media { .. }) {
+            clip.start_frame.saturating_sub(clip.source_start_frame)
+        } else {
+            0
+        }
+        .max(previous);
+        let start = frame.clamp(minimum, end - 1);
+        let source = if start >= clip.start_frame {
+            clip.source_start_frame
+                .saturating_add(start - clip.start_frame)
+        } else {
+            clip.source_start_frame
+                .saturating_sub(clip.start_frame - start)
+        };
+        (start, source, end - start)
+    } else {
+        let maximum = available
+            .map_or(u64::MAX, |frames| {
+                clip.start_frame
+                    .saturating_add(frames.saturating_sub(clip.source_start_frame))
+            })
+            .min(next);
+        let end = frame.clamp(clip.start_frame + 1, maximum);
+        (
+            clip.start_frame,
+            clip.source_start_frame,
+            end - clip.start_frame,
+        )
+    };
+    Some(Command::Trim {
+        track_id,
+        clip_id,
+        start_frame,
+        source_start_frame,
+        duration_frames,
+    })
+}
+
 impl Editor {
     pub fn new(project: Project) -> Self {
         Self {
@@ -548,6 +628,82 @@ mod tests {
         assert!(!editor.apply(Command::RenameProject("   ".into())));
         assert!(editor.undo());
         assert!(!editor.undo());
+    }
+
+    #[test]
+    fn trim_edges_clamp_to_media_and_neighbours_and_undo_once() {
+        let mut editor = Editor::new(Project::new("Trim"));
+        let rate = &editor.project().settings().frame_rate;
+        let frames = u64::from(rate.numerator) * 10 / u64::from(rate.denominator);
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "/video.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(10_000_000),
+            has_audio: false
+        })));
+        let clip = Clip {
+            id: 1,
+            start_frame: 40,
+            source_start_frame: 20,
+            duration_frames: 30,
+            content: ClipContent::Media { media_id: 1 },
+            volume: 1.0,
+            muted: false,
+            linked_audio: false,
+        };
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 0,
+            clip: clip.clone()
+        }));
+        let planned = |editor: &Editor, left, frame| {
+            super::trim_edge(editor.project(), 0, 1, left, frame).unwrap()
+        };
+        assert_eq!(
+            planned(&editor, true, 0),
+            Command::Trim {
+                track_id: 0,
+                clip_id: 1,
+                start_frame: 20,
+                source_start_frame: 0,
+                duration_frames: 50
+            }
+        );
+        assert_eq!(
+            planned(&editor, false, u64::MAX),
+            Command::Trim {
+                track_id: 0,
+                clip_id: 1,
+                start_frame: 40,
+                source_start_frame: 20,
+                duration_frames: frames - 20
+            }
+        );
+        assert!(editor.apply(planned(&editor, true, u64::MAX)));
+        assert_eq!(editor.project().tracks()[0].clips[0].duration_frames, 1);
+        assert!(editor.undo());
+        assert_eq!(editor.project().tracks()[0].clips[0], clip);
+        assert!(editor.redo());
+        assert!(editor.undo());
+        for (id, start_frame, duration_frames) in [(2, 10, 20), (3, 80, 10)] {
+            assert!(editor.apply(Command::InsertClip {
+                track_id: 0,
+                clip: Clip {
+                    id,
+                    start_frame,
+                    duration_frames,
+                    source_start_frame: 0,
+                    ..clip.clone()
+                }
+            }));
+        }
+        assert!(editor.apply(planned(&editor, true, 0)));
+        assert_eq!(editor.project().tracks()[0].clips[1].start_frame, 30);
+        assert!(editor.undo());
+        assert!(editor.apply(planned(&editor, false, u64::MAX)));
+        assert_eq!(editor.project().tracks()[0].clips[1].duration_frames, 40);
+        assert!(super::trim_edge(editor.project(), 99, 1, false, 0).is_none());
+        assert!(super::trim_edge(editor.project(), 0, 99, false, 0).is_none());
     }
 
     #[test]

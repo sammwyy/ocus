@@ -60,6 +60,18 @@ pub(crate) enum MediaView {
     List,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnsavedChoice {
+    Save,
+    Discard,
+    Cancel,
+}
+
+type AfterSave = Box<dyn FnOnce(&UiState)>;
+
+const SAVE_CHOICE: &str = "Save";
+const DISCARD_CHOICE: &str = "Don't Save";
+const CANCEL_CHOICE: &str = "Cancel";
 const MAX_THUMBNAILS: usize = 256;
 
 fn folder_matches(
@@ -191,6 +203,8 @@ pub(crate) struct UiState {
     pub timeline_expanded: Signal<bool>,
     pub gesture: Rc<RefCell<Gesture>>,
     pub drag: Signal<Option<DragState>>,
+    pub trim_draft: Signal<Option<Command>>,
+    pub trim_hover: Signal<bool>,
     pub marquee: Signal<Option<Rect>>,
     pub timeline_rect: Rc<Cell<Rect>>,
     pub modifiers: Rc<Cell<Modifiers>>,
@@ -279,6 +293,8 @@ impl UiState {
             timeline_expanded: Signal::new(false),
             gesture: Rc::new(RefCell::new(Gesture::Idle)),
             drag: Signal::new(None),
+            trim_draft: Signal::new(None),
+            trim_hover: Signal::new(false),
             marquee: Signal::new(None),
             timeline_rect: Rc::new(Cell::new(Rect::default())),
             modifiers: Rc::new(Cell::new(Modifiers::default())),
@@ -1230,19 +1246,61 @@ impl UiState {
         );
     }
 
-    pub fn confirm_discard(&self) -> bool {
-        !self.dirty.peek()
-            || MessageDialog::new()
+    /// Returns true when the caller may go ahead now. Choosing Save returns
+    /// false and runs `after_save` only once that save succeeds.
+    pub fn settle_unsaved_changes(&self, after_save: impl FnOnce(&Self) + 'static) -> bool {
+        !self.dirty.peek() || self.apply_unsaved_choice(self.ask_unsaved_changes(), after_save)
+    }
+
+    fn ask_unsaved_changes(&self) -> UnsavedChoice {
+        let name = self.project_path.peek().map_or_else(
+            || self.editor.borrow().project().name().to_owned(),
+            |path| {
+                path.file_stem().map_or_else(
+                    || path.display().to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                )
+            },
+        );
+        unsaved_choice(
+            MessageDialog::new()
                 .set_level(MessageLevel::Warning)
                 .set_title("Unsaved changes")
-                .set_description("Discard your unsaved changes?")
-                .set_buttons(MessageButtons::YesNo)
-                .show()
-                == MessageDialogResult::Yes
+                .set_description(format!(
+                    "Save changes to \u{201c}{name}\u{201d}? Changes you don't save will be lost."
+                ))
+                .set_buttons(MessageButtons::YesNoCancelCustom(
+                    SAVE_CHOICE.into(),
+                    DISCARD_CHOICE.into(),
+                    CANCEL_CHOICE.into(),
+                ))
+                .show(),
+        )
+    }
+
+    fn apply_unsaved_choice(
+        &self,
+        choice: UnsavedChoice,
+        after_save: impl FnOnce(&Self) + 'static,
+    ) -> bool {
+        match choice {
+            UnsavedChoice::Discard => true,
+            UnsavedChoice::Cancel => false,
+            UnsavedChoice::Save => {
+                self.save_then(Some(Box::new(after_save)));
+                false
+            }
+        }
+    }
+
+    pub fn close_window(&self) {
+        if let Some(window) = self.window.borrow().as_ref() {
+            window.close();
+        }
     }
 
     pub fn new_project(&self) {
-        if self.busy.peek() || !self.confirm_discard() {
+        if self.busy.peek() || !self.settle_unsaved_changes(Self::new_project) {
             return;
         }
         *self.editor.borrow_mut() = Editor::new(Project::new("Untitled"));
@@ -1269,9 +1327,11 @@ impl UiState {
             .set_title("Open Ocus project")
             .add_filter("Ocus project", &["ocus"])
             .pick_file()
-            && self.confirm_discard()
         {
-            self.load_path(path);
+            let retry = path.clone();
+            if self.settle_unsaved_changes(move |state| state.load_path(retry)) {
+                self.load_path(path);
+            }
         }
     }
 
@@ -1346,14 +1406,22 @@ impl UiState {
     }
 
     pub fn save(&self) {
+        self.save_then(None);
+    }
+
+    fn save_then(&self, after_save: Option<AfterSave>) {
         if let Some(path) = self.project_path.peek() {
-            self.save_to(path);
+            self.save_to(path, after_save);
         } else {
-            self.save_as_dialog();
+            self.save_as_then(after_save);
         }
     }
 
     pub fn save_as_dialog(&self) {
+        self.save_as_then(None);
+    }
+
+    fn save_as_then(&self, after_save: Option<AfterSave>) {
         if self.busy.peek() {
             return;
         }
@@ -1405,19 +1473,24 @@ impl UiState {
                     {
                         return;
                     }
-                    state.save_to(path);
+                    state.save_to(path, after_save);
                 },
             );
             return;
         }
-        self.save_to(path);
+        self.save_to(path, after_save);
     }
 
-    pub fn save_to(&self, path: PathBuf) {
-        self.save_to_with_export(path, None);
+    fn save_to(&self, path: PathBuf, after_save: Option<AfterSave>) {
+        self.save_to_with_export(path, None, after_save);
     }
 
-    fn save_to_with_export(&self, path: PathBuf, exported: Option<PathBuf>) {
+    fn save_to_with_export(
+        &self,
+        path: PathBuf,
+        exported: Option<PathBuf>,
+        after_save: Option<AfterSave>,
+    ) {
         let Some(app) = self.app.borrow().clone() else {
             return;
         };
@@ -1434,30 +1507,43 @@ impl UiState {
                 let path = path.clone();
                 move || store::save(&path, &project)
             },
-            move |result| {
-                state.busy.set(false);
-                state.status.set(match result {
-                    Ok(()) if state.revision.peek() == revision => {
-                        state.project_path.set(Some(path));
-                        state.dirty.set(false);
-                        exported.map_or_else(
-                            || "Project saved".into(),
-                            |path| format!("Exported: {} · project saved", path.display()),
-                        )
-                    }
-                    Ok(()) => "Saved previous version · Unsaved changes".into(),
-                    Err(error) => exported.map_or_else(
-                        || format!("Save failed: {error}"),
-                        |path| {
-                            format!(
-                                "Exported: {} · project save failed: {error}",
-                                path.display()
-                            )
-                        },
-                    ),
-                });
-            },
+            move |result| state.finish_save(path, revision, exported, after_save, result),
         );
+    }
+
+    fn finish_save(
+        &self,
+        path: PathBuf,
+        revision: u64,
+        exported: Option<PathBuf>,
+        after_save: Option<AfterSave>,
+        result: std::io::Result<()>,
+    ) {
+        self.busy.set(false);
+        let saved_current = result.is_ok() && self.revision.peek() == revision;
+        self.status.set(match result {
+            Ok(()) if saved_current => {
+                self.project_path.set(Some(path));
+                self.dirty.set(false);
+                exported.map_or_else(
+                    || "Project saved".into(),
+                    |path| format!("Exported: {} · project saved", path.display()),
+                )
+            }
+            Ok(()) => "Saved previous version · Unsaved changes".into(),
+            Err(error) => exported.map_or_else(
+                || format!("Save failed: {error}"),
+                |path| {
+                    format!(
+                        "Exported: {} · project save failed: {error}",
+                        path.display()
+                    )
+                },
+            ),
+        });
+        if saved_current && let Some(after_save) = after_save {
+            after_save(self);
+        }
     }
 
     pub fn import_dialog(&self) {
@@ -1875,7 +1961,11 @@ impl UiState {
                             path: path.clone(),
                         })));
                         if let Some(project_path) = &project_path {
-                            state.save_to_with_export(project_path.clone(), Some(path.clone()));
+                            state.save_to_with_export(
+                                project_path.clone(),
+                                Some(path.clone()),
+                                None,
+                            );
                         }
                         if project_path.is_some() {
                             format!("Exported: {}", path.display())
@@ -2038,11 +2128,15 @@ impl UiState {
         self.busy.set(true);
         self.status.set(format!("Probing {} files…", paths.len()));
         let state = self.clone();
+        let dialog_app = app.clone();
         app.spawn_background(
             move || {
                 paths
                     .into_iter()
-                    .map(|path| inspect_source(&path))
+                    .map(|path| {
+                        let result = inspect_source(&path);
+                        (path, result)
+                    })
                     .collect::<Vec<_>>()
             },
             move |results| {
@@ -2051,7 +2145,7 @@ impl UiState {
                 let mut imported = 0;
                 let mut ready = Vec::new();
                 let mut errors = Vec::new();
-                for result in results {
+                for (source_path, result) in results {
                     match result {
                         Ok((path, info, thumb)) => {
                             let existing = state
@@ -2092,7 +2186,10 @@ impl UiState {
                                     imported += 1;
                                     ready.push(id);
                                 } else {
-                                    errors.push("Source rejected by project validation".into());
+                                    errors.push((
+                                        source_path,
+                                        "Source rejected by project validation".into(),
+                                    ));
                                 }
                                 if let Some(thumb) = thumb
                                     && state
@@ -2115,21 +2212,12 @@ impl UiState {
                                     }
                                 }
                             } else {
-                                errors.push("Media ID limit reached".to_string());
+                                errors.push((source_path, "Media ID limit reached".into()));
                             }
                         }
-                        Err(error) => errors.push(error),
+                        Err(error) => errors.push((source_path, error)),
                     }
                 }
-                state.status.set(if errors.is_empty() {
-                    format!("{imported} of {total} files imported")
-                } else {
-                    format!(
-                        "{imported} of {total} imported · {} failed: {}",
-                        errors.len(),
-                        errors[0]
-                    )
-                });
                 if let Some((track_id, mut frame)) = placement {
                     for id in ready {
                         let track =
@@ -2142,6 +2230,26 @@ impl UiState {
                             None => break,
                         }
                     }
+                }
+                let summary = import_summary(imported, total, &errors);
+                if errors.is_empty() {
+                    state.status.set(summary);
+                } else {
+                    state.status.set(format!(
+                        "{imported} of {total} files imported · {} failed",
+                        errors.len()
+                    ));
+                    dialog_app.spawn_background(
+                        move || {
+                            MessageDialog::new()
+                                .set_level(MessageLevel::Warning)
+                                .set_title("Import incomplete")
+                                .set_description(&summary)
+                                .set_buttons(MessageButtons::Ok)
+                                .show()
+                        },
+                        |_| {},
+                    );
                 }
             },
         );
@@ -2315,6 +2423,17 @@ fn unused_export_path(mut path: PathBuf) -> PathBuf {
     path
 }
 
+/// Platforms without custom button labels report the Yes/No/Cancel buttons.
+fn unsaved_choice(result: MessageDialogResult) -> UnsavedChoice {
+    match result {
+        MessageDialogResult::Yes => UnsavedChoice::Save,
+        MessageDialogResult::No => UnsavedChoice::Discard,
+        MessageDialogResult::Custom(label) if label == SAVE_CHOICE => UnsavedChoice::Save,
+        MessageDialogResult::Custom(label) if label == DISCARD_CHOICE => UnsavedChoice::Discard,
+        _ => UnsavedChoice::Cancel,
+    }
+}
+
 fn project_file(path: PathBuf) -> Result<PathBuf, String> {
     match path.extension().and_then(|extension| extension.to_str()) {
         None => Ok(path.with_extension("ocus")),
@@ -2342,6 +2461,25 @@ fn inspect_source(path: &Path) -> Result<(PathBuf, MediaProbe, Option<Thumbnail>
         .then(|| thumbnail(&path).ok())
         .flatten();
     Ok((path, info, thumb))
+}
+
+fn import_summary(imported: usize, total: usize, errors: &[(PathBuf, String)]) -> String {
+    if errors.is_empty() {
+        format!("{imported} of {total} files imported")
+    } else {
+        let mut summary = format!("{} of {total} files couldn't be imported:", errors.len());
+        for (path, error) in errors.iter().take(8) {
+            let name = path
+                .file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy();
+            summary.push_str(&format!("\n{name} — {error}"));
+        }
+        if errors.len() > 8 {
+            summary.push_str(&format!("\nand {} more", errors.len() - 8));
+        }
+        summary
+    }
 }
 
 #[cfg(test)]
@@ -2376,6 +2514,47 @@ mod tests {
             vec![(source, folder.join("clip.mp4"))]
         );
     }
+    #[test]
+    fn import_summary_names_each_failed_file() {
+        let errors = vec![
+            (PathBuf::from("/media/notes.txt"), "No media streams".into()),
+            (
+                PathBuf::from("/media/broken.mp4"),
+                "Cannot probe source".into(),
+            ),
+        ];
+        assert_eq!(
+            import_summary(1, 3, &errors),
+            "2 of 3 files couldn't be imported:\nnotes.txt — No media streams\nbroken.mp4 — Cannot probe source"
+        );
+        assert_eq!(
+            import_summary(0, 1, &errors[..1]),
+            "1 of 1 files couldn't be imported:\nnotes.txt — No media streams"
+        );
+    }
+
+    #[test]
+    fn import_summary_handles_success_and_empty_batches() {
+        assert_eq!(import_summary(3, 3, &[]), "3 of 3 files imported");
+        assert_eq!(import_summary(0, 0, &[]), "0 of 0 files imported");
+    }
+
+    #[test]
+    fn import_summary_bounds_long_failure_lists() {
+        let errors: Vec<_> = (0..12)
+            .map(|index| {
+                (
+                    PathBuf::from(format!("clip-{index}.mp4")),
+                    "Invalid data".into(),
+                )
+            })
+            .collect();
+        let summary = import_summary(1, 13, &errors);
+        assert!(summary.contains("clip-7.mp4 — Invalid data"));
+        assert!(!summary.contains("clip-8.mp4"));
+        assert!(summary.ends_with("and 4 more"));
+    }
+
     #[test]
     fn quick_exports_get_new_numbered_names_without_file_access() {
         let first = Path::new("/tmp/video.webm");
@@ -2483,6 +2662,115 @@ mod tests {
             PathBuf::from("cut.ocus")
         );
         assert!(project_file(PathBuf::from("cut.mp4")).is_err());
+    }
+
+    #[test]
+    fn unsaved_dialog_buttons_map_to_save_discard_or_cancel() {
+        for (result, choice) in [
+            (
+                MessageDialogResult::Custom(SAVE_CHOICE.into()),
+                UnsavedChoice::Save,
+            ),
+            (
+                MessageDialogResult::Custom(DISCARD_CHOICE.into()),
+                UnsavedChoice::Discard,
+            ),
+            (
+                MessageDialogResult::Custom(CANCEL_CHOICE.into()),
+                UnsavedChoice::Cancel,
+            ),
+            (MessageDialogResult::Yes, UnsavedChoice::Save),
+            (MessageDialogResult::No, UnsavedChoice::Discard),
+            (MessageDialogResult::Cancel, UnsavedChoice::Cancel),
+        ] {
+            assert_eq!(unsaved_choice(result), choice);
+        }
+    }
+
+    fn dirty_state() -> (UiState, Rc<Cell<u32>>) {
+        let state = UiState::new();
+        state.project_path.set(Some("cut.ocus".into()));
+        state.dirty.set(true);
+        (state, Rc::new(Cell::new(0)))
+    }
+
+    fn counting(runs: &Rc<Cell<u32>>) -> impl FnOnce(&UiState) + 'static {
+        let runs = runs.clone();
+        move |_| runs.set(runs.get() + 1)
+    }
+
+    #[test]
+    fn clean_projects_continue_without_asking() {
+        let state = UiState::new();
+        let runs = Rc::new(Cell::new(0));
+        assert!(state.settle_unsaved_changes(counting(&runs)));
+        assert_eq!(runs.get(), 0);
+    }
+
+    #[test]
+    fn discard_continues_now_and_cancel_keeps_the_changes() {
+        let (state, runs) = dirty_state();
+        assert!(state.apply_unsaved_choice(UnsavedChoice::Discard, counting(&runs)));
+        assert!(!state.apply_unsaved_choice(UnsavedChoice::Cancel, counting(&runs)));
+        assert!(state.dirty.peek());
+        assert_eq!(runs.get(), 0);
+    }
+
+    #[test]
+    fn save_choice_waits_for_the_save_before_continuing() {
+        let (state, runs) = dirty_state();
+        assert!(!state.apply_unsaved_choice(UnsavedChoice::Save, counting(&runs)));
+        assert!(state.dirty.peek());
+        assert_eq!(runs.get(), 0);
+    }
+
+    #[test]
+    fn only_a_successful_save_of_the_current_edit_continues() {
+        let (state, runs) = dirty_state();
+        let path = PathBuf::from("cut.ocus");
+        let failure = std::io::Error::other("disk full");
+        state.finish_save(
+            path.clone(),
+            0,
+            None,
+            Some(Box::new(counting(&runs))),
+            Err(failure),
+        );
+        assert_eq!(runs.get(), 0);
+        assert!(state.dirty.peek());
+        assert_eq!(state.status.peek(), "Save failed: disk full");
+
+        state.revision.set(1);
+        state.finish_save(
+            path.clone(),
+            0,
+            None,
+            Some(Box::new(counting(&runs))),
+            Ok(()),
+        );
+        assert_eq!(runs.get(), 0);
+        assert!(state.dirty.peek());
+
+        state.finish_save(path, 1, None, Some(Box::new(counting(&runs))), Ok(()));
+        assert_eq!(runs.get(), 1);
+        assert!(!state.dirty.peek());
+        assert_eq!(state.status.peek(), "Project saved");
+    }
+
+    #[test]
+    fn saving_before_new_project_resumes_new_project() {
+        let (state, _) = dirty_state();
+        state.focus_frame(600);
+        state.finish_save(
+            "cut.ocus".into(),
+            state.revision.peek(),
+            None,
+            Some(Box::new(UiState::new_project)),
+            Ok(()),
+        );
+        assert_eq!(state.project_path.peek(), None);
+        assert_eq!(state.timeline_start.peek(), 0);
+        assert_eq!(state.status.peek(), "New project · Not saved");
     }
 
     #[test]

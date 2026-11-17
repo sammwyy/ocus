@@ -20,6 +20,10 @@ pub(crate) enum Gesture {
     #[default]
     Idle,
     Scrub,
+    Trim {
+        anchor: ClipRef,
+        left: bool,
+    },
     /// Pressed on a selected clip; becomes a move once the pointer travels.
     /// `click` is the frame to seek to if it is released without moving.
     Clip {
@@ -561,6 +565,7 @@ impl UiState {
 
     pub fn cancel_drag(&self) {
         *self.gesture.borrow_mut() = Gesture::Idle;
+        self.trim_draft.set(None);
         self.drag.set(None);
         self.marquee.set(None);
     }

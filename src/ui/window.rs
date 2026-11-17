@@ -1949,32 +1949,23 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         ));
         rows.push(section(
             "Shortcuts",
-            [
-                ("Space", "Play / pause"),
-                ("← →", "Step a frame (Shift: 1 s)"),
-                ("Ctrl Z / Ctrl Shift Z", "Undo / redo"),
-                ("Delete", "Remove (Shift: ripple)"),
-                ("Ctrl C / X / V / D", "Copy, cut, paste, duplicate"),
-                ("S · Ctrl K", "Split at playhead"),
-                ("Ctrl A · Esc", "Select all · clear"),
-                ("Alt ← →", "Nudge selection"),
-                ("Ctrl + wheel · + −", "Zoom timeline"),
-            ]
-            .into_iter()
-            .map(|(keys, action)| {
-                Box::new(
-                    Flex::row()
-                        .gap(8.0)
-                        .align(Align::Center)
-                        .child(Box::new(Flex::row().width(112.0).child(text(
-                            keys,
-                            text_color(),
-                            10.0,
-                        ))))
-                        .child(text(action, muted(), 10.0)),
-                ) as BoxedWidget
-            })
-            .collect(),
+            super::interaction::shortcut_help()
+                .into_iter()
+                .chain(std::iter::once(("Ctrl + wheel".into(), "Zoom timeline")))
+                .map(|(keys, action)| {
+                    Box::new(
+                        Flex::row()
+                            .gap(8.0)
+                            .align(Align::Center)
+                            .child(Box::new(Flex::row().width(112.0).child(text(
+                                &keys,
+                                text_color(),
+                                10.0,
+                            ))))
+                            .child(text(action, muted(), 10.0)),
+                    ) as BoxedWidget
+                })
+                .collect(),
         ));
     }
     Box::new(

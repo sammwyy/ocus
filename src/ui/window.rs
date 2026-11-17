@@ -1,7 +1,7 @@
 use super::controls::{
-    AUDIO, DragOverlay, ExportMeter, Glyph, IMAGE, Layer, PLAYHEAD, STAGE, Scrubber, TITLE, Thumb,
-    VIDEO, ZoomSlider, accent, accent_button, background, border, chip, faint, fit, glyph, heading,
-    icon_button, kind_color, list_row, media_item, menu_row, muted, panel, panel_raised,
+    AUDIO, DragOverlay, ExportMeter, Glyph, Help, IMAGE, Layer, PLAYHEAD, STAGE, Scrubber, TITLE,
+    Thumb, VIDEO, ZoomSlider, accent, accent_button, background, border, chip, faint, fit, glyph,
+    heading, icon_button, kind_color, list_row, media_item, menu_row, muted, panel, panel_raised,
     play_button, secondary_button, segment, short_duration, sized_icon_button, surface,
     surface_hover, text, text_color, timecode, tool_button,
 };
@@ -786,6 +786,7 @@ impl Widget for ProgramCanvas {
 }
 
 struct Transport {
+    program: bool,
     position: u64,
     end: u64,
     fps: (u32, u32),
@@ -803,6 +804,7 @@ fn transport(
 ) -> Vec<BoxedWidget> {
     let seek = Rc::new(seek);
     let Transport {
+        program,
         position,
         end,
         fps,
@@ -812,9 +814,16 @@ fn transport(
         compact,
     } = info;
     let last = end.saturating_sub(1);
-    let jump = |icon, enabled, target: u64| {
+    let jump = |icon, help, enabled, target: u64| {
         let seek = seek.clone();
-        icon_button(icon, enabled, state, move |state| seek(state, target))
+        icon_button(icon, help, enabled, state, move |state| seek(state, target))
+    };
+    let hint = |source, program_label, shortcut| {
+        if program {
+            Help::new(program_label).shortcut(shortcut)
+        } else {
+            Help::new(source)
+        }
     };
     let scrub_state = state.clone();
     let scrub_seek = seek.clone();
@@ -837,21 +846,47 @@ fn transport(
                 .child(Box::new(append(
                     Flex::row().gap(2.0).align(Align::Center),
                     [
-                        (!compact).then(|| jump(Glyph::ToStart, position > 0, 0)),
+                        (!compact).then(|| {
+                            jump(
+                                Glyph::ToStart,
+                                hint("Go to source start", "Go to sequence start", "Home"),
+                                position > 0,
+                                0,
+                            )
+                        }),
                         Some(jump(
                             Glyph::StepBack,
+                            hint(
+                                "Previous source frame",
+                                "Previous sequence frame",
+                                "Left arrow",
+                            ),
                             position > 0,
                             position.saturating_sub(1),
                         )),
                         Some(Box::new(Flex::row().width(4.0))),
-                        Some(play_button(playing, can_play || playing, state, toggle)),
+                        Some(play_button(
+                            playing,
+                            hint("Play / pause source", "Play / pause sequence", "Space / K"),
+                            can_play || playing,
+                            state,
+                            toggle,
+                        )),
                         Some(Box::new(Flex::row().width(4.0))),
                         Some(jump(
                             Glyph::StepForward,
+                            hint("Next source frame", "Next sequence frame", "Right arrow"),
                             position < last,
                             (position + 1).min(last),
                         )),
-                        (!compact).then(|| jump(Glyph::ToEnd, end > 0 && position < last, last)),
+                        (!compact).then(|| {
+                            jump(
+                                Glyph::ToEnd,
+                                hint("Go to source end", "Go to sequence end", "End"),
+                                end > 0 && position < last,
+                                last,
+                            )
+                        }),
                     ]
                     .into_iter()
                     .flatten()
@@ -945,9 +980,15 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 .then(|| state.thumbnails.borrow().get(&media.path).cloned())
                 .flatten();
             let insertable = !busy && !missing && media_frames(media, fps).is_some();
-            let insert = sized_icon_button(Glyph::Plus, 24.0, insertable, false, state, move |s| {
-                s.insert_media(id)
-            });
+            let insert = sized_icon_button(
+                Glyph::Plus,
+                Help::new("Insert at timeline end").instance(id),
+                24.0,
+                insertable,
+                false,
+                state,
+                move |s| s.insert_media(id),
+            );
             let badge = if missing {
                 Some("Missing".into())
             } else {
@@ -1107,6 +1148,12 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         segment(
             icon,
             label,
+            Help::new(match option {
+                MediaFilter::All => "Show all media",
+                MediaFilter::Video => "Show videos",
+                MediaFilter::Audio => "Show audio",
+                MediaFilter::Image => "Show images",
+            }),
             count_of(kind),
             filter == option,
             state,
@@ -1136,6 +1183,7 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 vec![
                     sized_icon_button(
                         Glyph::Grid,
+                        Help::new("Grid view"),
                         26.0,
                         true,
                         view == MediaView::Grid,
@@ -1144,15 +1192,22 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     ),
                     sized_icon_button(
                         Glyph::List,
+                        Help::new("List view"),
                         26.0,
                         true,
                         view == MediaView::List,
                         state,
                         |s| s.media_view.set(MediaView::List),
                     ),
-                    sized_icon_button(Glyph::Import, 26.0, !busy, false, state, |s| {
-                        s.import_dialog()
-                    }),
+                    sized_icon_button(
+                        Glyph::Import,
+                        Help::new("Import media").shortcut("Ctrl+I"),
+                        26.0,
+                        !busy,
+                        false,
+                        state,
+                        |s| s.import_dialog(),
+                    ),
                 ],
             ),
             if state.missing_media.get().is_empty() {
@@ -1411,6 +1466,7 @@ fn selection_rows(state: &UiState, project: &Project, inner: f32) -> Vec<BoxedWi
                     ))))
                     .child(sized_icon_button(
                         Glyph::Close,
+                        Help::new("Deselect clip").instance(clip_ref.1),
                         22.0,
                         true,
                         false,
@@ -1730,6 +1786,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                             .child(spacer())
                             .child(sized_icon_button(
                                 Glyph::Minus,
+                                Help::new("Decrease clip volume"),
                                 24.0,
                                 volume > 0.0,
                                 false,
@@ -1745,6 +1802,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                             ))
                             .child(sized_icon_button(
                                 Glyph::Plus,
+                                Help::new("Increase clip volume"),
                                 24.0,
                                 volume < 2.0,
                                 false,
@@ -1831,6 +1889,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         ))))
                         .child(sized_icon_button(
                             Glyph::ChevronLeft,
+                            Help::new("Move clip one frame earlier").shortcut("Alt+Left"),
                             26.0,
                             clip.start_frame > 0,
                             false,
@@ -1846,6 +1905,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         ))
                         .child(sized_icon_button(
                             Glyph::ChevronRight,
+                            Help::new("Move clip one frame later").shortcut("Alt+Right"),
                             26.0,
                             true,
                             false,
@@ -1872,6 +1932,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         ))))
                         .child(sized_icon_button(
                             Glyph::Minus,
+                            Help::new("Shorten clip by one frame"),
                             26.0,
                             clip.duration_frames > 1,
                             false,
@@ -1880,6 +1941,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         ))
                         .child(sized_icon_button(
                             Glyph::Plus,
+                            Help::new("Lengthen clip by one frame"),
                             26.0,
                             true,
                             false,
@@ -2158,6 +2220,8 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
 }
 
 pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
+    state.begin_tooltips();
+    state.tooltip_viewport.set(viewport);
     state.sync_system_theme();
     state.revision.get();
     state.ui_revision.get();
@@ -2185,7 +2249,17 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
 
     let file_button = |icon: Glyph, label: &str, operation: fn(&UiState)| {
         if narrow {
-            icon_button(icon, !busy, state, operation)
+            icon_button(
+                icon,
+                match icon {
+                    Glyph::Document => Help::new("New project").shortcut("Ctrl+N"),
+                    Glyph::Folder => Help::new("Open project").shortcut("Ctrl+O"),
+                    _ => Help::new("Save project").shortcut("Ctrl+S"),
+                },
+                !busy,
+                state,
+                operation,
+            )
         } else {
             tool_button(Some(icon), label, !busy, state, operation)
         }
@@ -2241,12 +2315,14 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 .align(Align::Center)
                 .child(icon_button(
                     Glyph::Undo,
+                    Help::new("Undo").shortcut("Ctrl+Z"),
                     !busy && editor.can_undo(),
                     state,
                     UiState::undo,
                 ))
                 .child(icon_button(
                     Glyph::Redo,
+                    Help::new("Redo").shortcut("Ctrl+Shift+Z / Ctrl+Y"),
                     !busy && editor.can_redo(),
                     state,
                     UiState::redo,
@@ -2254,6 +2330,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 .child(Box::new(Flex::row().width(6.0)))
                 .child(icon_button(
                     Glyph::Settings,
+                    Help::new("Settings"),
                     true,
                     state,
                     UiState::open_settings,
@@ -2407,6 +2484,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         transport(
             state,
             Transport {
+                program: true,
                 position: frame,
                 end: timeline_end,
                 fps,
@@ -2518,6 +2596,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         transport(
             state,
             Transport {
+                program: false,
                 position: state.source.position.get(),
                 end: source_end,
                 fps,
@@ -2622,12 +2701,14 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 .child(spacer())
                 .child(icon_button(
                     Glyph::ChevronLeft,
+                    Help::new("Scroll timeline earlier"),
                     state.timeline_start.get() > 0,
                     state,
                     |s| s.scroll_timeline(-8),
                 ))
                 .child(icon_button(
                     Glyph::ChevronRight,
+                    Help::new("Scroll timeline later"),
                     state.timeline_start.get().saturating_add(span) < timeline_end,
                     state,
                     |s| s.scroll_timeline(8),
@@ -2635,6 +2716,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 .child(divider())
                 .child(icon_button(
                     Glyph::ZoomOut,
+                    Help::new("Zoom out").shortcut("-"),
                     zoom + 1 < ZOOM_SECONDS.len(),
                     state,
                     |s| s.zoom_timeline(s.timeline_zoom.peek() + 1),
@@ -2647,9 +2729,13 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                         Rc::new(move |level| state.zoom_timeline(ZOOM_SECONDS.len() - 1 - level))
                     },
                 }))
-                .child(icon_button(Glyph::ZoomIn, zoom > 0, state, |s| {
-                    s.zoom_timeline(s.timeline_zoom.peek().saturating_sub(1))
-                }))
+                .child(icon_button(
+                    Glyph::ZoomIn,
+                    Help::new("Zoom in").shortcut("+ / ="),
+                    zoom > 0,
+                    state,
+                    |s| s.zoom_timeline(s.timeline_zoom.peek().saturating_sub(1)),
+                ))
                 .child(Box::new(
                     Flex::row().width(40.0).justify(Justify::Center).child(text(
                         short_duration(ZOOM_SECONDS[zoom.min(ZOOM_SECONDS.len() - 1)] as f64),
@@ -2671,6 +2757,11 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     } else {
                         Glyph::ChevronUp
                     },
+                    Help::new(if expanded_timeline {
+                        "Restore timeline height"
+                    } else {
+                        "Expand timeline"
+                    }),
                     true,
                     state,
                     |state| {
@@ -2816,7 +2907,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         10.0,
     ));
 
-    Box::new(
+    let content = Box::new(
         Flex::column()
             .size(viewport.width, viewport.height)
             .gap(6.0)
@@ -2854,7 +2945,9 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             } else {
                 Box::new(Flex::row().size(0.0, 0.0)) as BoxedWidget
             }),
-    )
+    );
+    state.finish_tooltips();
+    content
 }
 
 fn export_field(
@@ -3424,6 +3517,7 @@ fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidg
                                         .child(spacer())
                                         .child(icon_button(
                                             Glyph::Close,
+                                            Help::new("Close export options").shortcut("Esc"),
                                             true,
                                             state,
                                             UiState::close_export_dialog,
@@ -3805,6 +3899,7 @@ fn settings_modal(state: &UiState, viewport: Size) -> BoxedWidget {
                                         .child(spacer())
                                         .child(icon_button(
                                             Glyph::Close,
+                                            Help::new("Close settings").shortcut("Esc"),
                                             true,
                                             state,
                                             UiState::close_settings,
@@ -4026,6 +4121,153 @@ mod tests {
             Renderer::new().render(build(state, viewport), viewport, &mut painter);
         });
         painter
+    }
+
+    #[test]
+    fn icon_help_survives_rebuilds_without_changing_clicks_or_disabled_state() {
+        let state = UiState::new();
+        let viewport = Size {
+            width: 320.0,
+            height: 160.0,
+        };
+        state.tooltip_viewport.set(viewport);
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let mut renderer = Renderer::new();
+            let button = |enabled| {
+                icon_button(
+                    Glyph::Undo,
+                    Help::new("Undo").shortcut("Ctrl+Z"),
+                    enabled,
+                    &state,
+                    |s| s.status.set("Clicked".into()),
+                )
+            };
+            let mut painter = TestPainter::default();
+            let scene = renderer.render(button(true), viewport, &mut painter);
+            assert!(!painter.labels.iter().any(|label| label == "Undo"));
+            let point = Point { x: 14.0, y: 14.0 };
+            let index = scene.focus_hit_test(point).unwrap();
+            let focus = scene.on_focus_change_at(index).unwrap();
+            focus(true);
+            let mut painter = TestPainter::default();
+            let scene = renderer.render(button(true), viewport, &mut painter);
+            assert!(painter.labels.iter().any(|label| label == "Undo"));
+            assert!(painter.labels.iter().any(|label| label == "Ctrl+Z"));
+            assert_eq!(scene.focus_rect_at(index).unwrap().width, 28.0);
+            scene.hit_test(point).unwrap()();
+            assert_eq!(state.status.peek(), "Clicked");
+            focus(false);
+            let mut painter = TestPainter::default();
+            let scene = renderer.render(button(false), viewport, &mut painter);
+            assert!(!painter.labels.iter().any(|label| label == "Undo"));
+            assert!(scene.hit_test(point).is_none());
+            scene
+                .on_focus_change_at(scene.focus_hit_test(point).unwrap())
+                .unwrap()(true);
+            let mut painter = TestPainter::default();
+            let scene = renderer.render(button(false), viewport, &mut painter);
+            assert!(painter.labels.iter().any(|label| label == "Undo"));
+            assert!(scene.hit_test(point).is_none());
+        });
+    }
+
+    #[test]
+    fn hovered_help_replaces_an_adjacent_focused_hint() {
+        let state = UiState::new();
+        render(&state, 1280.0, 760.0);
+        let undo = state.tooltip_controller(("Undo", 0));
+        let redo = state.tooltip_controller(("Redo", 0));
+        undo.focus(true);
+        redo.hover(true);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        render(&state, 1280.0, 760.0);
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(redo.visible());
+        assert!(!undo.visible());
+        assert!(painter.labels.iter().any(|label| label == "Redo"));
+        assert!(!painter.labels.iter().any(|label| label == "Undo"));
+    }
+
+    #[test]
+    fn repeated_media_buttons_have_independent_help_and_keep_their_size() {
+        let state = UiState::new();
+        let viewport = Size {
+            width: 320.0,
+            height: 160.0,
+        };
+        state.tooltip_viewport.set(viewport);
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let buttons = || {
+                Box::new(
+                    Flex::row()
+                        .gap(8.0)
+                        .child(sized_icon_button(
+                            Glyph::Plus,
+                            Help::new("Insert at timeline end").instance(1),
+                            24.0,
+                            true,
+                            false,
+                            &state,
+                            |_| {},
+                        ))
+                        .child(sized_icon_button(
+                            Glyph::Plus,
+                            Help::new("Insert at timeline end").instance(2),
+                            24.0,
+                            true,
+                            false,
+                            &state,
+                            |_| {},
+                        )),
+                ) as BoxedWidget
+            };
+            let mut renderer = Renderer::new();
+            let scene = renderer.render(buttons(), viewport, &mut TestPainter::default());
+            assert_eq!(scene.focus_rect_at(0).unwrap().width, 24.0);
+            assert_eq!(scene.focus_rect_at(1).unwrap().x, 32.0);
+            scene.on_focus_change_at(0).unwrap()(true);
+            let mut painter = TestPainter::default();
+            renderer.render(buttons(), viewport, &mut painter);
+            assert_eq!(
+                painter
+                    .labels
+                    .iter()
+                    .filter(|label| *label == "Insert at timeline end")
+                    .count(),
+                1
+            );
+        });
+    }
+
+    #[test]
+    fn source_transport_does_not_advertise_sequence_keyboard_shortcuts() {
+        let state = UiState::new();
+        let shortcut_count = |painter: &TestPainter| {
+            painter
+                .labels
+                .iter()
+                .filter(|label| *label == "Space / K")
+                .count()
+        };
+        let baseline = shortcut_count(&render(&state, 1280.0, 760.0));
+        let source = state.tooltip_controller(("Play / pause source", 0));
+        source.focus(true);
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(
+            painter
+                .labels
+                .iter()
+                .any(|label| label == "Play / pause source")
+        );
+        assert_eq!(shortcut_count(&painter), baseline);
+        source.focus(false);
+        state
+            .tooltip_controller(("Play / pause sequence", 0))
+            .focus(true);
+        let painter = render(&state, 1280.0, 760.0);
+        assert_eq!(shortcut_count(&painter), baseline + 1);
     }
 
     #[test]

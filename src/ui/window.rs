@@ -19,7 +19,7 @@ use crate::media::{Media, MediaKind};
 use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, VideoCodec};
 use crate::project::{Command, Project};
 use crate::settings::ThemeMode;
-use crate::timeline::{Clip, ClipContent, Title, TrackKind};
+use crate::timeline::{Clip, ClipContent, Title, Track, TrackKind};
 use creamui::core::layout::{Dimension, Style};
 use creamui::core::{Painter, Point, Rect, TextAlign, Widget};
 use creamui::fonts::{FontWeight, HorizontalAlign, LayoutSettings, cached_layout, resolve};
@@ -1345,6 +1345,23 @@ fn selection_rows(state: &UiState, project: &Project, inner: f32) -> Vec<BoxedWi
     ]
 }
 
+fn compatible_destinations(tracks: &[Track], track_id: u64, clip: &Clip) -> Vec<(u64, bool)> {
+    let Some(source) = tracks.iter().find(|track| track.id == track_id) else {
+        return Vec::new();
+    };
+    tracks
+        .iter()
+        .filter(|track| track.id != track_id && track.kind == source.kind)
+        .map(|track| {
+            let occupied = track.clips.iter().any(|other| {
+                clip.start_frame < other.start_frame.saturating_add(other.duration_frames)
+                    && other.start_frame < clip.start_frame.saturating_add(clip.duration_frames)
+            });
+            (track.id, occupied)
+        })
+        .collect()
+}
+
 fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> BoxedWidget {
     let fps = (
         project.settings().frame_rate.numerator,
@@ -1613,11 +1630,27 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 ],
             ));
         }
-        let other_track = project
-            .tracks()
-            .iter()
-            .find(|track| track.id != track_id && track.kind == track_kind)
-            .map(|track| track.id);
+        let destinations = compatible_destinations(project.tracks(), track_id, &clip);
+        let mut move_buttons = Flex::row()
+            .gap(4.0)
+            .wrap(creamui::widgets::layout::Wrap::Wrap);
+        for (target_track_id, occupied) in &destinations {
+            let target_track_id = *target_track_id;
+            let label = if *occupied {
+                format!("{} · Occupied", label_of(target_track_id))
+            } else {
+                label_of(target_track_id)
+            };
+            move_buttons =
+                move_buttons.child(secondary_button(None, &label, !occupied, state, move |s| {
+                    edit_selection(s, |clip, track_id, _| Command::Move {
+                        track_id,
+                        target_track_id,
+                        clip_id: clip.id,
+                        to_frame: clip.start_frame,
+                    })
+                }));
+        }
         let playhead = state.program.position.get();
         let splittable = playhead > clip.start_frame
             && playhead < clip.start_frame.saturating_add(clip.duration_frames);
@@ -1708,23 +1741,16 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         ))
                         .child(text("1 frame", faint(), 10.0)),
                 ),
-                inline(secondary_button(
-                    Some(Glyph::ChevronDown),
-                    &format!(
-                        "Move to {}",
-                        other_track.map_or_else(|| "other track".into(), label_of)
-                    ),
-                    other_track.is_some(),
-                    state,
-                    move |s| {
-                        edit_selection(s, |clip, track_id, _| Command::Move {
-                            track_id,
-                            target_track_id: other_track.unwrap_or(track_id),
-                            clip_id: clip.id,
-                            to_frame: clip.start_frame,
-                        })
-                    },
-                )),
+                Box::new(
+                    Flex::column()
+                        .gap(6.0)
+                        .child(text("Move to", muted(), 11.0))
+                        .child(if destinations.is_empty() {
+                            text("No other compatible tracks", faint(), 10.0)
+                        } else {
+                            Box::new(move_buttons)
+                        }),
+                ),
             ],
         ));
         rows.push(section(
@@ -3661,6 +3687,83 @@ mod tests {
     use super::*;
     use creamui::core::{Painter, Point, Rect, Renderer, RgbaImage, TextAlign, Widget};
     use std::sync::Arc;
+
+    fn destination_clip(start_frame: u64, duration_frames: u64) -> Clip {
+        Clip {
+            id: 10,
+            start_frame,
+            source_start_frame: 0,
+            duration_frames,
+            content: ClipContent::Title(Title::default()),
+            volume: 1.0,
+            muted: false,
+            linked_audio: false,
+        }
+    }
+
+    #[test]
+    fn destinations_include_all_compatible_tracks_except_current() {
+        let tracks = [
+            TrackKind::Video,
+            TrackKind::Audio,
+            TrackKind::Video,
+            TrackKind::Video,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(id, kind)| Track {
+            id: id as u64,
+            kind,
+            clips: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(
+            compatible_destinations(&tracks, 0, &destination_clip(10, 20)),
+            vec![(2, false), (3, false)]
+        );
+        assert_eq!(
+            compatible_destinations(&tracks, 1, &destination_clip(10, 20)),
+            vec![]
+        );
+        assert_eq!(
+            compatible_destinations(&tracks, 99, &destination_clip(10, 20)),
+            vec![]
+        );
+        assert_eq!(
+            compatible_destinations(&[], 0, &destination_clip(10, 20)),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn destinations_flag_overlaps_but_allow_touching_ranges() {
+        let mut tracks = vec![Track {
+            id: 0,
+            kind: TrackKind::Video,
+            clips: Vec::new(),
+        }];
+        for (index, (start, duration)) in [(0, 10), (30, 10), (9, 2), (29, 2), (15, 5), (0, 40)]
+            .into_iter()
+            .enumerate()
+        {
+            tracks.push(Track {
+                id: index as u64 + 1,
+                kind: TrackKind::Video,
+                clips: vec![destination_clip(start, duration)],
+            });
+        }
+        assert_eq!(
+            compatible_destinations(&tracks, 0, &destination_clip(10, 20)),
+            vec![
+                (1, false),
+                (2, false),
+                (3, true),
+                (4, true),
+                (5, true),
+                (6, true)
+            ]
+        );
+    }
 
     #[derive(Default)]
     struct TestPainter {

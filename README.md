@@ -111,7 +111,14 @@ the project file; a saved project is automatically saved after exporting.
 **Export again** generates a new numbered file using the last settings
 without reopening the dialog; **Options…** reopens it. Outputs are never
 silently overwritten. An unsaved project still needs to be saved to retain
-its export settings between sessions.
+its export settings between sessions. For a first export, saved projects use
+their own folder; unsaved projects use the last chosen export folder, or the
+system Videos folder. Unavailable folders are skipped: last chosen folder,
+Videos, Documents, home, and finally the working directory. A folder chosen
+with **Browse…** (or used by a successful export) is
+remembered in editor preferences across projects and sessions. The destination
+is also shown beside the export actions on every settings tab; **Change…** opens
+the full path and folder picker.
 
 The default MP4 export encodes H.264
 video composited from every video track (V1 is the base; V2 and lower rows are

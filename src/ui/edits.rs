@@ -212,6 +212,26 @@ pub(crate) fn compatible_track(project: &Project, media_id: u64, preferred: u64)
         .map(|track| track.id)
 }
 
+/// The first compatible track with room for the whole source at `frame`.
+pub(crate) fn compatible_track_at(
+    project: &Project,
+    media_id: u64,
+    frame: u64,
+) -> Result<u64, String> {
+    let mut error = "No compatible track for this source".into();
+    for track in project
+        .tracks()
+        .iter()
+        .filter(|track| compatible_track(project, media_id, track.id) == Some(track.id))
+    {
+        match insert_media(project, media_id, Some((track.id, frame))) {
+            Ok(_) => return Ok(track.id),
+            Err(reason) => error = reason,
+        }
+    }
+    Err(error)
+}
+
 /// A three-second title at `placement` (`track_id`, frame), or after the
 /// last clip of the first video track.
 pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Option<(u64, Clip)> {
@@ -660,6 +680,29 @@ mod tests {
         assert!(editor.undo());
         assert_eq!(editor.project().tracks()[0].clips[0].start_frame, 20);
         assert_eq!(editor.project().tracks()[1].clips[1].start_frame, 80);
+    }
+
+    #[test]
+    fn playhead_insertion_uses_the_next_free_compatible_track() {
+        let mut editor = Editor::new(project_with(&[(0, title(1, 0))]));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "scene.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(3_000_000),
+            has_audio: true,
+        })));
+        let track = compatible_track_at(editor.project(), 1, 0).unwrap();
+        assert_eq!(track, 1);
+        let insertion = insert_media(editor.project(), 1, Some((track, 0))).unwrap();
+        assert!(editor.apply(insertion.command));
+        assert!(editor.project().tracks()[1].clips[0].linked_audio);
+        assert_eq!(
+            compatible_track_at(editor.project(), 1, 0).unwrap_err(),
+            "That spot on the track is already taken"
+        );
+        assert_eq!(compatible_track_at(editor.project(), 1, 90).unwrap(), 0);
+        assert!(compatible_track_at(editor.project(), 999, 0).is_err());
     }
 
     #[test]

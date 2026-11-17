@@ -1059,17 +1059,13 @@ impl UiState {
             }
             MenuCommand::InsertMedia(media_id) => self.insert_media(media_id),
             MenuCommand::InsertMediaAt(media_id, frame) => {
-                let track = self
-                    .editor
-                    .borrow()
-                    .project()
-                    .tracks()
-                    .iter()
-                    .find_map(|track| {
-                        edits::compatible_track(self.editor.borrow().project(), media_id, track.id)
-                    });
-                if let Some(track) = track {
-                    self.insert_media_at(media_id, Some((track, frame)));
+                let track =
+                    edits::compatible_track_at(self.editor.borrow().project(), media_id, frame);
+                match track {
+                    Ok(track) => {
+                        self.insert_media_at(media_id, Some((track, frame)));
+                    }
+                    Err(error) => self.status.set(error),
                 }
             }
             MenuCommand::ShowMedia(media_id) => self.select_media(media_id),

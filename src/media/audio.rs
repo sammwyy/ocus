@@ -308,7 +308,7 @@ impl AudioReader {
                 out.push(right);
                 read += 1;
                 self.position += self.ratio;
-                let used = self.position as usize;
+                let used = (self.position as usize).min(available);
                 if used > 0 {
                     self.pending.drain(..used * CHANNELS);
                     self.position -= used as f64;
@@ -599,6 +599,37 @@ mod tests {
         worker.join().unwrap().unwrap();
         assert!(real > 4_500, "{real}");
         assert_eq!(split, real);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn resamples_trimmed_audio_above_the_output_rate() {
+        let path = std::env::temp_dir().join(format!("ocus-176k-{}.wav", std::process::id()));
+        let interleaved: Vec<i16> = (0..176_400 * 2_i32)
+            .map(|index| (index * 53 % 32_000 - 16_000) as i16)
+            .collect();
+        write_wav(&path, 176_400, 2, &interleaved);
+        let queue = Arc::new(AudioQueue::new());
+        let plan = AudioPlan {
+            sources: vec![AudioSource {
+                path: path.clone(),
+                start: 0,
+                source_start: 3,
+                duration: 6,
+                volume: 1.0,
+            }],
+            end: 6,
+            fps: (30, 1),
+        };
+        // Six frames fit in the queue, so the worker finishes before draining.
+        let worker = {
+            let queue = queue.clone();
+            std::thread::spawn(move || feed(&plan, 0, queue, Arc::new(AtomicBool::new(false))))
+        };
+        worker.join().unwrap().unwrap();
+        let (heard, loud) = drain(&queue);
+        assert_eq!(heard, 19_200);
+        assert!(loud > 8_000, "{loud}");
         fs::remove_file(path).unwrap();
     }
 

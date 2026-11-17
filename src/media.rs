@@ -92,6 +92,20 @@ impl Rotation {
     }
 }
 
+pub(crate) fn display_dimensions(decoder: &ffmpeg::decoder::Video) -> (u32, u32) {
+    let sar = decoder.aspect_ratio();
+    sample_aspect_dimensions(decoder.width(), decoder.height(), sar)
+}
+
+fn sample_aspect_dimensions(width: u32, height: u32, sar: ffmpeg::Rational) -> (u32, u32) {
+    if sar.numerator() <= 0 || sar.denominator() <= 0 {
+        return (width, height);
+    }
+    let width = (u64::from(width) * sar.numerator() as u64 + sar.denominator() as u64 / 2)
+        / sar.denominator() as u64;
+    (width.clamp(1, u64::from(u32::MAX)) as u32, height)
+}
+
 pub(crate) fn fitted_dimensions(
     source_width: u32,
     source_height: u32,
@@ -159,12 +173,13 @@ pub fn thumbnail(path: &Path) -> Result<Thumbnail, String> {
     if decoder.format() == ffmpeg::format::Pixel::None || decoder.width() == 0 {
         return Err("Source has an unknown pixel format".into());
     }
-    let display = rotation.dimensions(decoder.width(), decoder.height());
+    let square = display_dimensions(&decoder);
+    let display = rotation.dimensions(square.0, square.1);
     let scale = (208.0 / display.0 as f32)
         .min(116.0 / display.1 as f32)
         .min(1.0);
-    let width = (decoder.width() as f32 * scale).round().max(1.0) as u32;
-    let height = (decoder.height() as f32 * scale).round().max(1.0) as u32;
+    let width = (square.0 as f32 * scale).round().max(1.0) as u32;
+    let height = (square.1 as f32 * scale).round().max(1.0) as u32;
     let mut scaler = ffmpeg::software::scaling::context::Context::get(
         decoder.format(),
         decoder.width(),
@@ -286,6 +301,18 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn sample_aspect_dimensions_handle_unknown_and_square_pixels() {
+        for sar in [(0, 1), (1, 0), (-1, 1), (1, 1)] {
+            assert_eq!(sample_aspect_dimensions(720, 576, sar.into()), (720, 576));
+        }
+        assert_eq!(
+            sample_aspect_dimensions(720, 576, (64, 45).into()),
+            (1024, 576)
+        );
+        assert_eq!(Rotation(1).dimensions(1024, 576), (576, 1024));
+    }
 
     #[test]
     fn legacy_rotation_metadata_is_clockwise() {

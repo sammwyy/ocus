@@ -987,10 +987,14 @@ impl UiState {
     }
 
     pub(super) fn request_preview(&self) {
-        if self.has_missing_timeline_media() {
-            self.stop(&self.program);
-            return;
-        }
+        let (plan, audio) = self.program_plan();
+        self.stream(&self.program, plan, audio, true);
+    }
+
+    /// The Program monitor's video and audio plans, leaving out missing media
+    /// so the rest of the sequence still previews.
+    fn program_plan(&self) -> (PreviewPlan, AudioPlan) {
+        let missing = self.missing_media.peek();
         let editor = self.editor.borrow();
         let project = editor.project();
         let mut sources = Vec::new();
@@ -1000,6 +1004,9 @@ impl UiState {
                 let ClipContent::Media { media_id } = clip.content else {
                     continue;
                 };
+                if missing.contains(&media_id) {
+                    continue;
+                }
                 let Some(media) = project.media().iter().find(|media| media.id == media_id) else {
                     continue;
                 };
@@ -1029,7 +1036,7 @@ impl UiState {
             project.settings().frame_rate.denominator,
         );
         let resolution = (project.settings().width, project.settings().height);
-        let mut visual = VisualPlan::from_project(project);
+        let mut visual = VisualPlan::without_media(project, &missing);
         if let Some(((.., clip_id), title)) = self.title_preview.peek() {
             visual.replace_title(clip_id, title);
         }
@@ -1047,7 +1054,7 @@ impl UiState {
             end,
             fps,
         };
-        self.stream(&self.program, plan, audio, true);
+        (plan, audio)
     }
 
     fn request_source_preview(&self) {
@@ -2885,6 +2892,27 @@ mod tests {
         assert!(storyboard_requests(&[], &mut cache, &mut recent).is_empty());
         assert!(cache.is_empty());
         assert!(recent.is_empty());
+    }
+
+    #[test]
+    fn program_plan_skips_only_missing_media() {
+        let state = UiState::new();
+        for (id, path) in [(1, "lost.mp4"), (2, "kept.mp4")] {
+            assert!(state.edit(Command::ImportMedia(Media {
+                id,
+                path: path.into(),
+                kind: MediaKind::Video,
+                duration_us: Some(2_000_000),
+                has_audio: true,
+            })));
+            state.insert_media(id);
+        }
+        state.missing_media.set(HashSet::from([1]));
+        let (plan, audio) = state.program_plan();
+        let kept = [PathBuf::from("kept.mp4")];
+        assert!(plan.sources.iter().map(|source| &source.path).eq(&kept));
+        assert!(audio.sources.iter().map(|source| &source.path).eq(&kept));
+        assert_eq!(plan.end, state.sequence_end());
     }
 
     #[test]

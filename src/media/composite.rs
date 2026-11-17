@@ -3,7 +3,7 @@ use crate::project::Project;
 use crate::timeline::{ClipContent, Title, TrackKind};
 use crate::ui::{title_fonts, title_markup};
 use creamui::fonts::{FontWeight, HorizontalAlign, LayoutSettings, cached_layout, resolve};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use swash::scale::{Render, ScaleContext, Source};
@@ -28,6 +28,11 @@ enum VisualClip {
 
 impl VisualPlan {
     pub fn from_project(project: &Project) -> Self {
+        Self::without_media(project, &HashSet::new())
+    }
+
+    /// The project's visuals with clips of the `missing` media left out.
+    pub fn without_media(project: &Project, missing: &HashSet<u64>) -> Self {
         let tracks = project
             .tracks()
             .iter()
@@ -37,7 +42,7 @@ impl VisualPlan {
                     .clips
                     .iter()
                     .filter_map(|clip| match &clip.content {
-                        ClipContent::Media { media_id } => {
+                        ClipContent::Media { media_id } if !missing.contains(media_id) => {
                             let media =
                                 project.media().iter().find(|media| media.id == *media_id)?;
                             Some(VisualClip::Media(FrameSource {
@@ -49,6 +54,7 @@ impl VisualPlan {
                                 duration: clip.duration_frames,
                             }))
                         }
+                        ClipContent::Media { .. } => None,
                         ClipContent::Title(title) => Some(VisualClip::Title {
                             clip_id: clip.id,
                             start: clip.start_frame,

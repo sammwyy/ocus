@@ -2220,6 +2220,7 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
 }
 
 pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
+    state.begin_tooltips();
     state.tooltip_viewport.set(viewport);
     state.sync_system_theme();
     state.revision.get();
@@ -2906,7 +2907,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         10.0,
     ));
 
-    Box::new(
+    let content = Box::new(
         Flex::column()
             .size(viewport.width, viewport.height)
             .gap(6.0)
@@ -2944,7 +2945,9 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             } else {
                 Box::new(Flex::row().size(0.0, 0.0)) as BoxedWidget
             }),
-    )
+    );
+    state.finish_tooltips();
+    content
 }
 
 fn export_field(
@@ -4173,8 +4176,8 @@ mod tests {
     fn hovered_help_replaces_an_adjacent_focused_hint() {
         let state = UiState::new();
         render(&state, 1280.0, 760.0);
-        let undo = state.tooltips.borrow().get(&("Undo", 0)).unwrap().clone();
-        let redo = state.tooltips.borrow().get(&("Redo", 0)).unwrap().clone();
+        let undo = state.tooltip_controller(("Undo", 0));
+        let redo = state.tooltip_controller(("Redo", 0));
         undo.focus(true);
         redo.hover(true);
         std::thread::sleep(std::time::Duration::from_millis(400));
@@ -4249,12 +4252,7 @@ mod tests {
                 .count()
         };
         let baseline = shortcut_count(&render(&state, 1280.0, 760.0));
-        let source = state
-            .tooltips
-            .borrow()
-            .get(&("Play / pause source", 0))
-            .unwrap()
-            .clone();
+        let source = state.tooltip_controller(("Play / pause source", 0));
         source.focus(true);
         let painter = render(&state, 1280.0, 760.0);
         assert!(
@@ -4266,10 +4264,7 @@ mod tests {
         assert_eq!(shortcut_count(&painter), baseline);
         source.focus(false);
         state
-            .tooltips
-            .borrow()
-            .get(&("Play / pause sequence", 0))
-            .unwrap()
+            .tooltip_controller(("Play / pause sequence", 0))
             .focus(true);
         let painter = render(&state, 1280.0, 760.0);
         assert_eq!(shortcut_count(&painter), baseline + 1);

@@ -340,7 +340,12 @@ impl UiState {
 
     pub fn run(&self, action: Action) {
         if action == Action::Escape {
-            let controllers: Vec<_> = self.tooltips.borrow().values().cloned().collect();
+            let controllers: Vec<_> = self
+                .tooltips
+                .borrow()
+                .values()
+                .map(|tooltip| tooltip.controller.clone())
+                .collect();
             creamui::reactive::batch(|| {
                 for controller in controllers {
                     controller.hover(false);
@@ -1540,11 +1545,7 @@ mod tests {
     #[test]
     fn escape_dismisses_help_without_losing_editor_or_dialog_actions() {
         let state = UiState::new();
-        let help = creamui::widgets::TooltipController::default();
-        state
-            .tooltips
-            .borrow_mut()
-            .insert(("Undo", 0), help.clone());
+        let help = state.tooltip_controller(("Undo", 0));
         assert!(state.add_title());
         help.hover(true);
         help.focus(true);
@@ -1568,7 +1569,7 @@ mod tests {
             let _effect = creamui::reactive::create_effect(move || {
                 let _ = icon_button(Glyph::Undo, Help::new("Undo"), false, &build_state, |_| {});
             });
-            let help = state.tooltips.borrow().get(&("Undo", 0)).unwrap().clone();
+            let help = state.tooltip_controller(("Undo", 0));
             help.focus(true);
             assert!(help.visible());
             state.run(Action::Escape);

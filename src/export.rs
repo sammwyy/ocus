@@ -85,6 +85,7 @@ pub fn render_with_settings(
                 return Err("Export destination cannot be an imported source".into());
             }
         }
+        return Err("Export destination already exists. Choose a different filename.".into());
     }
     let parent = path
         .parent()
@@ -636,6 +637,51 @@ mod tests {
             super::fitted_dimensions(1080, 1920, 1920, 1080),
             (606, 1080)
         );
+    }
+
+    #[test]
+    fn existing_destination_is_rejected_before_encoding() {
+        let dir = std::env::temp_dir().join(format!(
+            "ocus-export-collision-{}-{}",
+            std::process::id(),
+            super::NEXT_EXPORT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        let target = dir.join("export.mp4");
+        fs::write(&target, b"existing export").unwrap();
+        let mut document: serde_json::Value =
+            serde_json::from_str(&format::to_json(&Project::new("Collision")).unwrap()).unwrap();
+        document["settings"]["width"] = 160.into();
+        document["settings"]["height"] = 90.into();
+        let mut editor = Editor::new(format::from_json(&document.to_string()).unwrap());
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 0,
+            clip: Clip {
+                id: 1,
+                start_frame: 0,
+                source_start_frame: 0,
+                duration_frames: 2,
+                content: ClipContent::Title(Title::default()),
+                volume: 1.0,
+                muted: false,
+                linked_audio: false,
+            },
+        }));
+        let control = Arc::new(ExportControl::default());
+        let result = super::render_with_control(editor.project(), &target, control.clone());
+        assert!(result.is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"existing export");
+        assert_eq!(
+            control.frames_done(),
+            0,
+            "must not encode an occupied destination"
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            "Export destination already exists. Choose a different filename."
+        );
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

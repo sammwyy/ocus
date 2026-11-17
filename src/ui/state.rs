@@ -261,6 +261,7 @@ pub(crate) struct UiState {
     window: Rc<RefCell<Option<WindowHandle>>>,
     settings_serial: Arc<AtomicU64>,
     settings_write: Arc<Mutex<()>>,
+    export_directory: Signal<PathBuf>,
     storyboard_cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
     storyboard_serial: Rc<Cell<u64>>,
     storyboard_recent: Rc<RefCell<Vec<StoryboardKey>>>,
@@ -274,6 +275,8 @@ impl UiState {
         let settings = settings::path()
             .and_then(|path| settings::load(&path).ok())
             .unwrap_or_default();
+        let export_directory =
+            settings::export_directory(settings.last_export_directory.as_deref());
         Self {
             editor: Rc::new(RefCell::new(Editor::new(Project::new("Untitled")))),
             revision: Signal::new(0),
@@ -351,6 +354,7 @@ impl UiState {
             window: Rc::new(RefCell::new(None)),
             settings_serial: Arc::new(AtomicU64::new(0)),
             settings_write: Arc::new(Mutex::new(())),
+            export_directory: Signal::new(export_directory),
             storyboard_cancel: Rc::new(RefCell::new(None)),
             storyboard_serial: Rc::new(Cell::new(0)),
             storyboard_recent: Rc::new(RefCell::new(Vec::new())),
@@ -1583,28 +1587,17 @@ impl UiState {
                 },
                 |last| last.settings.clone(),
             );
-            let path = last.map_or_else(
-                || {
+            let path = last
+                .filter(|last| last.path.is_absolute())
+                .map(|last| next_export_path(&last.path))
+                .unwrap_or_else(|| {
                     self.project_path
                         .peek()
+                        .filter(|path| path.is_absolute())
                         .and_then(|path| path.parent().map(Path::to_path_buf))
-                        .or_else(|| std::env::current_dir().ok())
-                        .unwrap_or_default()
+                        .unwrap_or_else(|| self.export_directory.peek())
                         .join(format!("export.{}", settings.container.extension()))
-                },
-                |last| {
-                    if last.path.is_absolute() {
-                        next_export_path(&last.path)
-                    } else {
-                        self.project_path
-                            .peek()
-                            .and_then(|path| path.parent().map(Path::to_path_buf))
-                            .or_else(|| std::env::current_dir().ok())
-                            .unwrap_or_default()
-                            .join(format!("export.{}", settings.container.extension()))
-                    }
-                },
-            );
+                });
             (settings, path, last.is_some())
         };
         self.set_export_draft(settings);
@@ -1794,6 +1787,7 @@ impl UiState {
             dialog = dialog.set_directory(parent);
         }
         if let Some(selected) = dialog.save_file() {
+            self.remember_export_directory(&selected);
             self.export_path.set_value(
                 selected
                     .with_extension(settings.container.extension())
@@ -1801,6 +1795,16 @@ impl UiState {
                     .into_owned(),
             );
         }
+    }
+
+    fn remember_export_directory(&self, path: &Path) {
+        let Some(directory) = path.parent().filter(|directory| directory.is_absolute()) else {
+            return;
+        };
+        self.export_directory.set(directory.to_path_buf());
+        let mut settings = self.settings.peek();
+        settings.last_export_directory = Some(directory.to_path_buf());
+        self.update_settings(settings);
     }
 
     pub fn save_export_preset(&self) {
@@ -1956,6 +1960,7 @@ impl UiState {
                 }
                 state.status.set(match result {
                     Ok(()) => {
+                        state.remember_export_directory(&path);
                         state.edit(Command::SetLastExport(Some(LastExport {
                             settings,
                             path: path.clone(),
@@ -2497,6 +2502,48 @@ mod tests {
         assert!(storyboard_requests(&[], &mut cache, &mut recent).is_empty());
         assert!(cache.is_empty());
         assert!(recent.is_empty());
+    }
+
+    #[test]
+    fn export_destinations_keep_project_paths_ahead_of_the_user_default() {
+        let state = UiState::new();
+        let root = std::env::temp_dir();
+        state.export_directory.set(root.join("Videos"));
+        assert!(state.add_title());
+        state.export_dialog();
+        assert_eq!(
+            PathBuf::from(state.export_path.peek()),
+            root.join("Videos/export.mp4")
+        );
+
+        let chosen = root.join("chosen/output.mp4");
+        state.remember_export_directory(&chosen);
+        assert_eq!(
+            state.settings.peek().last_export_directory,
+            Some(root.join("chosen"))
+        );
+        state.export_dialog();
+        assert_eq!(
+            PathBuf::from(state.export_path.peek()),
+            root.join("chosen/export.mp4")
+        );
+
+        state.project_path.set(Some(root.join("project/edit.ocus")));
+        state.export_dialog();
+        assert_eq!(
+            PathBuf::from(state.export_path.peek()),
+            root.join("project/export.mp4")
+        );
+
+        assert!(state.edit(Command::SetLastExport(Some(LastExport {
+            path: chosen,
+            settings: state.export_draft.peek(),
+        }))));
+        state.export_dialog();
+        assert_eq!(
+            PathBuf::from(state.export_path.peek()),
+            root.join("chosen/output-2.mp4")
+        );
     }
 
     #[test]

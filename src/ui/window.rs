@@ -3131,7 +3131,7 @@ fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidg
             )),
     );
     let status = state.status.get();
-    let footer = if narrow {
+    let footer_status = if narrow {
         Box::new(
             Flex::column()
                 .gap(5.0)
@@ -3147,6 +3147,29 @@ fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidg
                 .child(footer_actions),
         )
     };
+    let footer = Box::new(
+        Flex::column()
+            .width(inner)
+            .gap(8.0)
+            .child(Box::new(
+                Flex::row()
+                    .width(inner)
+                    .gap(8.0)
+                    .align(Align::Center)
+                    .child(text("Save to", muted(), 11.0))
+                    .child(text(
+                        fit(&state.export_path.value(), inner - 150.0, 11.0),
+                        text_color(),
+                        11.0,
+                    ))
+                    .child(spacer())
+                    .child(secondary_button(None, "Change…", true, state, |state| {
+                        state.export_scroll.set(0.0);
+                        state.export_page.set(ExportPage::Output);
+                    })),
+            ))
+            .child(footer_status),
+    );
     let close = state.clone();
     Box::new(Layer {
         style: Layer::at(0.0, 0.0, viewport.width, viewport.height),
@@ -3386,6 +3409,7 @@ fn settings_modal(state: &UiState, viewport: Size) -> BoxedWidget {
                 crate::settings::Settings {
                     theme: mode,
                     accent: None,
+                    ..Default::default()
                 }
                 .theme()
             }
@@ -4198,6 +4222,7 @@ mod tests {
                 let settings = crate::settings::Settings {
                     theme: mode,
                     accent: None,
+                    ..Default::default()
                 };
                 let theme = settings.theme();
                 creamui::reactive::provide_context(creamui::ThemeProvider::new(theme));
@@ -4558,6 +4583,46 @@ mod tests {
         assert!(!painter.labels.iter().any(|label| label.contains("silent")));
         state.run(Action::Export);
         assert_eq!(state.status.peek(), "Ready · Project not saved");
+    }
+
+    #[test]
+    fn export_destination_is_visible_and_changeable_on_every_page() {
+        let state = UiState::new();
+        assert!(state.add_title());
+        state.export_dialog();
+        let path = std::env::temp_dir().join("Movies/export.mp4");
+        state
+            .export_path
+            .set_value(path.to_string_lossy().into_owned());
+        for page in [
+            ExportPage::Presets,
+            ExportPage::Video,
+            ExportPage::Audio,
+            ExportPage::Output,
+        ] {
+            state.export_page.set(page);
+            for width in [420.0, 680.0, 1280.0] {
+                let painter = render(&state, width, 480.0);
+                assert!(painter.labels.iter().any(|label| label == "Save to"));
+                assert!(painter.labels.iter().any(|label| label == "Change…"));
+                assert!(
+                    painter
+                        .labels
+                        .iter()
+                        .any(|label| label.starts_with(path.parent().unwrap().to_str().unwrap()))
+                );
+                for label in ["Save to", "Change…", "Export"] {
+                    let (_, bounds) = painter
+                        .bounds
+                        .iter()
+                        .rev()
+                        .find(|(text, _)| text == label)
+                        .unwrap();
+                    assert!(bounds.x >= 0.0 && bounds.x + bounds.width <= width);
+                    assert!(bounds.y >= 0.0 && bounds.y + bounds.height <= 480.0);
+                }
+            }
+        }
     }
 
     #[test]

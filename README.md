@@ -1,5 +1,12 @@
 # Ocus
 
+Projects open even when source files have moved. Missing files are marked in the
+media bin; choose **Relink…** to search a folder by exact filename, or right-click
+a missing item and choose **Relink file…** to locate a renamed file. Locating one
+file also reconnects missing files with matching names in the same folder. Each
+relinked file can be undone independently. Relink missing timeline media before
+exporting, then save the project to keep its updated source paths.
+
 Ocus is an early-stage, lightweight video editor written in Rust. The
 [roadmap](ROADMAP.md) tracks its intended milestones. The CreamUI editor
 supports importing media, editing and previewing a multitrack timeline,
@@ -11,8 +18,9 @@ whose duration can be changed in the inspector; over footage
 it places the title on a free video track at the playhead. Selecting a title
 shows a frame around it in the Program monitor: drag inside to move it or drag
 its bottom-right handle to resize it. The inspector edits its multiline text,
-font family, size, color (picker or hex), bold, italic and outline. Independent
-HTML and Markdown switches parse `<b>` / `<bold>`, `<i>` / `<italic>`,
+font family, size, color (picker or hex), bold, italic and outline. Use `Serif`
+to request an installed serif font; if none is found, the default font is used.
+Independent HTML and Markdown switches parse `<b>` / `<bold>`, `<i>` / `<italic>`,
 `<color=red>` / `<color=#ff0000>`, `**bold**` and `_italic_` in the preview;
 other HTML remains literal text. These edits can be undone and are saved with
 the project. The workspace also supports splitting, moving, trimming, deleting
@@ -114,7 +122,14 @@ the project file; a saved project is automatically saved after exporting.
 **Export again** generates a new numbered file using the last settings
 without reopening the dialog; **Options…** reopens it. Outputs are never
 silently overwritten. An unsaved project still needs to be saved to retain
-its export settings between sessions.
+its export settings between sessions. For a first export, saved projects use
+their own folder; unsaved projects use the last chosen export folder, or the
+system Videos folder. Unavailable folders are skipped: last chosen folder,
+Videos, Documents, home, and finally the working directory. A folder chosen
+with **Browse…** (or used by a successful export) is
+remembered in editor preferences across projects and sessions. The destination
+is also shown beside the export actions on every settings tab; **Change…** opens
+the full path and folder picker.
 
 The default MP4 export encodes H.264
 video composited from every video track (V1 is the base; V2 and lower rows are

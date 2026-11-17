@@ -12,8 +12,8 @@ use super::state::{
     media_frames,
 };
 use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
-use super::title_markup;
 use super::{MediaFilter, Sidebar, UiState};
+use super::{title_fonts, title_markup};
 use crate::media::preview::StoryboardKey;
 use crate::media::{Media, MediaKind};
 use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, VideoCodec};
@@ -519,6 +519,7 @@ fn title_box(title: &Title, rect: Rect, aspect: f32, resolution: (u32, u32)) -> 
     let mut longest = 0.0_f32;
     let mut line_width = 0.0;
     let mut lines = 1;
+    let family = title_fonts::family_stack(&title.font_family);
     for run in title_markup::parse(title) {
         for (index, part) in run.text.split('\n').enumerate() {
             if index > 0 {
@@ -526,7 +527,7 @@ fn title_box(title: &Title, rect: Rect, aspect: f32, resolution: (u32, u32)) -> 
                 line_width = 0.0;
                 lines += 1;
             }
-            line_width += run_width(part, size, &title.font_family, run.bold);
+            line_width += run_width(part, size, &family, run.bold);
         }
     }
     let box_width = (longest.max(line_width) + 16.0).clamp(32.0, width.max(32.0));
@@ -581,6 +582,7 @@ impl Widget for ProgramCanvas {
                 continue;
             }
             let size = (title.font_size * scale).max(1.0).min(height * 2.0);
+            let family = title_fonts::family_stack(&title.font_family);
             let runs = title_markup::parse(title);
             let lines: Vec<Vec<_>> = {
                 let mut lines = vec![Vec::new()];
@@ -604,7 +606,7 @@ impl Widget for ProgramCanvas {
             for (index, line) in lines.iter().enumerate() {
                 let widths: Vec<_> = line
                     .iter()
-                    .map(|run| run_width(&run.text, size, &title.font_family, run.bold))
+                    .map(|run| run_width(&run.text, size, &family, run.bold))
                     .collect();
                 let line_width: f32 = widths.iter().sum();
                 let mut x = bounds.x + width * title.x - line_width / 2.0;
@@ -628,7 +630,7 @@ impl Widget for ProgramCanvas {
                                     Color::rgba(0, 0, 0, run.color.a),
                                     size,
                                     TextAlign::Start,
-                                    Some(&title.font_family),
+                                    Some(&family),
                                     run.bold,
                                     run.italic,
                                 );
@@ -640,7 +642,7 @@ impl Widget for ProgramCanvas {
                             run.color,
                             size,
                             TextAlign::Start,
-                            Some(&title.font_family),
+                            Some(&family),
                             run.bold,
                             run.italic,
                         );
@@ -972,9 +974,12 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         })
         .map(|media| {
             let id = media.id;
+            let missing = state.missing_media.get().contains(&id);
             let name = media_name(media);
-            let image = state.thumbnails.borrow().get(&media.path).cloned();
-            let insertable = !busy && media_frames(media, fps).is_some();
+            let image = (!missing)
+                .then(|| state.thumbnails.borrow().get(&media.path).cloned())
+                .flatten();
+            let insertable = !busy && !missing && media_frames(media, fps).is_some();
             let insert = sized_icon_button(
                 Glyph::Plus,
                 Help::new("Insert at timeline end").instance(id),
@@ -984,9 +989,13 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 state,
                 move |s| s.insert_media(id),
             );
-            let badge = media
-                .duration_us
-                .map(|duration| short_duration(duration as f64 / 1_000_000.0));
+            let badge = if missing {
+                Some("Missing".into())
+            } else {
+                media
+                    .duration_us
+                    .map(|duration| short_duration(duration as f64 / 1_000_000.0))
+            };
             if view == MediaView::Grid {
                 let tile = (inner - 8.0) / 2.0;
                 media_item(
@@ -1053,7 +1062,15 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                                 .gap(3.0)
                                 .grow(1.0)
                                 .child(text(fit(&name, inner - 120.0, 12.0), text_color(), 12.0))
-                                .child(text(media_details(media), muted(), 10.0)),
+                                .child(text(
+                                    if missing {
+                                        "Missing · Relink to restore".into()
+                                    } else {
+                                        media_details(media)
+                                    },
+                                    muted(),
+                                    10.0,
+                                )),
                         ),
                         insert,
                     ],
@@ -1193,6 +1210,27 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     ),
                 ],
             ),
+            if state.missing_media.get().is_empty() {
+                Box::new(Flex::row())
+            } else {
+                Box::new(
+                    Flex::row()
+                        .align(Align::Center)
+                        .gap(8.0)
+                        .child(text(
+                            format!("{} files missing", state.missing_media.get().len()),
+                            text_color(),
+                            11.0,
+                        ))
+                        .child(accent_button(
+                            Some(Glyph::Locate),
+                            "Relink…",
+                            !busy,
+                            state,
+                            |s| s.relink_dialog(None),
+                        )),
+                )
+            },
             Box::new(
                 TextInput::controlled(&state.media_query)
                     .width(inner)
@@ -1222,6 +1260,19 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
 
 fn input(controller: &TextController, width: f32) -> BoxedWidget {
     Box::new(TextInput::controlled(controller).width(width).height(30.0))
+}
+
+fn title_input(
+    controller: &TextController,
+    width: f32,
+    state: &UiState,
+    apply: fn(&UiState),
+) -> TextInput {
+    let state = state.clone();
+    TextInput::controlled(controller)
+        .width(width)
+        .height(30.0)
+        .on_submit(move || apply(&state))
 }
 
 /// The inspector for several selected clips: a summary, the actions that
@@ -1601,7 +1652,12 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 "Title",
                 vec![
                     text("Duration (seconds)", muted(), 11.0),
-                    input(&state.title_duration, inner),
+                    Box::new(title_input(
+                        &state.title_duration,
+                        inner,
+                        state,
+                        set_title_duration,
+                    )),
                     inline(secondary_button(
                         None,
                         "Apply duration",
@@ -1624,9 +1680,19 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         set_title_text,
                     )),
                     text("Font family", muted(), 11.0),
-                    input(&state.title_font, inner),
+                    Box::new(title_input(
+                        &state.title_font,
+                        inner,
+                        state,
+                        apply_title_style,
+                    )),
                     text("Font size (px)", muted(), 11.0),
-                    input(&state.title_size, inner),
+                    Box::new(title_input(
+                        &state.title_size,
+                        inner,
+                        state,
+                        apply_title_style,
+                    )),
                     text("Color (#RRGGBB or #RRGGBBAA)", muted(), 11.0),
                     Box::new(
                         ColorPicker::controlled(
@@ -1651,7 +1717,12 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         )
                         .width(inner),
                     ),
-                    input(&state.title_color, inner),
+                    Box::new(title_input(
+                        &state.title_color,
+                        inner,
+                        state,
+                        apply_title_style,
+                    )),
                     inline(secondary_button(
                         None,
                         "Apply style",
@@ -2108,6 +2179,9 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                         duration: clip.duration_frames,
                         name: match (&clip.content, media) {
                             (ClipContent::Title(title), _) => title.text.clone(),
+                            (_, Some(media)) if state.missing_media.get().contains(&media.id) => {
+                                format!("Missing source · {}", media_name(media))
+                            }
                             (_, Some(media)) => media_name(media),
                             _ => "Missing source".into(),
                         },
@@ -2300,7 +2374,20 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
     }
     let empty_timeline = project.tracks().iter().all(|track| track.clips.is_empty());
     let first_media = project.media().first();
-    let program_stage: BoxedWidget = if picture && !gpu_preview && titles.is_empty() {
+    let program_stage: BoxedWidget = if state.has_missing_timeline_media() {
+        stage_message(
+            Glyph::Film,
+            "Missing source",
+            "Relink missing media to restore your preview.",
+            Some(accent_button(
+                Some(Glyph::Locate),
+                "Relink media…",
+                !busy,
+                state,
+                |s| s.relink_dialog(None),
+            )),
+        )
+    } else if picture && !gpu_preview && titles.is_empty() {
         stage_message(
             Glyph::Film,
             "Video preview unavailable",
@@ -3355,7 +3442,7 @@ fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidg
             )),
     );
     let status = state.status.get();
-    let footer = if narrow {
+    let footer_status = if narrow {
         Box::new(
             Flex::column()
                 .gap(5.0)
@@ -3371,6 +3458,29 @@ fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidg
                 .child(footer_actions),
         )
     };
+    let footer = Box::new(
+        Flex::column()
+            .width(inner)
+            .gap(8.0)
+            .child(Box::new(
+                Flex::row()
+                    .width(inner)
+                    .gap(8.0)
+                    .align(Align::Center)
+                    .child(text("Save to", muted(), 11.0))
+                    .child(text(
+                        fit(&state.export_path.value(), inner - 150.0, 11.0),
+                        text_color(),
+                        11.0,
+                    ))
+                    .child(spacer())
+                    .child(secondary_button(None, "Change…", true, state, |state| {
+                        state.export_scroll.set(0.0);
+                        state.export_page.set(ExportPage::Output);
+                    })),
+            ))
+            .child(footer_status),
+    );
     let close = state.clone();
     Box::new(Layer {
         style: Layer::at(0.0, 0.0, viewport.width, viewport.height),
@@ -3611,6 +3721,7 @@ fn settings_modal(state: &UiState, viewport: Size) -> BoxedWidget {
                 crate::settings::Settings {
                     theme: mode,
                     accent: None,
+                    ..Default::default()
                 }
                 .theme()
             }
@@ -4432,6 +4543,67 @@ mod tests {
     }
 
     #[test]
+    fn title_inputs_submit_one_undoable_edit_and_reject_invalid_values() {
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
+                creamui::Theme::dark(),
+            ));
+            let state = UiState::new();
+            assert!(state.add_title());
+            for (controller, value, invalid, apply) in [
+                (
+                    &state.title_duration,
+                    "5",
+                    "",
+                    set_title_duration as fn(&UiState),
+                ),
+                (
+                    &state.title_font,
+                    "Serif",
+                    "",
+                    apply_title_style as fn(&UiState),
+                ),
+                (
+                    &state.title_size,
+                    "180",
+                    "-1",
+                    apply_title_style as fn(&UiState),
+                ),
+                (
+                    &state.title_color,
+                    "#FF0000",
+                    "invalid",
+                    apply_title_style as fn(&UiState),
+                ),
+            ] {
+                let before = selected_clip(&state).unwrap().1;
+                controller.set_value(value);
+                let field = title_input(controller, 180.0, &state, apply);
+                let submit = field.on_key().unwrap();
+                let enter = creamui::core::KeyInput {
+                    key: creamui::core::Key::Enter,
+                    modifiers: Default::default(),
+                };
+                submit(enter);
+                assert_ne!(selected_clip(&state).unwrap().1, before);
+                controller.set_value(invalid);
+                submit(enter);
+                state.undo();
+                assert_eq!(selected_clip(&state).unwrap().1, before);
+            }
+            state.undo();
+            assert!(selected_clip(&state).is_none());
+            state.title_size.set_value("180");
+            let field = title_input(&state.title_size, 180.0, &state, apply_title_style);
+            field.on_key().unwrap()(creamui::core::KeyInput {
+                key: creamui::core::Key::Enter,
+                modifiers: Default::default(),
+            });
+            assert!(selected_clip(&state).is_none());
+        });
+    }
+
+    #[test]
     fn title_duration_is_editable_in_seconds_and_undoable() {
         let state = UiState::new();
         assert!(state.add_title());
@@ -4680,6 +4852,7 @@ mod tests {
                 let settings = crate::settings::Settings {
                     theme: mode,
                     accent: None,
+                    ..Default::default()
                 };
                 let theme = settings.theme();
                 creamui::reactive::provide_context(creamui::ThemeProvider::new(theme));
@@ -5142,6 +5315,46 @@ mod tests {
         assert!(!painter.labels.iter().any(|label| label.contains("silent")));
         state.run(Action::Export);
         assert_eq!(state.status.peek(), "Ready · Project not saved");
+    }
+
+    #[test]
+    fn export_destination_is_visible_and_changeable_on_every_page() {
+        let state = UiState::new();
+        assert!(state.add_title());
+        state.export_dialog();
+        let path = std::env::temp_dir().join("Movies/export.mp4");
+        state
+            .export_path
+            .set_value(path.to_string_lossy().into_owned());
+        for page in [
+            ExportPage::Presets,
+            ExportPage::Video,
+            ExportPage::Audio,
+            ExportPage::Output,
+        ] {
+            state.export_page.set(page);
+            for width in [420.0, 680.0, 1280.0] {
+                let painter = render(&state, width, 480.0);
+                assert!(painter.labels.iter().any(|label| label == "Save to"));
+                assert!(painter.labels.iter().any(|label| label == "Change…"));
+                assert!(
+                    painter
+                        .labels
+                        .iter()
+                        .any(|label| label.starts_with(path.parent().unwrap().to_str().unwrap()))
+                );
+                for label in ["Save to", "Change…", "Export"] {
+                    let (_, bounds) = painter
+                        .bounds
+                        .iter()
+                        .rev()
+                        .find(|(text, _)| text == label)
+                        .unwrap();
+                    assert!(bounds.x >= 0.0 && bounds.x + bounds.width <= width);
+                    assert!(bounds.y >= 0.0 && bounds.y + bounds.height <= 480.0);
+                }
+            }
+        }
     }
 
     #[test]

@@ -837,6 +837,8 @@ pub(crate) enum MenuCommand {
     InsertMediaAt(u64, u64),
     ShowMedia(u64),
     RemoveMedia(u64),
+    RelinkMedia(u64),
+    LocateMediaFolder,
 }
 
 /// One row of a context menu; `command: None` draws a separator.
@@ -957,6 +959,8 @@ impl UiState {
                 }
             }
             MenuCommand::ShowMedia(media_id) => self.select_media(media_id),
+            MenuCommand::RelinkMedia(media_id) => self.relink_dialog(Some(media_id)),
+            MenuCommand::LocateMediaFolder => self.relink_dialog(None),
             MenuCommand::RemoveMedia(media_id) => {
                 if self.edit(Command::RemoveMedia(media_id)) {
                     self.selected_media.set(None);
@@ -1347,6 +1351,20 @@ impl UiState {
                     "",
                     MenuCommand::ShowMedia(media_id),
                 ),
+                MenuEntry::new(
+                    "Relink file…",
+                    Glyph::Locate,
+                    "",
+                    MenuCommand::RelinkMedia(media_id),
+                )
+                .enabled(self.missing_media.peek().contains(&media_id)),
+                MenuEntry::new(
+                    "Locate folder…",
+                    Glyph::Locate,
+                    "",
+                    MenuCommand::LocateMediaFolder,
+                )
+                .enabled(self.missing_media.peek().contains(&media_id)),
                 MenuEntry::separator(),
                 MenuEntry::new(
                     "Remove from project",

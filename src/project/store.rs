@@ -22,14 +22,6 @@ pub fn load(path: &Path) -> io::Result<Project> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let project = format::from_json(&json)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    for media in project.media() {
-        if !media.path.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("Missing source: {}", media.path.display()),
-            ));
-        }
-    }
     Ok(project)
 }
 
@@ -162,7 +154,9 @@ mod tests {
         let mut document: serde_json::Value = serde_json::from_slice(&original).unwrap();
         document["media"] = serde_json::json!([missing_media]);
         fs::write(&path, document.to_string()).unwrap();
-        assert_eq!(load(&path).unwrap_err().kind(), io::ErrorKind::NotFound);
+        let loaded = load(&path).expect("Projects with missing media must still open");
+        assert_eq!(loaded.media()[0].id, 6);
+        assert!(!loaded.media()[0].path.is_file());
         fs::remove_file(path).unwrap();
         fs::remove_dir(dir).unwrap();
     }

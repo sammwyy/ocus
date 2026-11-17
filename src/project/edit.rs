@@ -18,6 +18,7 @@ pub enum Command {
     },
     ImportMedia(Media),
     ReprobeMedia(Media),
+    RelinkMedia(Media),
     RemoveMedia(u64),
     Split {
         track_id: u64,
@@ -353,6 +354,24 @@ impl Editor {
                 self.project.media.push(media);
                 Some(Command::RemoveMedia(id))
             }
+            Command::RelinkMedia(media) => {
+                let index = self
+                    .project
+                    .media
+                    .iter()
+                    .position(|item| item.id == media.id)?;
+                if self.project.media[index].kind != media.kind
+                    || self.project.media[index] == media
+                {
+                    return None;
+                }
+                let original = std::mem::replace(&mut self.project.media[index], media);
+                if self.project.validate().is_err() {
+                    self.project.media[index] = original;
+                    return None;
+                }
+                Some(Command::RelinkMedia(original))
+            }
             Command::ReprobeMedia(media) => {
                 let index = self
                     .project
@@ -561,6 +580,37 @@ impl Editor {
 mod tests {
     use super::*;
 
+    #[test]
+    fn relink_preserves_identity_and_undo_restores_source() {
+        let original = Media {
+            id: 1,
+            path: "old.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(1_000_000),
+            has_audio: false,
+        };
+        let mut editor = Editor::new(Project::new("Relink"));
+        assert!(editor.apply(Command::ImportMedia(original.clone())));
+        let replacement = Media {
+            path: "new.mp4".into(),
+            has_audio: true,
+            ..original.clone()
+        };
+        assert!(!editor.apply(Command::RelinkMedia(Media {
+            kind: MediaKind::Audio,
+            ..replacement.clone()
+        })));
+        assert!(!editor.apply(Command::RelinkMedia(Media {
+            id: 99,
+            ..replacement.clone()
+        })));
+        assert!(editor.apply(Command::RelinkMedia(replacement.clone())));
+        assert_eq!(editor.project().media(), std::slice::from_ref(&replacement));
+        assert!(editor.undo());
+        assert_eq!(editor.project().media(), &[original]);
+        assert!(editor.redo());
+        assert_eq!(editor.project().media(), &[replacement]);
+    }
     #[test]
     fn rename_undo_redo_and_new_edit_invalidate_redo() {
         let mut editor = Editor::new(Project::new("Untitled"));

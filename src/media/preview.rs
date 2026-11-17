@@ -307,7 +307,8 @@ impl FrameReader {
         if decoder.format() == ffmpeg::format::Pixel::None || decoder.width() == 0 {
             return Err("Preview source has an unknown pixel format".into());
         }
-        let display = rotation.dimensions(decoder.width(), decoder.height());
+        let square = super::display_dimensions(&decoder);
+        let display = rotation.dimensions(square.0, square.1);
         let picture = super::fitted_dimensions(display.0, display.1, output.0, output.1);
         let coded = rotation.dimensions(picture.0, picture.1);
         let scaler = ffmpeg::software::scaling::context::Context::get(
@@ -445,6 +446,60 @@ mod tests {
     use super::*;
     use std::fs;
     use std::process::Command;
+
+    #[test]
+    fn anamorphic_frames_and_thumbnails_use_display_aspect() {
+        let root = std::env::temp_dir().join(format!("ocus-anamorphic-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("wide.mp4");
+        assert!(
+            Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=white:size=720x576:rate=1",
+                    "-vf",
+                    "setsar=64/45",
+                    "-t",
+                    "1",
+                    "-pix_fmt",
+                    "yuv420p"
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let source = FrameSource {
+            clip_id: 1,
+            path: path.clone(),
+            kind: MediaKind::Video,
+            start: 0,
+            source_start: 0,
+            duration: 1,
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let image = FrameReader::open(&source, 0, (1, 1), (1280, 720), cancelled.clone())
+            .unwrap()
+            .frame_at(0, &cancelled)
+            .unwrap();
+        assert!(
+            image
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[0] > 240),
+            "anamorphic picture must fill 1280x720 without pillarboxing"
+        );
+        let thumbnail = crate::media::thumbnail(&path).unwrap();
+        assert_eq!((thumbnail.width, thumbnail.height), (206, 116));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn rotation_metadata_orients_frames_and_thumbnails() {

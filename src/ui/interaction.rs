@@ -1122,7 +1122,7 @@ impl UiState {
             }
             None => self
                 .status
-                .set("Select a video clip with sound to detach its audio".into()),
+                .set("Could not detach audio from the selected clips".into()),
         }
     }
 
@@ -1536,6 +1536,28 @@ mod tests {
             .iter()
             .map(|clip| clip.start_frame)
             .collect()
+    }
+
+    #[test]
+    fn detach_audio_failure_reports_the_action_without_misdiagnosing_selection() {
+        let state = UiState::new();
+        for selection in [vec![], vec![(u64::MAX, 1)]] {
+            state.selected.set(selection);
+            state.run_menu(MenuCommand::DetachAudio);
+            assert_eq!(
+                state.status.peek(),
+                "Could not detach audio from the selected clips"
+            );
+            assert!(
+                state
+                    .editor
+                    .borrow()
+                    .project()
+                    .tracks()
+                    .iter()
+                    .all(|track| track.clips.is_empty())
+            );
+        }
     }
 
     #[test]

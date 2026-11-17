@@ -292,6 +292,17 @@ fn ruler_label(seconds: f64) -> String {
 
 type HitLane = (u64, Vec<(u64, u64, u64)>);
 
+fn trim_hit(x: f32, left: f32, right: f32) -> Option<bool> {
+    let threshold = 6.0_f32.min((right - left) / 4.0);
+    if x >= left && x <= left + threshold {
+        Some(true)
+    } else if x <= right && x >= right - threshold {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 /// The clip under `point`: `None` outside the lanes, `Some(None)` on a gap.
 fn hit(geometry: &Geometry, lanes: &[HitLane], point: Point) -> Option<Option<ClipRef>> {
     if point.x < geometry.left || point.y < geometry.top {
@@ -1179,7 +1190,38 @@ impl Widget for TimelineView {
 
     fn on_pointer_move(&self) -> Option<Rc<dyn Fn(Point, Modifiers)>> {
         let state = self.state.clone();
-        Some(Rc::new(move |_, modifiers| state.modifiers.set(modifiers)))
+        let weights = self.weights();
+        let lanes = self.hit_lanes();
+        let (start, span, scroll) = (self.start, self.span, self.scroll);
+        Some(Rc::new(move |position, modifiers| {
+            state.modifiers.set(modifiers);
+            let rect = state.timeline_rect.get();
+            let geometry = Geometry::new(local(rect), &weights, start, span, scroll);
+            let edge = hit(&geometry, &lanes, position)
+                .flatten()
+                .and_then(|clip| {
+                    lanes
+                        .iter()
+                        .find(|lane| lane.0 == clip.0)
+                        .and_then(|lane| lane.1.iter().find(|item| item.0 == clip.1))
+                })
+                .and_then(|item| {
+                    trim_hit(position.x, geometry.x(item.1), geometry.x(item.1 + item.2))
+                });
+            if state.trim_hover.peek() != edge.is_some() {
+                state.trim_hover.set(edge.is_some());
+            }
+        }))
+    }
+
+    fn cursor_icon(&self) -> Option<creamui::core::CursorIcon> {
+        if self.state.trim_hover.get()
+            || matches!(*self.state.gesture.borrow(), Gesture::Trim { .. })
+        {
+            Some(creamui::core::CursorIcon::ResizeHorizontal)
+        } else {
+            None
+        }
     }
 
     fn on_drag_start(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
@@ -1231,6 +1273,21 @@ impl Widget for TimelineView {
                             state.select_clip(Some(clip));
                         }
                         if state.selected.peek().contains(&clip) {
+                            let edge = lanes
+                                .iter()
+                                .find(|lane| lane.0 == clip.0)
+                                .and_then(|lane| lane.1.iter().find(|item| item.0 == clip.1))
+                                .and_then(|item| {
+                                    trim_hit(
+                                        position.x,
+                                        geometry.x(item.1),
+                                        geometry.x(item.1 + item.2),
+                                    )
+                                });
+                            if let Some(left) = edge {
+                                *state.gesture.borrow_mut() = Gesture::Trim { anchor: clip, left };
+                                return;
+                            }
                             Gesture::Clip {
                                 anchor: clip,
                                 grab: geometry.frame_at(position.x),
@@ -1270,6 +1327,27 @@ impl Widget for TimelineView {
             let geometry = Geometry::new(local(rect), &weights, start, span, scroll);
             let gesture = state.gesture.borrow().clone();
             match gesture {
+                Gesture::Trim { anchor, left } => {
+                    let editor = state.editor.borrow();
+                    let frame = geometry.frame(position.x);
+                    let tolerance = (geometry.frame_at(position.x + 8.0)
+                        - geometry.frame_at(position.x))
+                    .ceil() as i64;
+                    let adjustment = super::edits::snap(
+                        editor.project(),
+                        &[anchor],
+                        &[frame as i64],
+                        state.program.position.peek(),
+                        tolerance,
+                    );
+                    state.trim_draft.set(crate::project::edit::trim_edge(
+                        editor.project(),
+                        anchor.0,
+                        anchor.1,
+                        left,
+                        frame.saturating_add_signed(adjustment),
+                    ));
+                }
                 Gesture::Scrub if end > 0 => {
                     let frame = geometry.frame(position.x).min(end - 1);
                     if state.program.position.peek() != frame {
@@ -1321,6 +1399,12 @@ impl Widget for TimelineView {
         Some(Rc::new(move || {
             let gesture = std::mem::take(&mut *state.gesture.borrow_mut());
             match gesture {
+                Gesture::Trim { .. } => {
+                    if let Some(command) = state.trim_draft.peek() {
+                        state.edit(command);
+                    }
+                    state.trim_draft.set(None);
+                }
                 Gesture::Clip { click, .. } => {
                     if state.drag.peek().is_some() {
                         state.finish_drag();
@@ -1402,6 +1486,16 @@ impl Widget for TimelineView {
 mod tests {
     use super::*;
 
+    #[test]
+    fn edge_hit_keeps_narrow_clip_body_movable() {
+        assert_eq!(super::trim_hit(101.0, 100.0, 200.0), Some(true));
+        assert_eq!(super::trim_hit(199.0, 100.0, 200.0), Some(false));
+        assert_eq!(super::trim_hit(150.0, 100.0, 200.0), None);
+        assert_eq!(super::trim_hit(102.0, 100.0, 104.0), None);
+        assert_eq!(super::trim_hit(100.5, 100.0, 104.0), Some(true));
+        assert_eq!(super::trim_hit(103.5, 100.0, 104.0), Some(false));
+        assert_eq!(super::trim_hit(99.0, 100.0, 104.0), None);
+    }
     #[test]
     fn ruler_ticks_stay_readable_at_every_zoom() {
         assert_eq!(tick_spacing(300.0), (1.0, 5));

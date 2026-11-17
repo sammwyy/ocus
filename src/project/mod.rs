@@ -3,7 +3,7 @@ use crate::timeline::{ClipContent, Track, TrackKind};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-mod edit;
+pub(crate) mod edit;
 pub mod export_settings;
 pub mod format;
 pub mod store;

@@ -40,7 +40,7 @@ pub fn run_app() {
                                 .set("Wait for the current operation before closing".into());
                             return false;
                         }
-                        if close.confirm_discard() {
+                        if close.settle_unsaved_changes(UiState::close_window) {
                             close.pause();
                             close.pause_source();
                             true

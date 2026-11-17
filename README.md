@@ -30,7 +30,9 @@ frames as two clips, and the whole edit is one undo step. **Open** and
 **Save as…** use native file dialogs instead of requiring typed paths;
 **Save** reuses the chosen path. **New**, **Open** and closing the window
 offer Save, Don't Save or Cancel when there are unsaved changes; Save finishes
-first and the action continues only if it succeeds. Saves are atomic and file operations run in the background.
+first and the action continues only if it succeeds. Undoing or redoing back to
+the last saved version clears the edited indicator; undoing all edits in a new
+project clears it too. Saves are atomic and file operations run in the background.
 **Import** accepts multiple
 files from the native picker and probes video, audio, and images with FFmpeg
 on a worker thread. Video and still-image sources get small, regenerable

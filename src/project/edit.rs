@@ -146,10 +146,18 @@ fn ripple_delete(project: &Project, selection: &[(u64, u64)]) -> Option<Vec<Trac
     Some(tracks)
 }
 
+struct HistoryEntry {
+    command: Command,
+    revision: u64,
+}
+
 pub struct Editor {
     project: Project,
-    undo: Vec<Command>,
-    redo: Vec<Command>,
+    undo: Vec<HistoryEntry>,
+    redo: Vec<HistoryEntry>,
+    revision: u64,
+    next_revision: u64,
+    saved_revision: u64,
 }
 
 pub(crate) fn trim_edge(
@@ -238,11 +246,26 @@ impl Editor {
             project,
             undo: Vec::new(),
             redo: Vec::new(),
+            revision: 0,
+            next_revision: 1,
+            saved_revision: 0,
         }
     }
 
     pub fn project(&self) -> &Project {
         &self.project
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn mark_saved(&mut self, revision: u64) {
+        self.saved_revision = revision;
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.revision != self.saved_revision
     }
 
     pub fn can_undo(&self) -> bool {
@@ -550,27 +573,40 @@ impl Editor {
         let Some(inverse) = self.execute(command) else {
             return false;
         };
-        self.undo.push(inverse);
+        self.undo.push(HistoryEntry {
+            command: inverse,
+            revision: self.revision,
+        });
         self.redo.clear();
+        self.revision = self.next_revision;
+        self.next_revision += 1;
         true
     }
 
     pub fn undo(&mut self) -> bool {
-        let Some(command) = self.undo.pop() else {
+        let Some(entry) = self.undo.pop() else {
             return false;
         };
-        if let Some(inverse) = self.execute(command) {
-            self.redo.push(inverse);
+        if let Some(inverse) = self.execute(entry.command) {
+            self.redo.push(HistoryEntry {
+                command: inverse,
+                revision: self.revision,
+            });
+            self.revision = entry.revision;
         }
         true
     }
 
     pub fn redo(&mut self) -> bool {
-        let Some(command) = self.redo.pop() else {
+        let Some(entry) = self.redo.pop() else {
             return false;
         };
-        if let Some(inverse) = self.execute(command) {
-            self.undo.push(inverse);
+        if let Some(inverse) = self.execute(entry.command) {
+            self.undo.push(HistoryEntry {
+                command: inverse,
+                revision: self.revision,
+            });
+            self.revision = entry.revision;
         }
         true
     }
@@ -579,6 +615,49 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_checkpoint_survives_undo_redo_but_not_a_diverging_branch() {
+        let mut editor = Editor::new(Project::new("Untitled"));
+        assert!(!editor.is_dirty());
+        assert!(editor.apply(Command::RenameProject("Saved".into())));
+        let saved = editor.revision();
+        editor.mark_saved(saved);
+        assert!(!editor.is_dirty());
+        assert!(editor.apply(Command::RenameProject("Later".into())));
+        assert!(editor.is_dirty());
+        assert!(editor.undo());
+        assert!(!editor.is_dirty());
+        assert!(editor.undo());
+        assert!(editor.is_dirty());
+        assert!(editor.redo());
+        assert!(!editor.is_dirty());
+        assert!(editor.redo());
+        assert!(editor.is_dirty());
+        assert!(editor.undo());
+        assert!(editor.undo());
+
+        assert!(editor.apply(Command::RenameProject("Different branch".into())));
+        assert_ne!(editor.revision(), saved);
+        assert!(editor.is_dirty());
+        assert!(!editor.redo());
+        assert!(editor.undo());
+        assert!(editor.is_dirty());
+        assert!(editor.redo());
+        assert!(editor.is_dirty());
+    }
+
+    #[test]
+    fn rejected_edits_and_empty_history_keep_the_clean_checkpoint() {
+        let mut editor = Editor::new(Project::new("Untitled"));
+        let revision = editor.revision();
+        assert!(!editor.apply(Command::RenameProject("Untitled".into())));
+        assert!(!editor.apply(Command::RenameProject("   ".into())));
+        assert!(!editor.undo());
+        assert!(!editor.redo());
+        assert_eq!(editor.revision(), revision);
+        assert!(!editor.is_dirty());
+    }
 
     #[test]
     fn relink_preserves_identity_and_undo_restores_source() {

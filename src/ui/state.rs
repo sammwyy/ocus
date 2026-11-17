@@ -15,7 +15,9 @@ use crate::project::{Command, Editor, Project, store};
 use crate::settings::{self, Settings, ThemeMode};
 use crate::timeline::{Clip, ClipContent, Title, TrackKind};
 use creamui::core::{Modifiers, Point, Rect, RgbaImage};
-use creamui::widgets::{ColorPickerController, ScrollController, TextController};
+use creamui::widgets::{
+    ColorPickerController, ScrollController, TextController, TooltipController,
+};
 use creamui::{AppHandle, GpuFrame, GpuFrameSlot, Signal, WindowHandle};
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use std::cell::{Cell, RefCell};
@@ -204,11 +206,19 @@ pub(crate) struct TitleGesture {
     pub resize: bool,
 }
 
+pub(super) struct TooltipState {
+    pub controller: TooltipController,
+    _effect: creamui::reactive::Effect,
+}
+
 #[derive(Clone)]
 pub(crate) struct UiState {
     pub editor: Rc<RefCell<Editor>>,
     pub revision: Signal<u64>,
     pub ui_revision: Signal<u64>,
+    pub(super) tooltips: Rc<RefCell<HashMap<(&'static str, u64), TooltipState>>>,
+    pub tooltip_viewport: Rc<Cell<creamui::Size>>,
+    tooltip_keys: Rc<RefCell<HashSet<(&'static str, u64)>>>,
     pub selected: Signal<Vec<ClipRef>>,
     pub selected_media: Signal<Option<u64>>,
     pub missing_media: Signal<HashSet<u64>>,
@@ -288,6 +298,54 @@ pub(crate) struct UiState {
 }
 
 impl UiState {
+    pub(super) fn begin_tooltips(&self) {
+        self.tooltip_keys.borrow_mut().clear();
+    }
+
+    pub(super) fn finish_tooltips(&self) {
+        let keys = self.tooltip_keys.borrow();
+        self.tooltips
+            .borrow_mut()
+            .retain(|key, _| keys.contains(key));
+    }
+
+    pub(super) fn tooltip_controller(&self, key: (&'static str, u64)) -> TooltipController {
+        self.tooltip_keys.borrow_mut().insert(key);
+        if let Some(tooltip) = self.tooltips.borrow().get(&key) {
+            return tooltip.controller.clone();
+        }
+        let controller = TooltipController::default();
+        let weak_controllers = Rc::downgrade(&self.tooltips);
+        let active = controller.clone();
+        let effect = creamui::reactive::create_effect(move || {
+            if active.visible() {
+                let Some(controllers) = weak_controllers.upgrade() else {
+                    return;
+                };
+                let others: Vec<_> = controllers
+                    .borrow()
+                    .iter()
+                    .filter(|(other, _)| **other != key)
+                    .map(|(_, tooltip)| tooltip.controller.clone())
+                    .collect();
+                creamui::reactive::batch(|| {
+                    for controller in others {
+                        controller.hover(false);
+                        controller.focus(false);
+                    }
+                });
+            }
+        });
+        self.tooltips.borrow_mut().insert(
+            key,
+            TooltipState {
+                controller: controller.clone(),
+                _effect: effect,
+            },
+        );
+        controller
+    }
+
     pub fn new() -> Self {
         let settings = settings::path()
             .and_then(|path| settings::load(&path).ok())
@@ -298,6 +356,9 @@ impl UiState {
             editor: Rc::new(RefCell::new(Editor::new(Project::new("Untitled")))),
             revision: Signal::new(0),
             ui_revision: Signal::new(0),
+            tooltips: Rc::new(RefCell::new(HashMap::new())),
+            tooltip_viewport: Rc::new(Cell::new(creamui::Size::default())),
+            tooltip_keys: Rc::new(RefCell::new(HashSet::new())),
             selected: Signal::new(Vec::new()),
             selected_media: Signal::new(None),
             missing_media: Signal::new(HashSet::new()),
@@ -2608,6 +2669,69 @@ fn import_summary(imported: usize, total: usize, errors: &[(PathBuf, String)]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tooltip_resources_are_released_with_removed_controls_and_projects() {
+        let state = UiState::new();
+        let build = || {
+            creamui::reactive::with_context_scope(|| {
+                creamui::reactive::provide_context(creamui::ThemeProvider::default());
+                drop(crate::ui::build(
+                    &state,
+                    creamui::Size {
+                        width: 1280.0,
+                        height: 760.0,
+                    },
+                ));
+            });
+        };
+        build();
+        let baseline = state.tooltips.borrow().len();
+        for id in 1..=2 {
+            assert!(state.edit(Command::ImportMedia(Media {
+                id,
+                path: format!("/tmp/tooltip-{id}.png").into(),
+                kind: MediaKind::Image,
+                duration_us: None,
+                has_audio: false,
+            })));
+        }
+        build();
+        assert!(
+            state
+                .tooltips
+                .borrow()
+                .contains_key(&("Insert at timeline end", 2))
+        );
+        let removed = state.tooltip_controller(("Insert at timeline end", 1));
+        assert!(state.edit(Command::RemoveMedia(1)));
+        build();
+        assert!(
+            !state
+                .tooltips
+                .borrow()
+                .contains_key(&("Insert at timeline end", 1))
+        );
+        let undo = state.tooltip_controller(("Undo", 0));
+        undo.focus(true);
+        build();
+        assert!(state.tooltip_controller(("Undo", 0)).visible());
+        removed.focus(true);
+        assert!(
+            undo.visible(),
+            "a removed controller's effect must be dropped"
+        );
+        state.dirty.set(false);
+        state.new_project();
+        build();
+        assert!(
+            !state
+                .tooltips
+                .borrow()
+                .contains_key(&("Insert at timeline end", 2))
+        );
+        assert_eq!(state.tooltips.borrow().len(), baseline);
+    }
 
     fn storyboard_ranges() -> Vec<(StoryboardKey, bool)> {
         (0..100)

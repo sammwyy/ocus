@@ -9,6 +9,22 @@ pub mod audio;
 pub mod composite;
 pub mod preview;
 
+pub(crate) fn fitted_dimensions(
+    source_width: u32,
+    source_height: u32,
+    width: u32,
+    height: u32,
+) -> (u32, u32) {
+    if u64::from(width) * u64::from(source_height) <= u64::from(height) * u64::from(source_width) {
+        let fitted = (u64::from(width) * u64::from(source_height) / u64::from(source_width)) as u32;
+        (width, (fitted.max(2) & !1).min(height))
+    } else {
+        let fitted =
+            (u64::from(height) * u64::from(source_width) / u64::from(source_height)) as u32;
+        ((fitted.max(2) & !1).min(width), height)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Media {
     pub id: u64,

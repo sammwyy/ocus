@@ -514,9 +514,6 @@ impl UiState {
         self.dirty.set(true);
         self.refresh_missing_media();
         self.status.set(status.into());
-        self.request_preview();
-        self.request_source_preview();
-        self.queue_storyboards();
     }
 
     pub fn edit(&self, command: Command) -> bool {
@@ -548,6 +545,9 @@ impl UiState {
             move |missing| {
                 if state.revision.peek() == revision {
                     state.missing_media.set(missing);
+                    state.request_preview();
+                    state.request_source_preview();
+                    state.queue_storyboards();
                 }
             },
         );
@@ -741,6 +741,9 @@ impl UiState {
             let ClipContent::Media { media_id } = clip.content else {
                 return None;
             };
+            if self.missing_media.peek().contains(&media_id) {
+                return None;
+            }
             let media = project.media().iter().find(|media| media.id == media_id)?;
             return Some(SourceRange {
                 path: media.path.clone(),
@@ -750,6 +753,9 @@ impl UiState {
             });
         }
         let media_id = self.selected_media.peek()?;
+        if self.missing_media.peek().contains(&media_id) {
+            return None;
+        }
         let media = project.media().iter().find(|media| media.id == media_id)?;
         let rate = &project.settings().frame_rate;
         Some(SourceRange {
@@ -1269,7 +1275,6 @@ impl UiState {
                             state.ui_revision.update(|revision| *revision += 1);
                         }
                     }
-                    Err(error) => state.status.set(format!("Timeline thumbnail: {error}")),
                     _ => {}
                 }
             },
@@ -2350,10 +2355,21 @@ impl UiState {
             return;
         };
         let state = self.clone();
+        let missing = self.missing_media.peek();
+        let missing_paths: HashSet<_> = self
+            .editor
+            .borrow()
+            .project()
+            .media()
+            .iter()
+            .filter(|media| missing.contains(&media.id))
+            .map(|media| media.path.clone())
+            .collect();
         app.spawn_background(
             move || {
                 sources
                     .into_iter()
+                    .filter(|path| !missing_paths.contains(path))
                     .filter_map(|path| thumbnail(&path).ok().map(|image| (path, image)))
                     .collect::<Vec<_>>()
             },
@@ -2685,6 +2701,13 @@ mod tests {
         state.zoom_to_fit();
         assert!(state.storyboard_requests().is_empty());
         assert_eq!(state.storyboards.borrow().len(), MAX_STORYBOARDS);
+        state.missing_media.set(HashSet::from([1]));
+        assert!(state.storyboard_requests().is_empty());
+        assert!(state.storyboards.borrow().is_empty());
+        state.select_media(1);
+        assert!(state.source_range().is_none());
+        state.select_clip(Some((0, 0)));
+        assert!(state.source_range().is_none());
     }
 
     #[test]

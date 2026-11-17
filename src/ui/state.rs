@@ -60,6 +60,18 @@ pub(crate) enum MediaView {
     List,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnsavedChoice {
+    Save,
+    Discard,
+    Cancel,
+}
+
+type AfterSave = Box<dyn FnOnce(&UiState)>;
+
+const SAVE_CHOICE: &str = "Save";
+const DISCARD_CHOICE: &str = "Don't Save";
+const CANCEL_CHOICE: &str = "Cancel";
 const MAX_THUMBNAILS: usize = 256;
 const MAX_STORYBOARDS: usize = 64;
 /// Seconds shown across the timeline at each zoom level, closest first.
@@ -69,6 +81,64 @@ pub(crate) const ZOOM_SECONDS: [u64; 16] = [
 const DEFAULT_ZOOM: usize = 5;
 
 pub(crate) type Storyboard = Arc<Vec<Arc<RgbaImage>>>;
+
+fn storyboard_requests(
+    keys: &[(StoryboardKey, bool)],
+    cache: &mut HashMap<StoryboardKey, Storyboard>,
+    recent: &mut Vec<StoryboardKey>,
+) -> Vec<StoryboardKey> {
+    let live: HashSet<_> = keys.iter().map(|(key, _)| key.clone()).collect();
+    cache.retain(|key, _| live.contains(key));
+    recent.retain(|key| cache.contains_key(key));
+    let visible: HashSet<_> = keys
+        .iter()
+        .filter(|(_, visible)| *visible)
+        .map(|(key, _)| key.clone())
+        .collect();
+    let mut selected = Vec::new();
+    let mut seen = HashSet::new();
+    for key in keys
+        .iter()
+        .map(|(key, _)| key)
+        .filter(|key| visible.contains(*key) && cache.contains_key(*key))
+        .chain(
+            keys.iter()
+                .map(|(key, _)| key)
+                .filter(|key| visible.contains(*key)),
+        )
+        .chain(recent.iter().rev())
+        .chain(
+            keys.iter()
+                .map(|(key, _)| key)
+                .filter(|key| cache.contains_key(*key)),
+        )
+        .chain(keys.iter().map(|(key, _)| key))
+    {
+        if seen.insert(key.clone()) {
+            selected.push(key.clone());
+            if selected.len() == MAX_STORYBOARDS {
+                break;
+            }
+        }
+    }
+    cache.retain(|key, _| selected.contains(key));
+    recent.retain(|key| selected.contains(key) && !visible.contains(key));
+    for key in &selected {
+        if !recent.contains(key) && !visible.contains(key) {
+            recent.insert(0, key.clone());
+        }
+    }
+    recent.extend(
+        selected
+            .iter()
+            .filter(|key| visible.contains(*key))
+            .cloned(),
+    );
+    selected
+        .into_iter()
+        .filter(|key| !cache.contains_key(key))
+        .collect()
+}
 
 /// One GPU preview surface with its own position and decode stream.
 #[derive(Clone)]
@@ -174,6 +244,8 @@ pub(crate) struct UiState {
     pub timeline_expanded: Signal<bool>,
     pub gesture: Rc<RefCell<Gesture>>,
     pub drag: Signal<Option<DragState>>,
+    pub trim_draft: Signal<Option<Command>>,
+    pub trim_hover: Signal<bool>,
     pub marquee: Signal<Option<Rect>>,
     pub timeline_rect: Rc<Cell<Rect>>,
     pub modifiers: Rc<Cell<Modifiers>>,
@@ -192,6 +264,7 @@ pub(crate) struct UiState {
     export_directory: Signal<PathBuf>,
     storyboard_cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
     storyboard_serial: Rc<Cell<u64>>,
+    storyboard_recent: Rc<RefCell<Vec<StoryboardKey>>>,
     export_control: Rc<RefCell<Option<Arc<ExportControl>>>>,
     audio_output: Rc<RefCell<Option<playback::Output>>>,
     audio_failed: Rc<Cell<bool>>,
@@ -264,6 +337,8 @@ impl UiState {
             timeline_expanded: Signal::new(false),
             gesture: Rc::new(RefCell::new(Gesture::Idle)),
             drag: Signal::new(None),
+            trim_draft: Signal::new(None),
+            trim_hover: Signal::new(false),
             marquee: Signal::new(None),
             timeline_rect: Rc::new(Cell::new(Rect::default())),
             modifiers: Rc::new(Cell::new(Modifiers::default())),
@@ -282,6 +357,7 @@ impl UiState {
             export_directory: Signal::new(export_directory),
             storyboard_cancel: Rc::new(RefCell::new(None)),
             storyboard_serial: Rc::new(Cell::new(0)),
+            storyboard_recent: Rc::new(RefCell::new(Vec::new())),
             export_control: Rc::new(RefCell::new(None)),
             audio_output: Rc::new(RefCell::new(None)),
             audio_failed: Rc::new(Cell::new(false)),
@@ -479,6 +555,7 @@ impl UiState {
         let start = self.timeline_start.peek();
         if frame < start || frame >= start.saturating_add(span) {
             self.timeline_start.set(frame / span * span);
+            self.queue_storyboards();
         }
     }
 
@@ -508,6 +585,7 @@ impl UiState {
             .round() as u64;
         self.timeline_start
             .set(start.min(self.sequence_end().saturating_sub(1)));
+        self.queue_storyboards();
     }
 
     /// The closest zoom that shows the whole sequence, from its start.
@@ -521,6 +599,7 @@ impl UiState {
             .unwrap_or(ZOOM_SECONDS.len() - 1);
         self.timeline_zoom.set(zoom);
         self.timeline_start.set(0);
+        self.queue_storyboards();
     }
 
     pub fn scroll_timeline(&self, steps: i64) {
@@ -536,6 +615,7 @@ impl UiState {
             .min(self.sequence_end().saturating_sub(1));
         if next != start {
             self.timeline_start.set(next);
+            self.queue_storyboards();
         }
     }
 
@@ -967,7 +1047,7 @@ impl UiState {
                     decode_sequence(&plan, start, playing, cancelled, clock, |event| {
                         if matches!(event, PreviewEvent::Frame(..))
                             && worker_pending
-                                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                                .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                                     (count < 2).then_some(count + 1)
                                 })
                                 .is_err()
@@ -1094,47 +1174,12 @@ impl UiState {
             .set(self.storyboard_serial.get().wrapping_add(1));
     }
 
-    fn queue_storyboards(&self) {
+    pub(super) fn queue_storyboards(&self) {
         self.cancel_storyboards();
         let Some(app) = self.app.borrow().clone() else {
             return;
         };
-        let editor = self.editor.borrow();
-        let project = editor.project();
-        let fps = (
-            project.settings().frame_rate.numerator,
-            project.settings().frame_rate.denominator,
-        );
-        let keys: Vec<_> = project
-            .tracks()
-            .iter()
-            .filter(|track| track.kind == TrackKind::Video)
-            .flat_map(|track| &track.clips)
-            .filter_map(|clip| {
-                let ClipContent::Media { media_id } = clip.content else {
-                    return None;
-                };
-                let media = project.media().iter().find(|media| media.id == media_id)?;
-                Some(StoryboardKey {
-                    path: media.path.clone(),
-                    kind: media.kind,
-                    source_start: clip.source_start_frame,
-                    duration: clip.duration_frames,
-                    fps,
-                })
-            })
-            .collect();
-        drop(editor);
-        let live: HashSet<_> = keys.iter().cloned().collect();
-        let mut cache = self.storyboards.borrow_mut();
-        cache.retain(|key, _| live.contains(key));
-        let mut requested = HashSet::new();
-        let requests: Vec<_> = keys
-            .into_iter()
-            .filter(|key| requested.insert(key.clone()) && !cache.contains_key(key))
-            .take(MAX_STORYBOARDS.saturating_sub(cache.len()))
-            .collect();
-        drop(cache);
+        let requests = self.storyboard_requests();
         if requests.is_empty() {
             return;
         }
@@ -1177,19 +1222,117 @@ impl UiState {
         );
     }
 
-    pub fn confirm_discard(&self) -> bool {
-        !self.dirty.peek()
-            || MessageDialog::new()
+    fn storyboard_requests(&self) -> Vec<StoryboardKey> {
+        let editor = self.editor.borrow();
+        let project = editor.project();
+        let fps = (
+            project.settings().frame_rate.numerator,
+            project.settings().frame_rate.denominator,
+        );
+        let start = self.timeline_start.peek();
+        let end = start.saturating_add(self.visible_frames());
+        let weights: Vec<_> = project
+            .tracks()
+            .iter()
+            .map(|track| {
+                super::timeline_view::lane_weight(
+                    track.kind,
+                    track.clips.iter().any(|clip| clip.linked_audio),
+                )
+            })
+            .collect();
+        let geometry = super::timeline_view::Geometry::new(
+            self.timeline_rect.get(),
+            &weights,
+            start,
+            self.visible_frames(),
+            self.track_scroll.peek(),
+        );
+        let keys: Vec<_> = project
+            .tracks()
+            .iter()
+            .enumerate()
+            .filter(|(_, track)| track.kind == TrackKind::Video)
+            .flat_map(|(index, track)| track.clips.iter().map(move |clip| (index, clip)))
+            .filter_map(|(index, clip)| {
+                let ClipContent::Media { media_id } = clip.content else {
+                    return None;
+                };
+                let media = project.media().iter().find(|media| media.id == media_id)?;
+                Some((
+                    StoryboardKey {
+                        path: media.path.clone(),
+                        kind: media.kind,
+                        source_start: clip.source_start_frame,
+                        duration: clip.duration_frames,
+                        fps,
+                    },
+                    geometry.lane_visible(index)
+                        && clip.start_frame < end
+                        && clip.start_frame.saturating_add(clip.duration_frames) > start,
+                ))
+            })
+            .collect();
+        drop(editor);
+        let mut cache = self.storyboards.borrow_mut();
+        storyboard_requests(&keys, &mut cache, &mut self.storyboard_recent.borrow_mut())
+    }
+
+    /// Returns true when the caller may go ahead now. Choosing Save returns
+    /// false and runs `after_save` only once that save succeeds.
+    pub fn settle_unsaved_changes(&self, after_save: impl FnOnce(&Self) + 'static) -> bool {
+        !self.dirty.peek() || self.apply_unsaved_choice(self.ask_unsaved_changes(), after_save)
+    }
+
+    fn ask_unsaved_changes(&self) -> UnsavedChoice {
+        let name = self.project_path.peek().map_or_else(
+            || self.editor.borrow().project().name().to_owned(),
+            |path| {
+                path.file_stem().map_or_else(
+                    || path.display().to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                )
+            },
+        );
+        unsaved_choice(
+            MessageDialog::new()
                 .set_level(MessageLevel::Warning)
                 .set_title("Unsaved changes")
-                .set_description("Discard your unsaved changes?")
-                .set_buttons(MessageButtons::YesNo)
-                .show()
-                == MessageDialogResult::Yes
+                .set_description(format!(
+                    "Save changes to \u{201c}{name}\u{201d}? Changes you don't save will be lost."
+                ))
+                .set_buttons(MessageButtons::YesNoCancelCustom(
+                    SAVE_CHOICE.into(),
+                    DISCARD_CHOICE.into(),
+                    CANCEL_CHOICE.into(),
+                ))
+                .show(),
+        )
+    }
+
+    fn apply_unsaved_choice(
+        &self,
+        choice: UnsavedChoice,
+        after_save: impl FnOnce(&Self) + 'static,
+    ) -> bool {
+        match choice {
+            UnsavedChoice::Discard => true,
+            UnsavedChoice::Cancel => false,
+            UnsavedChoice::Save => {
+                self.save_then(Some(Box::new(after_save)));
+                false
+            }
+        }
+    }
+
+    pub fn close_window(&self) {
+        if let Some(window) = self.window.borrow().as_ref() {
+            window.close();
+        }
     }
 
     pub fn new_project(&self) {
-        if self.busy.peek() || !self.confirm_discard() {
+        if self.busy.peek() || !self.settle_unsaved_changes(Self::new_project) {
             return;
         }
         *self.editor.borrow_mut() = Editor::new(Project::new("Untitled"));
@@ -1215,9 +1358,11 @@ impl UiState {
             .set_title("Open Ocus project")
             .add_filter("Ocus project", &["ocus"])
             .pick_file()
-            && self.confirm_discard()
         {
-            self.load_path(path);
+            let retry = path.clone();
+            if self.settle_unsaved_changes(move |state| state.load_path(retry)) {
+                self.load_path(path);
+            }
         }
     }
 
@@ -1275,14 +1420,22 @@ impl UiState {
     }
 
     pub fn save(&self) {
+        self.save_then(None);
+    }
+
+    fn save_then(&self, after_save: Option<AfterSave>) {
         if let Some(path) = self.project_path.peek() {
-            self.save_to(path);
+            self.save_to(path, after_save);
         } else {
-            self.save_as_dialog();
+            self.save_as_then(after_save);
         }
     }
 
     pub fn save_as_dialog(&self) {
+        self.save_as_then(None);
+    }
+
+    fn save_as_then(&self, after_save: Option<AfterSave>) {
         if self.busy.peek() {
             return;
         }
@@ -1334,19 +1487,24 @@ impl UiState {
                     {
                         return;
                     }
-                    state.save_to(path);
+                    state.save_to(path, after_save);
                 },
             );
             return;
         }
-        self.save_to(path);
+        self.save_to(path, after_save);
     }
 
-    pub fn save_to(&self, path: PathBuf) {
-        self.save_to_with_export(path, None);
+    fn save_to(&self, path: PathBuf, after_save: Option<AfterSave>) {
+        self.save_to_with_export(path, None, after_save);
     }
 
-    fn save_to_with_export(&self, path: PathBuf, exported: Option<PathBuf>) {
+    fn save_to_with_export(
+        &self,
+        path: PathBuf,
+        exported: Option<PathBuf>,
+        after_save: Option<AfterSave>,
+    ) {
         let Some(app) = self.app.borrow().clone() else {
             return;
         };
@@ -1363,30 +1521,43 @@ impl UiState {
                 let path = path.clone();
                 move || store::save(&path, &project)
             },
-            move |result| {
-                state.busy.set(false);
-                state.status.set(match result {
-                    Ok(()) if state.revision.peek() == revision => {
-                        state.project_path.set(Some(path));
-                        state.dirty.set(false);
-                        exported.map_or_else(
-                            || "Project saved".into(),
-                            |path| format!("Exported: {} · project saved", path.display()),
-                        )
-                    }
-                    Ok(()) => "Saved previous version · Unsaved changes".into(),
-                    Err(error) => exported.map_or_else(
-                        || format!("Save failed: {error}"),
-                        |path| {
-                            format!(
-                                "Exported: {} · project save failed: {error}",
-                                path.display()
-                            )
-                        },
-                    ),
-                });
-            },
+            move |result| state.finish_save(path, revision, exported, after_save, result),
         );
+    }
+
+    fn finish_save(
+        &self,
+        path: PathBuf,
+        revision: u64,
+        exported: Option<PathBuf>,
+        after_save: Option<AfterSave>,
+        result: std::io::Result<()>,
+    ) {
+        self.busy.set(false);
+        let saved_current = result.is_ok() && self.revision.peek() == revision;
+        self.status.set(match result {
+            Ok(()) if saved_current => {
+                self.project_path.set(Some(path));
+                self.dirty.set(false);
+                exported.map_or_else(
+                    || "Project saved".into(),
+                    |path| format!("Exported: {} · project saved", path.display()),
+                )
+            }
+            Ok(()) => "Saved previous version · Unsaved changes".into(),
+            Err(error) => exported.map_or_else(
+                || format!("Save failed: {error}"),
+                |path| {
+                    format!(
+                        "Exported: {} · project save failed: {error}",
+                        path.display()
+                    )
+                },
+            ),
+        });
+        if saved_current && let Some(after_save) = after_save {
+            after_save(self);
+        }
     }
 
     pub fn import_dialog(&self) {
@@ -1795,7 +1966,11 @@ impl UiState {
                             path: path.clone(),
                         })));
                         if let Some(project_path) = &project_path {
-                            state.save_to_with_export(project_path.clone(), Some(path.clone()));
+                            state.save_to_with_export(
+                                project_path.clone(),
+                                Some(path.clone()),
+                                None,
+                            );
                         }
                         if project_path.is_some() {
                             format!("Exported: {}", path.display())
@@ -2131,6 +2306,17 @@ fn unused_export_path(mut path: PathBuf) -> PathBuf {
     path
 }
 
+/// Platforms without custom button labels report the Yes/No/Cancel buttons.
+fn unsaved_choice(result: MessageDialogResult) -> UnsavedChoice {
+    match result {
+        MessageDialogResult::Yes => UnsavedChoice::Save,
+        MessageDialogResult::No => UnsavedChoice::Discard,
+        MessageDialogResult::Custom(label) if label == SAVE_CHOICE => UnsavedChoice::Save,
+        MessageDialogResult::Custom(label) if label == DISCARD_CHOICE => UnsavedChoice::Discard,
+        _ => UnsavedChoice::Cancel,
+    }
+}
+
 fn project_file(path: PathBuf) -> Result<PathBuf, String> {
     match path.extension().and_then(|extension| extension.to_str()) {
         None => Ok(path.with_extension("ocus")),
@@ -2182,6 +2368,141 @@ fn import_summary(imported: usize, total: usize, errors: &[(PathBuf, String)]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn storyboard_ranges() -> Vec<(StoryboardKey, bool)> {
+        (0..100)
+            .map(|index| {
+                (
+                    StoryboardKey {
+                        path: "video.mp4".into(),
+                        kind: MediaKind::Video,
+                        source_start: index * 30,
+                        duration: 30,
+                        fps: (30, 1),
+                    },
+                    index >= 90,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn storyboard_visible_later_ranges_replace_oldest_hidden_entries() {
+        let keys = storyboard_ranges();
+        let mut cache: HashMap<_, _> = keys[..64]
+            .iter()
+            .map(|(key, _)| (key.clone(), Arc::new(Vec::new())))
+            .collect();
+        let mut recent: Vec<_> = keys[..64].iter().map(|(key, _)| key.clone()).collect();
+        let requests = storyboard_requests(&keys, &mut cache, &mut recent);
+        let visible_queued = requests
+            .iter()
+            .filter(|key| keys[90..].iter().any(|(visible, _)| visible == *key))
+            .count();
+        println!(
+            "100 ranges, viewport 90..100: {visible_queued}/10 visible queued; {} cached + {} queued",
+            cache.len(),
+            requests.len()
+        );
+        assert_eq!(visible_queued, 10);
+        assert!(cache.len() + requests.len() <= MAX_STORYBOARDS);
+        assert!(keys[..10].iter().all(|(key, _)| !cache.contains_key(key)));
+        assert!(keys[10..64].iter().all(|(key, _)| cache.contains_key(key)));
+    }
+
+    #[test]
+    fn storyboard_visible_cached_entries_are_protected() {
+        let mut keys = storyboard_ranges();
+        keys[0].1 = true;
+        let mut cache: HashMap<_, _> = keys[..64]
+            .iter()
+            .map(|(key, _)| (key.clone(), Arc::new(Vec::new())))
+            .collect();
+        let mut recent: Vec<_> = keys[..64].iter().map(|(key, _)| key.clone()).collect();
+        let requests = storyboard_requests(&keys, &mut cache, &mut recent);
+        assert!(cache.contains_key(&keys[0].0));
+        assert_eq!(requests.len(), 10);
+        assert!(cache.len() + requests.len() <= MAX_STORYBOARDS);
+    }
+
+    #[test]
+    fn storyboard_viewport_scroll_and_zoom_request_later_clip_ranges() {
+        let state = UiState::new();
+        state.timeline_rect.set(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 400.0,
+        });
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "video.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(100_000_000),
+            has_audio: false,
+        })));
+        for index in 0..100 {
+            assert!(state.edit(Command::InsertClip {
+                track_id: 0,
+                clip: Clip {
+                    id: index,
+                    start_frame: index * 30,
+                    source_start_frame: index * 30,
+                    duration_frames: 30,
+                    content: ClipContent::Media { media_id: 1 },
+                    volume: 1.0,
+                    muted: false,
+                    linked_audio: false,
+                }
+            }));
+        }
+        for key in state.storyboard_requests() {
+            state
+                .storyboards
+                .borrow_mut()
+                .insert(key, Arc::new(Vec::new()));
+        }
+        state.scroll_timeline_frames(2700);
+        let requests = state.storyboard_requests();
+        assert_eq!(requests.len(), 10);
+        assert!(requests.iter().all(|key| key.source_start >= 2700));
+        for key in requests {
+            state
+                .storyboards
+                .borrow_mut()
+                .insert(key, Arc::new(Vec::new()));
+        }
+        state.zoom_timeline_around(5 + 1, 2700, 0.0);
+        assert!(state.storyboard_requests().is_empty());
+        assert_eq!(state.storyboards.borrow().len(), MAX_STORYBOARDS);
+        state.zoom_to_fit();
+        assert!(state.storyboard_requests().is_empty());
+        assert_eq!(state.storyboards.borrow().len(), MAX_STORYBOARDS);
+    }
+
+    #[test]
+    fn storyboard_empty_obsolete_duplicate_and_failed_requests_stay_bounded() {
+        let mut keys = storyboard_ranges();
+        keys.iter_mut().for_each(|(_, visible)| *visible = true);
+        keys.push(keys[0].clone());
+        let mut cache = HashMap::new();
+        let mut recent = Vec::new();
+        let requests = storyboard_requests(&keys, &mut cache, &mut recent);
+        assert_eq!(requests.len(), MAX_STORYBOARDS);
+        assert_eq!(
+            requests.iter().collect::<HashSet<_>>().len(),
+            MAX_STORYBOARDS
+        );
+        // A failed decode leaves no cache entry and can be requested again.
+        assert_eq!(
+            storyboard_requests(&keys, &mut cache, &mut recent),
+            requests
+        );
+        cache.insert(keys[0].0.clone(), Arc::new(Vec::new()));
+        assert!(storyboard_requests(&[], &mut cache, &mut recent).is_empty());
+        assert!(cache.is_empty());
+        assert!(recent.is_empty());
+    }
 
     #[test]
     fn export_destinations_keep_project_paths_ahead_of_the_user_default() {
@@ -2373,6 +2694,115 @@ mod tests {
             PathBuf::from("cut.ocus")
         );
         assert!(project_file(PathBuf::from("cut.mp4")).is_err());
+    }
+
+    #[test]
+    fn unsaved_dialog_buttons_map_to_save_discard_or_cancel() {
+        for (result, choice) in [
+            (
+                MessageDialogResult::Custom(SAVE_CHOICE.into()),
+                UnsavedChoice::Save,
+            ),
+            (
+                MessageDialogResult::Custom(DISCARD_CHOICE.into()),
+                UnsavedChoice::Discard,
+            ),
+            (
+                MessageDialogResult::Custom(CANCEL_CHOICE.into()),
+                UnsavedChoice::Cancel,
+            ),
+            (MessageDialogResult::Yes, UnsavedChoice::Save),
+            (MessageDialogResult::No, UnsavedChoice::Discard),
+            (MessageDialogResult::Cancel, UnsavedChoice::Cancel),
+        ] {
+            assert_eq!(unsaved_choice(result), choice);
+        }
+    }
+
+    fn dirty_state() -> (UiState, Rc<Cell<u32>>) {
+        let state = UiState::new();
+        state.project_path.set(Some("cut.ocus".into()));
+        state.dirty.set(true);
+        (state, Rc::new(Cell::new(0)))
+    }
+
+    fn counting(runs: &Rc<Cell<u32>>) -> impl FnOnce(&UiState) + 'static {
+        let runs = runs.clone();
+        move |_| runs.set(runs.get() + 1)
+    }
+
+    #[test]
+    fn clean_projects_continue_without_asking() {
+        let state = UiState::new();
+        let runs = Rc::new(Cell::new(0));
+        assert!(state.settle_unsaved_changes(counting(&runs)));
+        assert_eq!(runs.get(), 0);
+    }
+
+    #[test]
+    fn discard_continues_now_and_cancel_keeps_the_changes() {
+        let (state, runs) = dirty_state();
+        assert!(state.apply_unsaved_choice(UnsavedChoice::Discard, counting(&runs)));
+        assert!(!state.apply_unsaved_choice(UnsavedChoice::Cancel, counting(&runs)));
+        assert!(state.dirty.peek());
+        assert_eq!(runs.get(), 0);
+    }
+
+    #[test]
+    fn save_choice_waits_for_the_save_before_continuing() {
+        let (state, runs) = dirty_state();
+        assert!(!state.apply_unsaved_choice(UnsavedChoice::Save, counting(&runs)));
+        assert!(state.dirty.peek());
+        assert_eq!(runs.get(), 0);
+    }
+
+    #[test]
+    fn only_a_successful_save_of_the_current_edit_continues() {
+        let (state, runs) = dirty_state();
+        let path = PathBuf::from("cut.ocus");
+        let failure = std::io::Error::other("disk full");
+        state.finish_save(
+            path.clone(),
+            0,
+            None,
+            Some(Box::new(counting(&runs))),
+            Err(failure),
+        );
+        assert_eq!(runs.get(), 0);
+        assert!(state.dirty.peek());
+        assert_eq!(state.status.peek(), "Save failed: disk full");
+
+        state.revision.set(1);
+        state.finish_save(
+            path.clone(),
+            0,
+            None,
+            Some(Box::new(counting(&runs))),
+            Ok(()),
+        );
+        assert_eq!(runs.get(), 0);
+        assert!(state.dirty.peek());
+
+        state.finish_save(path, 1, None, Some(Box::new(counting(&runs))), Ok(()));
+        assert_eq!(runs.get(), 1);
+        assert!(!state.dirty.peek());
+        assert_eq!(state.status.peek(), "Project saved");
+    }
+
+    #[test]
+    fn saving_before_new_project_resumes_new_project() {
+        let (state, _) = dirty_state();
+        state.focus_frame(600);
+        state.finish_save(
+            "cut.ocus".into(),
+            state.revision.peek(),
+            None,
+            Some(Box::new(UiState::new_project)),
+            Ok(()),
+        );
+        assert_eq!(state.project_path.peek(), None);
+        assert_eq!(state.timeline_start.peek(), 0);
+        assert_eq!(state.status.peek(), "New project · Not saved");
     }
 
     #[test]

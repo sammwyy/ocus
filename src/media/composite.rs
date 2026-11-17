@@ -108,7 +108,7 @@ impl Compositor {
         cancelled: &Arc<AtomicBool>,
     ) -> Result<Option<FrameImage>, String> {
         let mut pixels = vec![0; self.width as usize * self.height as usize * 4];
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
             pixel.copy_from_slice(&[0, 0, 0, 255]);
         }
         let mut active = Vec::new();
@@ -123,8 +123,11 @@ impl Compositor {
                         visible = true;
                         active.push(source.clip_id);
                         let image = self.layers.layer_at(source, position, cancelled)?;
-                        for (dest, src) in
-                            pixels.chunks_exact_mut(4).zip(image.pixels.chunks_exact(4))
+                        for (dest, src) in pixels
+                            .as_chunks_mut::<4>()
+                            .0
+                            .iter_mut()
+                            .zip(image.pixels.as_chunks::<4>().0)
                         {
                             blend(dest, src);
                         }
@@ -407,7 +410,9 @@ mod tests {
         assert!(
             image
                 .pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|pixel| pixel[1] > 150 && pixel[2] < 100)
         );
         let mut preview = None;
@@ -437,7 +442,9 @@ mod tests {
             .unwrap();
         let green_count = |pixels: &[u8]| {
             pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|pixel| pixel[1] > 150 && pixel[2] < 100)
                 .count()
         };
@@ -460,7 +467,9 @@ mod tests {
             .unwrap();
         let leftmost_green = |pixels: &[u8]| {
             pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .enumerate()
                 .filter(|(_, pixel)| pixel[1] > 150 && pixel[2] < 100)
                 .map(|(index, _)| index % 160)
@@ -476,7 +485,14 @@ mod tests {
             .frame(0, &cancelled)
             .unwrap()
             .unwrap();
-        assert!(!image.pixels.chunks_exact(4).any(|pixel| pixel[1] > 150));
+        assert!(
+            !image
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[1] > 150)
+        );
         fs::remove_file(red).unwrap();
         fs::remove_file(blue).unwrap();
         fs::remove_dir(dir).unwrap();

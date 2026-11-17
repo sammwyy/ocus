@@ -403,7 +403,7 @@ fn render_to(
                     let stride = rgba.stride(0);
                     let dest = &mut rgba.data_mut(0)
                         [row * stride..row * stride + settings.width as usize * 4];
-                    for pixel in dest.chunks_exact_mut(4) {
+                    for pixel in dest.as_chunks_mut::<4>().0 {
                         pixel.copy_from_slice(&[0, 0, 0, 255]);
                     }
                     let top = (settings.height - picture_height) as usize / 2;
@@ -575,7 +575,7 @@ impl AudioEncoder {
                 for (dst, sample) in frame
                     .plane_mut::<f32>(channel)
                     .iter_mut()
-                    .zip(self.pending.chunks_exact(2))
+                    .zip(self.pending.as_chunks::<2>().0)
                 {
                     *dst = sample[channel];
                 }

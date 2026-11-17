@@ -19,7 +19,7 @@ use crate::media::{Media, MediaKind};
 use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, VideoCodec};
 use crate::project::{Command, Project};
 use crate::settings::ThemeMode;
-use crate::timeline::{Clip, ClipContent, Title, TrackKind};
+use crate::timeline::{Clip, ClipContent, Title, Track, TrackKind};
 use creamui::core::layout::{Dimension, Style};
 use creamui::core::{Painter, Point, Rect, TextAlign, Widget};
 use creamui::fonts::{FontWeight, HorizontalAlign, LayoutSettings, cached_layout, resolve};
@@ -107,6 +107,75 @@ fn edit_selection(state: &UiState, edit: impl FnOnce(&Clip, u64, u64) -> Command
 
 fn set_title_text(state: &UiState) {
     change_title(state, |title| title.text = state.title_text.peek());
+}
+
+fn adjust_timing(state: &UiState, source: bool, seconds: bool, increase: bool) {
+    let Some((track_id, clip)) = selected_clip(state) else {
+        return;
+    };
+    let fps = state.frame_rate();
+    let step = if seconds {
+        (f64::from(fps.0) / f64::from(fps.1)).round().max(1.0) as u64
+    } else {
+        1
+    };
+    let adjust = |value: u64| {
+        if increase {
+            value.saturating_add(step)
+        } else {
+            value.saturating_sub(step)
+        }
+    };
+    let editor = state.editor.borrow();
+    let project = editor.project();
+    let command = if source {
+        let maximum = match clip.content {
+            ClipContent::Media { media_id } => project
+                .media()
+                .iter()
+                .find(|media| media.id == media_id)
+                .filter(|media| media.kind != MediaKind::Image)
+                .and_then(|media| media_frames(media, fps))
+                .map(|frames| frames.saturating_sub(clip.duration_frames))
+                .unwrap_or(u64::MAX - clip.duration_frames),
+            _ => return,
+        };
+        Some(Command::Trim {
+            track_id,
+            clip_id: clip.id,
+            start_frame: clip.start_frame,
+            source_start_frame: adjust(clip.source_start_frame).min(maximum),
+            duration_frames: clip.duration_frames,
+        })
+    } else {
+        crate::project::edit::trim_edge(
+            project,
+            track_id,
+            clip.id,
+            false,
+            clip.start_frame
+                .saturating_add(adjust(clip.duration_frames).max(1)),
+        )
+    };
+    drop(editor);
+    if let Some(command) = command {
+        state.edit(command);
+    }
+}
+
+fn timing_steps(state: &UiState, source: bool) -> BoxedWidget {
+    let mut row = Flex::row().gap(4.0);
+    for (label, seconds, increase) in [
+        ("−1 s", true, false),
+        ("−1 f", false, false),
+        ("+1 f", false, true),
+        ("+1 s", true, true),
+    ] {
+        row = row.child(secondary_button(None, label, true, state, move |state| {
+            adjust_timing(state, source, seconds, increase)
+        }));
+    }
+    Box::new(row)
 }
 
 fn set_title_duration(state: &UiState) {
@@ -408,6 +477,7 @@ fn program_layers(project: &Project, frame: u64) -> (bool, Vec<(ClipRef, Title)>
 struct ProgramCanvas {
     slot: GpuFrameSlot,
     picture: bool,
+    picture_unavailable: bool,
     titles: Vec<(ClipRef, Title)>,
     selected: Option<ClipRef>,
     state: UiState,
@@ -580,6 +650,25 @@ impl Widget for ProgramCanvas {
             }
         }
         painter.pop_clip();
+        if self.picture_unavailable {
+            let label = "Video preview unavailable";
+            let pill_width = (run_width(label, 11.0, "", false) + 20.0).min(width);
+            let pill = Rect {
+                x: bounds.x + (width - pill_width) / 2.0,
+                y: bounds.y + 8.0,
+                width: pill_width,
+                height: 22.0,
+            };
+            painter.fill_rect(pill, surface(), 11.0);
+            painter.stroke_rect(pill, border(), 1.0, 11.0);
+            painter.fill_text(
+                pill,
+                label,
+                text_color().mix(muted(), 0.3),
+                11.0,
+                TextAlign::Center,
+            );
+        }
         if let Some(box_rect) = self.title_box(rect) {
             painter.stroke_rect(box_rect, accent(), 1.5, 0.0);
             painter.fill_rect(
@@ -1345,6 +1434,23 @@ fn selection_rows(state: &UiState, project: &Project, inner: f32) -> Vec<BoxedWi
     ]
 }
 
+fn compatible_destinations(tracks: &[Track], track_id: u64, clip: &Clip) -> Vec<(u64, bool)> {
+    let Some(source) = tracks.iter().find(|track| track.id == track_id) else {
+        return Vec::new();
+    };
+    tracks
+        .iter()
+        .filter(|track| track.id != track_id && track.kind == source.kind)
+        .map(|track| {
+            let occupied = track.clips.iter().any(|other| {
+                clip.start_frame < other.start_frame.saturating_add(other.duration_frames)
+                    && other.start_frame < clip.start_frame.saturating_add(clip.duration_frames)
+            });
+            (track.id, occupied)
+        })
+        .collect()
+}
+
 fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> BoxedWidget {
     let fps = (
         project.settings().frame_rate.numerator,
@@ -1429,7 +1535,10 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 "Source in",
                 timecode(clip.source_start_frame, fps),
             ));
+            timing.push(timing_steps(state, true));
         }
+        timing.push(text("Length", muted(), 11.0));
+        timing.push(timing_steps(state, false));
         rows.push(section("Timing", timing));
         if let ClipContent::Title(title) = &clip.content {
             rows.push(section(
@@ -1613,11 +1722,27 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 ],
             ));
         }
-        let other_track = project
-            .tracks()
-            .iter()
-            .find(|track| track.id != track_id && track.kind == track_kind)
-            .map(|track| track.id);
+        let destinations = compatible_destinations(project.tracks(), track_id, &clip);
+        let mut move_buttons = Flex::row()
+            .gap(4.0)
+            .wrap(creamui::widgets::layout::Wrap::Wrap);
+        for (target_track_id, occupied) in &destinations {
+            let target_track_id = *target_track_id;
+            let label = if *occupied {
+                format!("{} · Occupied", label_of(target_track_id))
+            } else {
+                label_of(target_track_id)
+            };
+            move_buttons =
+                move_buttons.child(secondary_button(None, &label, !occupied, state, move |s| {
+                    edit_selection(s, |clip, track_id, _| Command::Move {
+                        track_id,
+                        target_track_id,
+                        clip_id: clip.id,
+                        to_frame: clip.start_frame,
+                    })
+                }));
+        }
         let playhead = state.program.position.get();
         let splittable = playhead > clip.start_frame
             && playhead < clip.start_frame.saturating_add(clip.duration_frames);
@@ -1680,15 +1805,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                             clip.duration_frames > 1,
                             false,
                             state,
-                            |s| {
-                                edit_selection(s, |clip, track_id, _| Command::Trim {
-                                    track_id,
-                                    clip_id: clip.id,
-                                    start_frame: clip.start_frame,
-                                    source_start_frame: clip.source_start_frame,
-                                    duration_frames: clip.duration_frames.saturating_sub(1),
-                                })
-                            },
+                            |s| adjust_timing(s, false, false, false),
                         ))
                         .child(sized_icon_button(
                             Glyph::Plus,
@@ -1696,35 +1813,20 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                             true,
                             false,
                             state,
-                            |s| {
-                                edit_selection(s, |clip, track_id, _| Command::Trim {
-                                    track_id,
-                                    clip_id: clip.id,
-                                    start_frame: clip.start_frame,
-                                    source_start_frame: clip.source_start_frame,
-                                    duration_frames: clip.duration_frames.saturating_add(1),
-                                })
-                            },
+                            |s| adjust_timing(s, false, false, true),
                         ))
                         .child(text("1 frame", faint(), 10.0)),
                 ),
-                inline(secondary_button(
-                    Some(Glyph::ChevronDown),
-                    &format!(
-                        "Move to {}",
-                        other_track.map_or_else(|| "other track".into(), label_of)
-                    ),
-                    other_track.is_some(),
-                    state,
-                    move |s| {
-                        edit_selection(s, |clip, track_id, _| Command::Move {
-                            track_id,
-                            target_track_id: other_track.unwrap_or(track_id),
-                            clip_id: clip.id,
-                            to_frame: clip.start_frame,
-                        })
-                    },
-                )),
+                Box::new(
+                    Flex::column()
+                        .gap(6.0)
+                        .child(text("Move to", muted(), 11.0))
+                        .child(if destinations.is_empty() {
+                            text("No other compatible tracks", faint(), 10.0)
+                        } else {
+                            Box::new(move_buttons)
+                        }),
+                ),
             ],
         ));
         rows.push(section(
@@ -1896,6 +1998,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
 
 fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<Lane> {
     let labels = track_labels(project);
+    let draft = state.trim_draft.get();
     project
         .tracks()
         .iter()
@@ -1914,6 +2017,22 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                 .clips
                 .iter()
                 .map(|clip| {
+                    let preview = match &draft {
+                        Some(Command::Trim {
+                            track_id,
+                            clip_id,
+                            start_frame,
+                            source_start_frame,
+                            duration_frames,
+                        }) if *track_id == track.id && *clip_id == clip.id => Some(Clip {
+                            start_frame: *start_frame,
+                            source_start_frame: *source_start_frame,
+                            duration_frames: *duration_frames,
+                            ..clip.clone()
+                        }),
+                        _ => None,
+                    };
+                    let clip = preview.as_ref().unwrap_or(clip);
                     let media = match clip.content {
                         ClipContent::Media { media_id } => {
                             project.media().iter().find(|media| media.id == media_id)
@@ -2116,6 +2235,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         Box::new(ProgramCanvas {
             slot: state.program.slot.clone(),
             picture: (picture || !titles.is_empty()) && gpu_preview,
+            picture_unavailable: picture && !gpu_preview,
             titles,
             selected: state.selected.get().last().copied(),
             state: state.clone(),
@@ -2479,9 +2599,23 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             fps,
             playhead: frame,
             selected: selection.clone(),
-            ghosts: plan
-                .as_ref()
-                .map_or_else(Vec::new, |plan| plan.ghosts.clone()),
+            ghosts: plan.as_ref().map_or_else(
+                || match state.trim_draft.get() {
+                    Some(Command::Trim {
+                        track_id,
+                        start_frame,
+                        duration_frames,
+                        ..
+                    }) => vec![super::timeline_view::Ghost {
+                        track_id,
+                        start: start_frame,
+                        duration: duration_frames,
+                        valid: true,
+                    }],
+                    _ => Vec::new(),
+                },
+                |plan| plan.ghosts.clone(),
+            ),
             dragging: matches!(
                 drag.map(|drag| drag.payload),
                 Some(DragPayload::Clips { .. })
@@ -3686,6 +3820,83 @@ mod tests {
     use creamui::core::{Painter, Point, Rect, Renderer, RgbaImage, TextAlign, Widget};
     use std::sync::Arc;
 
+    fn destination_clip(start_frame: u64, duration_frames: u64) -> Clip {
+        Clip {
+            id: 10,
+            start_frame,
+            source_start_frame: 0,
+            duration_frames,
+            content: ClipContent::Title(Title::default()),
+            volume: 1.0,
+            muted: false,
+            linked_audio: false,
+        }
+    }
+
+    #[test]
+    fn destinations_include_all_compatible_tracks_except_current() {
+        let tracks = [
+            TrackKind::Video,
+            TrackKind::Audio,
+            TrackKind::Video,
+            TrackKind::Video,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(id, kind)| Track {
+            id: id as u64,
+            kind,
+            clips: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(
+            compatible_destinations(&tracks, 0, &destination_clip(10, 20)),
+            vec![(2, false), (3, false)]
+        );
+        assert_eq!(
+            compatible_destinations(&tracks, 1, &destination_clip(10, 20)),
+            vec![]
+        );
+        assert_eq!(
+            compatible_destinations(&tracks, 99, &destination_clip(10, 20)),
+            vec![]
+        );
+        assert_eq!(
+            compatible_destinations(&[], 0, &destination_clip(10, 20)),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn destinations_flag_overlaps_but_allow_touching_ranges() {
+        let mut tracks = vec![Track {
+            id: 0,
+            kind: TrackKind::Video,
+            clips: Vec::new(),
+        }];
+        for (index, (start, duration)) in [(0, 10), (30, 10), (9, 2), (29, 2), (15, 5), (0, 40)]
+            .into_iter()
+            .enumerate()
+        {
+            tracks.push(Track {
+                id: index as u64 + 1,
+                kind: TrackKind::Video,
+                clips: vec![destination_clip(start, duration)],
+            });
+        }
+        assert_eq!(
+            compatible_destinations(&tracks, 0, &destination_clip(10, 20)),
+            vec![
+                (1, false),
+                (2, false),
+                (3, true),
+                (4, true),
+                (5, true),
+                (6, true)
+            ]
+        );
+    }
+
     #[derive(Default)]
     struct TestPainter {
         labels: Vec<String>,
@@ -3764,6 +3975,35 @@ mod tests {
     }
 
     #[test]
+    fn program_keeps_the_unavailable_video_notice_under_a_title() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/tmp/footage.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(3_000_000),
+            has_audio: false,
+        })));
+        state.insert_media(1);
+        state.focus_frame(0);
+        state.select_clip(None);
+        let notices = |painter: &TestPainter| {
+            painter
+                .labels
+                .iter()
+                .filter(|label| *label == "Video preview unavailable")
+                .count()
+        };
+        let without_title = notices(&render(&state, 1280.0, 760.0));
+        assert!(without_title > 0);
+        assert!(state.add_title());
+        state.select_clip(None);
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(painter.labels.iter().any(|label| label == "Title 2"));
+        assert_eq!(notices(&painter), without_title);
+    }
+
+    #[test]
     fn a_title_can_play_without_a_video_device() {
         let state = UiState::new();
         assert!(state.add_title());
@@ -3805,6 +4045,7 @@ mod tests {
         ProgramCanvas {
             slot: GpuFrameSlot::new(),
             picture: false,
+            picture_unavailable: false,
             titles: vec![((0, 1), title)],
             selected: None,
             state: UiState::new(),
@@ -3833,6 +4074,7 @@ mod tests {
         let canvas = ProgramCanvas {
             slot: GpuFrameSlot::new(),
             picture: false,
+            picture_unavailable: false,
             titles: vec![((0, 1), title.clone())],
             selected: Some((0, 1)),
             state: state.clone(),
@@ -4321,6 +4563,108 @@ mod tests {
 
     fn release(view: &TimelineView) {
         view.on_drag_end().unwrap()();
+    }
+
+    #[test]
+    fn trim_drag_previews_then_commits_once_and_cancel_discards() {
+        let state = UiState::new();
+        state.run(Action::AddTitle);
+        let original = selected_clip(&state).unwrap().1;
+        let timeline = view(&state);
+        press(&timeline, at(1.0), 50.0);
+        assert!(matches!(
+            *state.gesture.borrow(),
+            super::super::interaction::Gesture::Trim { left: true, .. }
+        ));
+        drag_to(&timeline, at(20.0), 50.0);
+        drag_to(&timeline, at(30.0), 50.0);
+        assert_eq!(selected_clip(&state).unwrap().1, original);
+        assert!(state.trim_draft.peek().is_some());
+        let preview = view(&state);
+        assert_eq!(preview.lanes[0].clips[0].start, 30);
+        assert_eq!(
+            preview.lanes[0].clips[0].duration,
+            original.duration_frames - 30
+        );
+        let mut painter = TestPainter::default();
+        preview.paint(&mut painter, TIMELINE);
+        assert!(painter.labels.iter().any(
+            |label| label == &format!("{:.1}s", (original.duration_frames - 30) as f64 / 30.0)
+        ));
+        release(&timeline);
+        let trimmed = selected_clip(&state).unwrap().1;
+        assert_eq!(trimmed.start_frame, 30);
+        assert_eq!(
+            trimmed.start_frame + trimmed.duration_frames,
+            original.duration_frames
+        );
+        state.run(Action::Undo);
+        assert_eq!(selected_clip(&state).unwrap().1, original);
+        press(&timeline, at(1.0), 50.0);
+        drag_to(&timeline, at(40.0), 50.0);
+        state.cancel_drag();
+        release(&timeline);
+        assert_eq!(selected_clip(&state).unwrap().1, original);
+        assert!(state.trim_draft.peek().is_none());
+        press(&timeline, at(30.0), 50.0);
+        assert!(matches!(
+            *state.gesture.borrow(),
+            super::super::interaction::Gesture::Clip { .. }
+        ));
+    }
+
+    #[test]
+    fn inspector_length_steps_are_bounded_and_undoable() {
+        let state = UiState::new();
+        adjust_timing(&state, false, true, true);
+        state.run(Action::AddTitle);
+        let original = selected_clip(&state).unwrap().1.duration_frames;
+        adjust_timing(&state, false, true, true);
+        assert_eq!(
+            selected_clip(&state).unwrap().1.duration_frames,
+            original + 30
+        );
+        state.run(Action::Undo);
+        assert_eq!(selected_clip(&state).unwrap().1.duration_frames, original);
+        for _ in 0..10 {
+            adjust_timing(&state, false, true, false);
+        }
+        assert_eq!(selected_clip(&state).unwrap().1.duration_frames, 1);
+    }
+
+    #[test]
+    fn inspector_source_steps_preserve_length_and_clamp_to_media() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/source.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(3_000_000),
+            has_audio: false
+        })));
+        assert!(state.edit(Command::InsertClip {
+            track_id: 0,
+            clip: Clip {
+                id: 1,
+                start_frame: 0,
+                source_start_frame: 0,
+                duration_frames: 60,
+                content: ClipContent::Media { media_id: 1 },
+                volume: 1.0,
+                muted: false,
+                linked_audio: false
+            }
+        }));
+        state.select_clip(Some((0, 1)));
+        adjust_timing(&state, true, true, true);
+        adjust_timing(&state, true, true, true);
+        let clip = selected_clip(&state).unwrap().1;
+        assert_eq!(clip.source_start_frame, 30);
+        assert_eq!(clip.duration_frames, 60);
+        state.run(Action::Undo);
+        assert_eq!(selected_clip(&state).unwrap().1.source_start_frame, 0);
+        adjust_timing(&state, true, true, false);
+        assert_eq!(selected_clip(&state).unwrap().1.source_start_frame, 0);
     }
 
     #[test]

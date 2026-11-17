@@ -339,6 +339,20 @@ impl UiState {
     }
 
     pub fn run(&self, action: Action) {
+        if action == Action::Escape {
+            let controllers: Vec<_> = self
+                .tooltips
+                .borrow()
+                .values()
+                .map(|tooltip| tooltip.controller.clone())
+                .collect();
+            creamui::reactive::batch(|| {
+                for controller in controllers {
+                    controller.hover(false);
+                    controller.focus(false);
+                }
+            });
+        }
         if self.settings_modal.peek() {
             if action == Action::Escape {
                 self.close_settings();
@@ -1571,6 +1585,41 @@ mod tests {
         state.run_menu(MenuCommand::InsertMediaAt(1, 135));
         assert_eq!(starts(&state, 0), vec![45, 135]);
         assert_eq!(starts(&state, 1), vec![45]);
+    }
+
+    #[test]
+    fn escape_dismisses_help_without_losing_editor_or_dialog_actions() {
+        let state = UiState::new();
+        let help = state.tooltip_controller(("Undo", 0));
+        assert!(state.add_title());
+        help.hover(true);
+        help.focus(true);
+        state.run(Action::Escape);
+        assert!(!help.visible());
+        assert!(state.selected.peek().is_empty());
+        state.open_settings();
+        help.focus(true);
+        state.run(Action::Escape);
+        assert!(!help.visible());
+        assert!(!state.settings_modal.peek());
+    }
+
+    #[test]
+    fn dismissing_help_can_synchronously_rebuild_the_tooltip_tree() {
+        use crate::ui::controls::{Glyph, Help, icon_button};
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let state = UiState::new();
+            let build_state = state.clone();
+            let _effect = creamui::reactive::create_effect(move || {
+                let _ = icon_button(Glyph::Undo, Help::new("Undo"), false, &build_state, |_| {});
+            });
+            let help = state.tooltip_controller(("Undo", 0));
+            help.focus(true);
+            assert!(help.visible());
+            state.run(Action::Escape);
+            assert!(!help.visible());
+        });
     }
 
     #[test]

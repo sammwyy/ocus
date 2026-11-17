@@ -9,6 +9,89 @@ pub mod audio;
 pub mod composite;
 pub mod preview;
 
+#[derive(Clone, Copy)]
+pub(crate) struct Rotation(u32);
+
+impl Rotation {
+    fn from_stream(stream: &ffmpeg::Stream<'_>) -> Self {
+        let angle = stream
+            .side_data()
+            .find(|data| data.kind() == ffmpeg::codec::packet::side_data::Type::DisplayMatrix)
+            .and_then(|data| {
+                let bytes: &[u8; 36] = data.data().try_into().ok()?;
+                let (chunks, _) = bytes.as_chunks::<4>();
+                let matrix: [i32; 9] = std::array::from_fn(|i| i32::from_ne_bytes(chunks[i]));
+                Some(
+                    if (matrix[0] == 0 && matrix[3] == 0) || (matrix[1] == 0 && matrix[4] == 0) {
+                        f64::NAN
+                    } else {
+                        -f64::from(matrix[1])
+                            .atan2(f64::from(matrix[0]))
+                            .to_degrees()
+                    },
+                )
+            })
+            .or_else(|| {
+                stream
+                    .metadata()
+                    .get("rotate")?
+                    .parse::<f64>()
+                    .ok()
+                    .map(|angle| -angle)
+            })
+            .unwrap_or(0.0);
+        Self(if angle.is_finite() {
+            ((angle / 90.0).round() as i32).rem_euclid(4) as u32
+        } else {
+            0
+        })
+    }
+
+    fn dimensions(self, width: u32, height: u32) -> (u32, u32) {
+        if self.0 % 2 == 1 {
+            (height, width)
+        } else {
+            (width, height)
+        }
+    }
+
+    fn orient(self, frame: &ffmpeg::frame::Video) -> Thumbnail {
+        let (width, height) = self.dimensions(frame.width(), frame.height());
+        let mut pixels = vec![0; width as usize * height as usize * 4];
+        if self.0 == 0 {
+            let row_size = width as usize * 4;
+            for (y, row) in pixels.chunks_exact_mut(row_size).enumerate() {
+                let start = y * frame.stride(0);
+                row.copy_from_slice(&frame.data(0)[start..start + row_size]);
+            }
+            return Thumbnail {
+                width,
+                height,
+                pixels,
+            };
+        }
+        for y in 0..frame.height() {
+            for x in 0..frame.width() {
+                let (dx, dy) = match self.0 {
+                    1 => (y, frame.width() - 1 - x),
+                    2 => (frame.width() - 1 - x, frame.height() - 1 - y),
+                    3 => (frame.height() - 1 - y, x),
+                    _ => (x, y),
+                };
+                let source = y as usize * frame.stride(0) + x as usize * 4;
+                let destination = (dy as usize * width as usize + dx as usize) * 4;
+                pixels[destination..destination + 4]
+                    .copy_from_slice(&frame.data(0)[source..source + 4]);
+            }
+        }
+        Thumbnail {
+            width,
+            height,
+            pixels,
+        }
+    }
+}
+
 pub(crate) fn fitted_dimensions(
     source_width: u32,
     source_height: u32,
@@ -69,14 +152,16 @@ pub fn thumbnail(path: &Path) -> Result<Thumbnail, String> {
         .best(ffmpeg::media::Type::Video)
         .ok_or("Source has no video frames")?;
     let index = stream.index();
+    let rotation = Rotation::from_stream(&stream);
     let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
         .and_then(|context| context.decoder().video())
         .map_err(|error| error.to_string())?;
     if decoder.format() == ffmpeg::format::Pixel::None || decoder.width() == 0 {
         return Err("Source has an unknown pixel format".into());
     }
-    let scale = (208.0 / decoder.width() as f32)
-        .min(116.0 / decoder.height() as f32)
+    let display = rotation.dimensions(decoder.width(), decoder.height());
+    let scale = (208.0 / display.0 as f32)
+        .min(116.0 / display.1 as f32)
         .min(1.0);
     let width = (decoder.width() as f32 * scale).round().max(1.0) as u32;
     let height = (decoder.height() as f32 * scale).round().max(1.0) as u32;
@@ -99,7 +184,7 @@ pub fn thumbnail(path: &Path) -> Result<Thumbnail, String> {
             .map_err(|error| error.to_string())?;
         let mut decoded = ffmpeg::frame::Video::empty();
         if decoder.receive_frame(&mut decoded).is_ok() {
-            return scale_thumbnail(&mut scaler, &decoded, width, height);
+            return scale_thumbnail(&mut scaler, &decoded, rotation);
         }
     }
     decoder.send_eof().map_err(|error| error.to_string())?;
@@ -107,35 +192,25 @@ pub fn thumbnail(path: &Path) -> Result<Thumbnail, String> {
     decoder
         .receive_frame(&mut decoded)
         .map_err(|_| "Source has no decodable video frame")?;
-    scale_thumbnail(&mut scaler, &decoded, width, height)
+    scale_thumbnail(&mut scaler, &decoded, rotation)
 }
 
 fn scale_thumbnail(
     scaler: &mut ffmpeg::software::scaling::context::Context,
     decoded: &ffmpeg::frame::Video,
-    width: u32,
-    height: u32,
+    rotation: Rotation,
 ) -> Result<Thumbnail, String> {
     let mut frame = ffmpeg::frame::Video::empty();
     scaler
         .run(decoded, &mut frame)
         .map_err(|error| error.to_string())?;
-    let stride = frame.stride(0);
-    let row_size = width as usize * 4;
-    let mut pixels = Vec::with_capacity(row_size * height as usize);
-    for row in 0..height as usize {
-        pixels.extend_from_slice(&frame.data(0)[row * stride..row * stride + row_size]);
-    }
-    for pixel in pixels.as_chunks_mut::<4>().0 {
+    let mut thumbnail = rotation.orient(&frame);
+    for pixel in thumbnail.pixels.as_chunks_mut::<4>().0 {
         for channel in 0..3 {
             pixel[channel] = ((u16::from(pixel[channel]) * u16::from(pixel[3]) + 127) / 255) as u8;
         }
     }
-    Ok(Thumbnail {
-        width,
-        height,
-        pixels,
-    })
+    Ok(thumbnail)
 }
 
 pub fn probe(path: &Path) -> Result<MediaProbe, String> {
@@ -211,6 +286,33 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn legacy_rotation_metadata_is_clockwise() {
+        ffmpeg::init().unwrap();
+        let path =
+            std::env::temp_dir().join(format!("ocus-rotation-tags-{}.mp4", std::process::id()));
+        let mut output = ffmpeg::format::output(&path).unwrap();
+        let mut stream = output
+            .add_stream(ffmpeg::encoder::find(ffmpeg::codec::Id::H264))
+            .unwrap();
+        assert_eq!(Rotation::from_stream(&stream).0, 0);
+        for (value, turns) in [
+            ("90", 3),
+            ("180", 2),
+            ("270", 1),
+            ("-90", 1),
+            ("invalid", 0),
+            ("NaN", 0),
+        ] {
+            let mut metadata = ffmpeg::Dictionary::new();
+            metadata.set("rotate", value);
+            stream.set_metadata(metadata);
+            assert_eq!(Rotation::from_stream(&stream).0, turns, "{value}");
+        }
+        drop(output);
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn probes_video_audio_and_still_images_from_contents() {

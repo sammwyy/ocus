@@ -451,8 +451,8 @@ pub(crate) fn remove_track(project: &Project, track_id: u64) -> Result<Vec<Track
     Ok(tracks)
 }
 
-/// Moves the linked audio of the selected video clips onto an audio track
-/// that is free for all of them, creating a new track when none is.
+/// Moves each selected video's linked audio onto a free audio track,
+/// creating a new track when none has room.
 pub(crate) fn detach_audio(project: &Project, selection: &[ClipRef]) -> Option<Planned> {
     let mut tracks = project.tracks().to_vec();
     let mut id = next_clip_id(project)?;
@@ -475,24 +475,20 @@ pub(crate) fn detach_audio(project: &Project, selection: &[ClipRef]) -> Option<P
     if detached.is_empty() {
         return None;
     }
-    let fits = |track: &Track| {
-        detached.iter().all(|new| {
-            track
-                .clips
-                .iter()
-                .all(|clip| clip_end(clip) <= new.start_frame || clip_end(new) <= clip.start_frame)
-        })
-    };
-    let target = match tracks
-        .iter()
-        .find(|track| track.kind == TrackKind::Audio && fits(track))
-    {
-        Some(track) => track.id,
-        None => push_track(&mut tracks, TrackKind::Audio)?,
-    };
-    let track = tracks.iter_mut().find(|track| track.id == target)?;
-    kept.extend(detached.iter().map(|clip| (target, clip.id)));
-    track.clips.extend(detached);
+    for new in detached {
+        let target = match tracks.iter().find(|track| {
+            track.kind == TrackKind::Audio
+                && track.clips.iter().all(|clip| {
+                    clip_end(clip) <= new.start_frame || clip_end(&new) <= clip.start_frame
+                })
+        }) {
+            Some(track) => track.id,
+            None => push_track(&mut tracks, TrackKind::Audio)?,
+        };
+        let track = tracks.iter_mut().find(|track| track.id == target)?;
+        kept.push((target, new.id));
+        track.clips.push(new);
+    }
     Some(Planned {
         tracks: sorted_without_overlap(tracks)?,
         selection: kept,
@@ -680,6 +676,51 @@ mod tests {
         assert!(editor.undo());
         assert_eq!(editor.project().tracks()[0].clips[0].start_frame, 20);
         assert_eq!(editor.project().tracks()[1].clips[1].start_frame, 80);
+    }
+
+    #[test]
+    fn overlapping_video_audio_detaches_to_tracks_with_room_in_one_edit() {
+        for occupied in 0..=2 {
+            let mut editor = Editor::new(Project::new("Film"));
+            assert!(editor.apply(Command::ImportMedia(Media {
+                id: 1,
+                path: "scene.mp4".into(),
+                kind: MediaKind::Video,
+                duration_us: Some(3_000_000),
+                has_audio: true,
+            })));
+            for track_id in 0..2 {
+                let insertion = insert_media(editor.project(), 1, Some((track_id, 45))).unwrap();
+                assert!(editor.apply(insertion.command));
+            }
+            for track_id in 2..2 + occupied {
+                let mut clip = title(track_id + 10, 45);
+                clip.content = ClipContent::Media { media_id: 1 };
+                assert!(editor.apply(Command::InsertClip { track_id, clip }));
+            }
+            let before = editor.project().tracks().to_vec();
+            assert!(detach_audio(editor.project(), &[]).is_none());
+            let detached = detach_audio(editor.project(), &[(0, 1), (1, 2)])
+                .expect("overlapping selected videos should detach onto separate audio tracks");
+            assert_eq!(detached.selection.len(), 4);
+            assert_eq!(detached.tracks.len(), 4 + occupied as usize);
+            for (track_id, video) in [(0, &before[0].clips[0]), (1, &before[1].clips[0])] {
+                let mut expected = video.clone();
+                expected.linked_audio = false;
+                assert_eq!(detached.tracks[track_id].clips, vec![expected.clone()]);
+                let audio_track = &detached.tracks[2 + occupied as usize + track_id];
+                assert_eq!(audio_track.kind, TrackKind::Audio);
+                assert_eq!(audio_track.clips.len(), 1);
+                expected.id = audio_track.clips[0].id;
+                assert_eq!(audio_track.clips[0], expected);
+            }
+            assert!(editor.apply(Command::ReplaceTracks(detached.tracks.clone())));
+            assert!(detach_audio(editor.project(), &[(0, 1), (1, 2)]).is_none());
+            assert!(editor.undo());
+            assert_eq!(editor.project().tracks(), before);
+            assert!(editor.redo());
+            assert_eq!(editor.project().tracks(), detached.tracks);
+        }
     }
 
     #[test]

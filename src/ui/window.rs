@@ -448,30 +448,32 @@ fn monitor_viewport(slot: &GpuFrameSlot, aspect: f32) -> BoxedWidget {
     Box::new(GpuViewport::new(fill_style(), slot.clone()).aspect_ratio(aspect))
 }
 
-fn program_layers(project: &Project, frame: u64) -> (bool, Vec<(ClipRef, Title)>) {
+fn program_layers(project: &Project, frame: u64) -> (bool, bool, Vec<(ClipRef, Title)>) {
     let mut picture = false;
+    let mut audio = false;
     let mut titles = Vec::new();
-    for track in project
-        .tracks()
-        .iter()
-        .filter(|track| track.kind == TrackKind::Video)
-    {
+    for track in project.tracks() {
         for clip in &track.clips {
             if clip.start_frame > frame || frame - clip.start_frame >= clip.duration_frames {
                 continue;
             }
             match &clip.content {
-                ClipContent::Title(title) => titles.push(((track.id, clip.id), title.clone())),
-                ClipContent::Media { media_id } => {
-                    picture |= project
-                        .media()
-                        .iter()
-                        .any(|media| media.id == *media_id && media.kind != MediaKind::Audio);
+                ClipContent::Title(title) if track.kind == TrackKind::Video => {
+                    titles.push(((track.id, clip.id), title.clone()));
                 }
+                ClipContent::Media { media_id } => {
+                    if let Some(media) = project.media().iter().find(|media| media.id == *media_id)
+                    {
+                        picture |= track.kind == TrackKind::Video && media.kind != MediaKind::Audio;
+                        audio |= track.kind == TrackKind::Audio
+                            && (media.kind == MediaKind::Audio || media.has_audio);
+                    }
+                }
+                ClipContent::Title(_) => {}
             }
         }
     }
-    (picture, titles)
+    (picture, audio, titles)
 }
 
 struct ProgramCanvas {
@@ -2369,7 +2371,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
 
     let frame = state.program.position.get();
     let timeline_end = state.sequence_end();
-    let (picture, mut titles) = program_layers(project, frame);
+    let (picture, audio, mut titles) = program_layers(project, frame);
     if let Some((key, draft)) = state.title_preview.get()
         && let Some((_, title)) = titles.iter_mut().find(|(clip, _)| *clip == key)
     {
@@ -2408,6 +2410,8 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             aspect,
             resolution: (project.settings().width, project.settings().height),
         })
+    } else if audio {
+        stage_message(Glyph::Music, "Audio only", "No video at this frame.", None)
     } else if empty_timeline {
         stage_message(
             Glyph::Film,
@@ -4101,6 +4105,47 @@ mod tests {
             Renderer::new().render(build(state, viewport), viewport, &mut painter);
         });
         painter
+    }
+
+    #[test]
+    fn program_monitor_distinguishes_audio_from_a_gap() {
+        let state = UiState::new();
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(
+            painter
+                .labels
+                .iter()
+                .any(|label| label == "Start your edit")
+        );
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/tmp/audio.wav".into(),
+            kind: MediaKind::Audio,
+            duration_us: Some(3_000_000),
+            has_audio: true,
+        })));
+        state.insert_media(1);
+        state.focus_frame(0);
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(painter.labels.iter().any(|label| label == "Audio only"));
+        set_clip_audio(&state, |clip| (clip.volume, true));
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(painter.labels.iter().any(|label| label == "Audio only"));
+        assert!(
+            !painter
+                .labels
+                .iter()
+                .any(|label| label == "No clip at this frame")
+        );
+        state.focus_frame(90);
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(
+            painter
+                .labels
+                .iter()
+                .any(|label| label == "No clip at this frame")
+        );
+        assert!(!painter.labels.iter().any(|label| label == "Audio only"));
     }
 
     #[test]

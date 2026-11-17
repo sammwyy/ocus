@@ -4,7 +4,7 @@ use crate::media::MediaKind;
 use creamui::core::layout::{Dimension, LengthPercentageAuto, Position, Style};
 use creamui::core::{CursorIcon, Painter, Point, Rect, RgbaImage, TextAlign, Widget};
 use creamui::widgets::layout::{Align, Justify, StyleExt};
-use creamui::widgets::{Icon, RawButton, RawText, Symbol, Tooltip, TooltipController};
+use creamui::widgets::{Icon, RawButton, RawText, Symbol, Tooltip};
 use creamui::{BoxedWidget, Color, StateStyle, Styled};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -622,7 +622,7 @@ fn with_help(widget: BoxedWidget, help: Help, state: &UiState) -> BoxedWidget {
         .tooltips
         .borrow_mut()
         .entry((help.label, help.instance))
-        .or_insert_with(TooltipController::default)
+        .or_default()
         .clone();
     controller.set_viewport(state.tooltip_viewport.get());
     let layout = widget.style().layout;

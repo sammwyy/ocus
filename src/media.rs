@@ -19,11 +19,17 @@ impl Rotation {
             .find(|data| data.kind() == ffmpeg::codec::packet::side_data::Type::DisplayMatrix)
             .and_then(|data| {
                 let bytes: &[u8; 36] = data.data().try_into().ok()?;
-                let matrix: [i32; 9] = std::array::from_fn(|i| {
-                    i32::from_ne_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
-                });
-                // FFmpeg expects an aligned matrix of nine native-endian i32 values.
-                Some(unsafe { ffmpeg::ffi::av_display_rotation_get(matrix.as_ptr()) })
+                let (chunks, _) = bytes.as_chunks::<4>();
+                let matrix: [i32; 9] = std::array::from_fn(|i| i32::from_ne_bytes(chunks[i]));
+                Some(
+                    if (matrix[0] == 0 && matrix[3] == 0) || (matrix[1] == 0 && matrix[4] == 0) {
+                        f64::NAN
+                    } else {
+                        -f64::from(matrix[1])
+                            .atan2(f64::from(matrix[0]))
+                            .to_degrees()
+                    },
+                )
             })
             .or_else(|| {
                 stream

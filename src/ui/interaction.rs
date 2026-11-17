@@ -212,6 +212,12 @@ impl UiState {
     }
 
     pub fn run(&self, action: Action) {
+        if action == Action::Escape {
+            for controller in self.tooltips.borrow().values() {
+                controller.hover(false);
+                controller.focus(false);
+            }
+        }
         if self.settings_modal.peek() {
             if action == Action::Escape {
                 self.close_settings();
@@ -1380,6 +1386,27 @@ mod tests {
             .iter()
             .map(|clip| clip.start_frame)
             .collect()
+    }
+
+    #[test]
+    fn escape_dismisses_help_without_losing_editor_or_dialog_actions() {
+        let state = UiState::new();
+        let help = creamui::widgets::TooltipController::default();
+        state
+            .tooltips
+            .borrow_mut()
+            .insert(("Undo", 0), help.clone());
+        assert!(state.add_title());
+        help.hover(true);
+        help.focus(true);
+        state.run(Action::Escape);
+        assert!(!help.visible());
+        assert!(state.selected.peek().is_empty());
+        state.open_settings();
+        help.focus(true);
+        state.run(Action::Escape);
+        assert!(!help.visible());
+        assert!(!state.settings_modal.peek());
     }
 
     #[test]

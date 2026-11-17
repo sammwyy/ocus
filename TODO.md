@@ -31,7 +31,7 @@ clip commands do not complete the corresponding editor workflows.
 - [x] Drag clips (one or a multi-selection) along and across tracks with
   snapping, drag sources from the bin onto a track, and drop files on the
   window or a track; each drop is one undoable command.
-- [ ] Trim clips by dragging their edges; trimming still uses the inspector.
+- [x] Trim clips by dragging their edges, with frame and second steps in the inspector.
 - [ ] Generate filmstrips lazily for clips beyond the bounded first 64
   cached source ranges in large projects.
 - [x] Decode video on a worker with a bounded frame buffer; support

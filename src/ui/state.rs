@@ -60,6 +60,18 @@ pub(crate) enum MediaView {
     List,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnsavedChoice {
+    Save,
+    Discard,
+    Cancel,
+}
+
+type AfterSave = Box<dyn FnOnce(&UiState)>;
+
+const SAVE_CHOICE: &str = "Save";
+const DISCARD_CHOICE: &str = "Don't Save";
+const CANCEL_CHOICE: &str = "Cancel";
 const MAX_THUMBNAILS: usize = 256;
 const MAX_STORYBOARDS: usize = 64;
 /// Seconds shown across the timeline at each zoom level, closest first.
@@ -174,6 +186,8 @@ pub(crate) struct UiState {
     pub timeline_expanded: Signal<bool>,
     pub gesture: Rc<RefCell<Gesture>>,
     pub drag: Signal<Option<DragState>>,
+    pub trim_draft: Signal<Option<Command>>,
+    pub trim_hover: Signal<bool>,
     pub marquee: Signal<Option<Rect>>,
     pub timeline_rect: Rc<Cell<Rect>>,
     pub modifiers: Rc<Cell<Modifiers>>,
@@ -261,6 +275,8 @@ impl UiState {
             timeline_expanded: Signal::new(false),
             gesture: Rc::new(RefCell::new(Gesture::Idle)),
             drag: Signal::new(None),
+            trim_draft: Signal::new(None),
+            trim_hover: Signal::new(false),
             marquee: Signal::new(None),
             timeline_rect: Rc::new(Cell::new(Rect::default())),
             modifiers: Rc::new(Cell::new(Modifiers::default())),
@@ -1185,19 +1201,61 @@ impl UiState {
         );
     }
 
-    pub fn confirm_discard(&self) -> bool {
-        !self.dirty.peek()
-            || MessageDialog::new()
+    /// Returns true when the caller may go ahead now. Choosing Save returns
+    /// false and runs `after_save` only once that save succeeds.
+    pub fn settle_unsaved_changes(&self, after_save: impl FnOnce(&Self) + 'static) -> bool {
+        !self.dirty.peek() || self.apply_unsaved_choice(self.ask_unsaved_changes(), after_save)
+    }
+
+    fn ask_unsaved_changes(&self) -> UnsavedChoice {
+        let name = self.project_path.peek().map_or_else(
+            || self.editor.borrow().project().name().to_owned(),
+            |path| {
+                path.file_stem().map_or_else(
+                    || path.display().to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                )
+            },
+        );
+        unsaved_choice(
+            MessageDialog::new()
                 .set_level(MessageLevel::Warning)
                 .set_title("Unsaved changes")
-                .set_description("Discard your unsaved changes?")
-                .set_buttons(MessageButtons::YesNo)
-                .show()
-                == MessageDialogResult::Yes
+                .set_description(format!(
+                    "Save changes to \u{201c}{name}\u{201d}? Changes you don't save will be lost."
+                ))
+                .set_buttons(MessageButtons::YesNoCancelCustom(
+                    SAVE_CHOICE.into(),
+                    DISCARD_CHOICE.into(),
+                    CANCEL_CHOICE.into(),
+                ))
+                .show(),
+        )
+    }
+
+    fn apply_unsaved_choice(
+        &self,
+        choice: UnsavedChoice,
+        after_save: impl FnOnce(&Self) + 'static,
+    ) -> bool {
+        match choice {
+            UnsavedChoice::Discard => true,
+            UnsavedChoice::Cancel => false,
+            UnsavedChoice::Save => {
+                self.save_then(Some(Box::new(after_save)));
+                false
+            }
+        }
+    }
+
+    pub fn close_window(&self) {
+        if let Some(window) = self.window.borrow().as_ref() {
+            window.close();
+        }
     }
 
     pub fn new_project(&self) {
-        if self.busy.peek() || !self.confirm_discard() {
+        if self.busy.peek() || !self.settle_unsaved_changes(Self::new_project) {
             return;
         }
         *self.editor.borrow_mut() = Editor::new(Project::new("Untitled"));
@@ -1223,9 +1281,11 @@ impl UiState {
             .set_title("Open Ocus project")
             .add_filter("Ocus project", &["ocus"])
             .pick_file()
-            && self.confirm_discard()
         {
-            self.load_path(path);
+            let retry = path.clone();
+            if self.settle_unsaved_changes(move |state| state.load_path(retry)) {
+                self.load_path(path);
+            }
         }
     }
 
@@ -1283,14 +1343,22 @@ impl UiState {
     }
 
     pub fn save(&self) {
+        self.save_then(None);
+    }
+
+    fn save_then(&self, after_save: Option<AfterSave>) {
         if let Some(path) = self.project_path.peek() {
-            self.save_to(path);
+            self.save_to(path, after_save);
         } else {
-            self.save_as_dialog();
+            self.save_as_then(after_save);
         }
     }
 
     pub fn save_as_dialog(&self) {
+        self.save_as_then(None);
+    }
+
+    fn save_as_then(&self, after_save: Option<AfterSave>) {
         if self.busy.peek() {
             return;
         }
@@ -1342,19 +1410,24 @@ impl UiState {
                     {
                         return;
                     }
-                    state.save_to(path);
+                    state.save_to(path, after_save);
                 },
             );
             return;
         }
-        self.save_to(path);
+        self.save_to(path, after_save);
     }
 
-    pub fn save_to(&self, path: PathBuf) {
-        self.save_to_with_export(path, None);
+    fn save_to(&self, path: PathBuf, after_save: Option<AfterSave>) {
+        self.save_to_with_export(path, None, after_save);
     }
 
-    fn save_to_with_export(&self, path: PathBuf, exported: Option<PathBuf>) {
+    fn save_to_with_export(
+        &self,
+        path: PathBuf,
+        exported: Option<PathBuf>,
+        after_save: Option<AfterSave>,
+    ) {
         let Some(app) = self.app.borrow().clone() else {
             return;
         };
@@ -1371,10 +1444,7 @@ impl UiState {
                 let path = path.clone();
                 move || store::save(&path, &project)
             },
-            move |result| {
-                state.busy.set(false);
-                state.finish_save(path, revision, exported, result);
-            },
+            move |result| state.finish_save(path, revision, exported, after_save, result),
         );
     }
 
@@ -1383,8 +1453,11 @@ impl UiState {
         path: PathBuf,
         revision: u64,
         exported: Option<PathBuf>,
+        after_save: Option<AfterSave>,
         result: std::io::Result<()>,
     ) {
+        self.busy.set(false);
+        let saved_current = result.is_ok() && self.editor.borrow().revision() == revision;
         self.status.set(match result {
             Ok(()) => {
                 self.editor.borrow_mut().mark_saved(revision);
@@ -1410,6 +1483,9 @@ impl UiState {
                 },
             ),
         });
+        if saved_current && let Some(after_save) = after_save {
+            after_save(self);
+        }
     }
 
     pub fn import_dialog(&self) {
@@ -1817,7 +1893,11 @@ impl UiState {
                             path: path.clone(),
                         })));
                         if let Some(project_path) = &project_path {
-                            state.save_to_with_export(project_path.clone(), Some(path.clone()));
+                            state.save_to_with_export(
+                                project_path.clone(),
+                                Some(path.clone()),
+                                None,
+                            );
                         }
                         if project_path.is_some() {
                             format!("Exported: {}", path.display())
@@ -2153,6 +2233,17 @@ fn unused_export_path(mut path: PathBuf) -> PathBuf {
     path
 }
 
+/// Platforms without custom button labels report the Yes/No/Cancel buttons.
+fn unsaved_choice(result: MessageDialogResult) -> UnsavedChoice {
+    match result {
+        MessageDialogResult::Yes => UnsavedChoice::Save,
+        MessageDialogResult::No => UnsavedChoice::Discard,
+        MessageDialogResult::Custom(label) if label == SAVE_CHOICE => UnsavedChoice::Save,
+        MessageDialogResult::Custom(label) if label == DISCARD_CHOICE => UnsavedChoice::Discard,
+        _ => UnsavedChoice::Cancel,
+    }
+}
+
 fn project_file(path: PathBuf) -> Result<PathBuf, String> {
     match path.extension().and_then(|extension| extension.to_str()) {
         None => Ok(path.with_extension("ocus")),
@@ -2235,7 +2326,7 @@ mod tests {
         );
         assert!(!state.dirty.peek());
         assert!(!state.status.peek().contains("Unsaved changes"));
-        assert!(state.confirm_discard());
+        assert!(state.settle_unsaved_changes(|_| {}));
         drop(editor);
 
         state.redo();
@@ -2252,14 +2343,14 @@ mod tests {
         let saved = state.editor.borrow().revision();
         assert!(state.edit(Command::RenameProject("Later".into())));
         let path = PathBuf::from("cut.ocus");
-        state.finish_save(path.clone(), saved, None, Ok(()));
+        state.finish_save(path.clone(), saved, None, None, Ok(()));
         assert_eq!(state.project_path.peek(), Some(path));
         assert!(state.dirty.peek());
 
         state.undo();
         assert!(!state.dirty.peek());
         assert_eq!(state.status.peek(), "Undid edit · Project saved");
-        assert!(state.confirm_discard());
+        assert!(state.settle_unsaved_changes(|_| {}));
         state.undo();
         assert!(state.dirty.peek());
         state.redo();
@@ -2272,11 +2363,19 @@ mod tests {
     #[test]
     fn returning_to_an_in_flight_save_clears_dirty_state_on_completion() {
         let state = UiState::new();
+        let runs = Rc::new(Cell::new(0));
         assert!(state.edit(Command::RenameProject("Saved".into())));
         let saved = state.editor.borrow().revision();
         state.undo();
         state.redo();
-        state.finish_save("cut.ocus".into(), saved, None, Ok(()));
+        state.finish_save(
+            "cut.ocus".into(),
+            saved,
+            None,
+            Some(Box::new(counting(&runs))),
+            Ok(()),
+        );
+        assert_eq!(runs.get(), 1);
         assert!(!state.dirty.peek());
         assert_eq!(state.status.peek(), "Project saved");
     }
@@ -2285,12 +2384,13 @@ mod tests {
     fn failed_save_preserves_the_previous_path_and_clean_checkpoint() {
         let state = UiState::new();
         let saved = state.editor.borrow().revision();
-        state.finish_save("original.ocus".into(), saved, None, Ok(()));
+        state.finish_save("original.ocus".into(), saved, None, None, Ok(()));
         assert!(state.edit(Command::RenameProject("Unsaved".into())));
         let failed = state.editor.borrow().revision();
         state.finish_save(
             "failed.ocus".into(),
             failed,
+            None,
             None,
             Err(std::io::Error::other("disk full")),
         );
@@ -2451,6 +2551,116 @@ mod tests {
             PathBuf::from("cut.ocus")
         );
         assert!(project_file(PathBuf::from("cut.mp4")).is_err());
+    }
+
+    #[test]
+    fn unsaved_dialog_buttons_map_to_save_discard_or_cancel() {
+        for (result, choice) in [
+            (
+                MessageDialogResult::Custom(SAVE_CHOICE.into()),
+                UnsavedChoice::Save,
+            ),
+            (
+                MessageDialogResult::Custom(DISCARD_CHOICE.into()),
+                UnsavedChoice::Discard,
+            ),
+            (
+                MessageDialogResult::Custom(CANCEL_CHOICE.into()),
+                UnsavedChoice::Cancel,
+            ),
+            (MessageDialogResult::Yes, UnsavedChoice::Save),
+            (MessageDialogResult::No, UnsavedChoice::Discard),
+            (MessageDialogResult::Cancel, UnsavedChoice::Cancel),
+        ] {
+            assert_eq!(unsaved_choice(result), choice);
+        }
+    }
+
+    fn dirty_state() -> (UiState, Rc<Cell<u32>>) {
+        let state = UiState::new();
+        state.project_path.set(Some("cut.ocus".into()));
+        assert!(state.edit(Command::RenameProject("Unsaved".into())));
+        (state, Rc::new(Cell::new(0)))
+    }
+
+    fn counting(runs: &Rc<Cell<u32>>) -> impl FnOnce(&UiState) + 'static {
+        let runs = runs.clone();
+        move |_| runs.set(runs.get() + 1)
+    }
+
+    #[test]
+    fn clean_projects_continue_without_asking() {
+        let state = UiState::new();
+        let runs = Rc::new(Cell::new(0));
+        assert!(state.settle_unsaved_changes(counting(&runs)));
+        assert_eq!(runs.get(), 0);
+    }
+
+    #[test]
+    fn discard_continues_now_and_cancel_keeps_the_changes() {
+        let (state, runs) = dirty_state();
+        assert!(state.apply_unsaved_choice(UnsavedChoice::Discard, counting(&runs)));
+        assert!(!state.apply_unsaved_choice(UnsavedChoice::Cancel, counting(&runs)));
+        assert!(state.dirty.peek());
+        assert_eq!(runs.get(), 0);
+    }
+
+    #[test]
+    fn save_choice_waits_for_the_save_before_continuing() {
+        let (state, runs) = dirty_state();
+        assert!(!state.apply_unsaved_choice(UnsavedChoice::Save, counting(&runs)));
+        assert!(state.dirty.peek());
+        assert_eq!(runs.get(), 0);
+    }
+
+    #[test]
+    fn only_a_successful_save_of_the_current_edit_continues() {
+        let (state, runs) = dirty_state();
+        let path = PathBuf::from("cut.ocus");
+        let failure = std::io::Error::other("disk full");
+        state.finish_save(
+            path.clone(),
+            0,
+            None,
+            Some(Box::new(counting(&runs))),
+            Err(failure),
+        );
+        assert_eq!(runs.get(), 0);
+        assert!(state.dirty.peek());
+        assert_eq!(state.status.peek(), "Save failed: disk full");
+
+        assert!(state.edit(Command::RenameProject("Later edit".into())));
+        state.finish_save(
+            path.clone(),
+            1,
+            None,
+            Some(Box::new(counting(&runs))),
+            Ok(()),
+        );
+        assert_eq!(runs.get(), 0);
+        assert!(state.dirty.peek());
+
+        state.finish_save(path, 2, None, Some(Box::new(counting(&runs))), Ok(()));
+        assert_eq!(runs.get(), 1);
+        assert!(!state.dirty.peek());
+        assert_eq!(state.status.peek(), "Project saved");
+    }
+
+    #[test]
+    fn saving_before_new_project_resumes_new_project() {
+        let (state, _) = dirty_state();
+        state.focus_frame(600);
+        let revision = state.editor.borrow().revision();
+        state.finish_save(
+            "cut.ocus".into(),
+            revision,
+            None,
+            Some(Box::new(UiState::new_project)),
+            Ok(()),
+        );
+        assert_eq!(state.project_path.peek(), None);
+        assert_eq!(state.timeline_start.peek(), 0);
+        assert_eq!(state.status.peek(), "New project · Not saved");
     }
 
     #[test]

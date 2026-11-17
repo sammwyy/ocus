@@ -305,13 +305,15 @@ impl FrameReader {
         if decoder.format() == ffmpeg::format::Pixel::None || decoder.width() == 0 {
             return Err("Preview source has an unknown pixel format".into());
         }
+        let picture =
+            super::fitted_dimensions(decoder.width(), decoder.height(), output.0, output.1);
         let scaler = ffmpeg::software::scaling::context::Context::get(
             decoder.format(),
             decoder.width(),
             decoder.height(),
             ffmpeg::format::Pixel::RGBA,
-            output.0,
-            output.1,
+            picture.0,
+            picture.1,
             ffmpeg::software::scaling::flag::Flags::BILINEAR,
         )
         .map_err(|error| error.to_string())?;
@@ -360,11 +362,16 @@ impl FrameReader {
         self.scaler
             .run(&frame.1, &mut scaled)
             .map_err(|error| error.to_string())?;
-        let row_size = self.output.0 as usize * 4;
-        let mut pixels = Vec::with_capacity(row_size * self.output.1 as usize);
-        for row in 0..self.output.1 as usize {
+        let row_size = scaled.width() as usize * 4;
+        let stride = self.output.0 as usize * 4;
+        let left = (self.output.0 - scaled.width()) as usize / 2;
+        let top = (self.output.1 - scaled.height()) as usize / 2;
+        let mut pixels = vec![0; stride * self.output.1 as usize];
+        for row in 0..scaled.height() as usize {
             let start = row * scaled.stride(0);
-            pixels.extend_from_slice(&scaled.data(0)[start..start + row_size]);
+            let destination = (top + row) * stride + left * 4;
+            pixels[destination..destination + row_size]
+                .copy_from_slice(&scaled.data(0)[start..start + row_size]);
         }
         Ok(FrameImage {
             width: self.output.0,
@@ -432,6 +439,57 @@ impl FrameReader {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn sources_are_fitted_and_centered() {
+        ffmpeg::init().unwrap();
+        let path = std::env::temp_dir().join(format!("ocus-fit-{}.ppm", std::process::id()));
+        for (width, height, output, picture) in [
+            (720, 1280, (1920, 1080), (606, 1080)),
+            (80, 60, (160, 90), (120, 90)),
+            (160, 90, (80, 120), (80, 44)),
+            (80, 60, (80, 60), (80, 60)),
+            (80, 60, (1, 1), (1, 1)),
+        ] {
+            let mut data = format!("P6\n{width} {height}\n255\n").into_bytes();
+            data.extend(vec![255; width * height * 3]);
+            fs::write(&path, data).unwrap();
+            let source = FrameSource {
+                clip_id: 1,
+                path: path.clone(),
+                kind: MediaKind::Image,
+                start: 0,
+                source_start: 0,
+                duration: 1,
+            };
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let image = VideoLayers::new((30, 1), output)
+                .frame_at(&[source], 0, &cancelled)
+                .unwrap()
+                .unwrap();
+            assert_eq!((image.width, image.height), output);
+            let left = (output.0 - picture.0) / 2;
+            let top = (output.1 - picture.1) / 2;
+            for y in 0..output.1 {
+                for x in 0..output.0 {
+                    let offset = ((y * output.0 + x) * 4) as usize;
+                    let shade = if (left..left + picture.0).contains(&x)
+                        && (top..top + picture.1).contains(&y)
+                    {
+                        255
+                    } else {
+                        0
+                    };
+                    assert_eq!(
+                        &image.pixels[offset..offset + 4],
+                        &[shade, shade, shade, 255],
+                        "at ({x}, {y}) for {width}x{height}"
+                    );
+                }
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn slow_frame_delivery_does_not_slow_timeline_playback() {
@@ -560,8 +618,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(storyboard_frames.len(), 3);
-        assert!(storyboard_frames[0].pixels[0] < 120);
-        assert!(storyboard_frames[2].pixels[0] > 140);
+        let center = (45 * 160 + 80) * 4;
+        assert!(storyboard_frames[0].pixels[center] < 120);
+        assert!(storyboard_frames[2].pixels[center] > 140);
         let cut = PreviewPlan {
             sources: vec![FrameSource {
                 clip_id: 2,

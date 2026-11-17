@@ -128,54 +128,177 @@ fn with(key: Key, ctrl: bool, shift: bool, alt: bool) -> Shortcut {
     shortcut
 }
 
+const KEY_BINDINGS: &[(Key, bool, bool, Action)] = &[
+    (Key::Char('z'), true, false, Action::Undo),
+    (Key::Char('z'), true, true, Action::Redo),
+    (Key::Char('y'), true, false, Action::Redo),
+    (Key::Delete, false, false, Action::Delete),
+    (Key::Backspace, false, false, Action::Delete),
+    (Key::Delete, false, true, Action::RippleDelete),
+    (Key::Backspace, false, true, Action::RippleDelete),
+    (Key::Char('a'), true, false, Action::SelectAll),
+    (Key::Escape, false, false, Action::Escape),
+    (Key::Char('c'), true, false, Action::Copy),
+    (Key::Char('x'), true, false, Action::Cut),
+    (Key::Char('v'), true, false, Action::Paste),
+    (Key::Char('d'), true, false, Action::Duplicate),
+    (Key::Char('k'), true, false, Action::Split),
+    (Key::Char('s'), false, false, Action::Split),
+    (Key::Char(' '), false, false, Action::PlayPause),
+    (Key::Char('k'), false, false, Action::PlayPause),
+    (Key::Left, false, false, Action::StepBack),
+    (Key::Right, false, false, Action::StepForward),
+    (Key::Left, false, true, Action::SecondBack),
+    (Key::Right, false, true, Action::SecondForward),
+    (Key::Home, false, false, Action::ToStart),
+    (Key::End, false, false, Action::ToEnd),
+    (Key::Left, false, false, Action::NudgeLeft),
+    (Key::Right, false, false, Action::NudgeRight),
+    (Key::Char('='), false, false, Action::ZoomIn),
+    (Key::Char('+'), false, false, Action::ZoomIn),
+    (Key::Char('+'), false, true, Action::ZoomIn),
+    (Key::Char('-'), false, false, Action::ZoomOut),
+    (Key::Char('t'), false, false, Action::AddTitle),
+    (Key::Char('n'), true, false, Action::New),
+    (Key::Char('o'), true, false, Action::Open),
+    (Key::Char('s'), true, false, Action::Save),
+    (Key::Char('s'), true, true, Action::SaveAs),
+    (Key::Char('i'), true, false, Action::Import),
+    (Key::Char('e'), true, false, Action::Export),
+];
+
 /// Every keyboard shortcut. They are inactive while a text field has focus.
 pub(crate) fn shortcuts() -> Vec<(Shortcut, Action)> {
-    use Action::*;
-    let char = Key::Char;
-    [
-        (char('z'), true, false, Undo),
-        (char('z'), true, true, Redo),
-        (char('y'), true, false, Redo),
-        (Key::Delete, false, false, Delete),
-        (Key::Backspace, false, false, Delete),
-        (Key::Delete, false, true, RippleDelete),
-        (Key::Backspace, false, true, RippleDelete),
-        (char('a'), true, false, SelectAll),
-        (Key::Escape, false, false, Escape),
-        (char('c'), true, false, Copy),
-        (char('x'), true, false, Cut),
-        (char('v'), true, false, Paste),
-        (char('d'), true, false, Duplicate),
-        (char('k'), true, false, Split),
-        (char('s'), false, false, Split),
-        (char(' '), false, false, PlayPause),
-        (char('k'), false, false, PlayPause),
-        (Key::Left, false, false, StepBack),
-        (Key::Right, false, false, StepForward),
-        (Key::Left, false, true, SecondBack),
-        (Key::Right, false, true, SecondForward),
-        (Key::Home, false, false, ToStart),
-        (Key::End, false, false, ToEnd),
-        (Key::Left, false, false, NudgeLeft),
-        (Key::Right, false, false, NudgeRight),
-        (char('='), false, false, ZoomIn),
-        (char('+'), false, false, ZoomIn),
-        (char('+'), false, true, ZoomIn),
-        (char('-'), false, false, ZoomOut),
-        (char('t'), false, false, AddTitle),
-        (char('n'), true, false, New),
-        (char('o'), true, false, Open),
-        (char('s'), true, false, Save),
-        (char('s'), true, true, SaveAs),
-        (char('i'), true, false, Import),
-        (char('e'), true, false, Export),
-    ]
-    .into_iter()
-    .map(|(key, ctrl, shift, action)| {
-        let alt = matches!(action, NudgeLeft | NudgeRight);
-        (with(key, ctrl, shift, alt), action)
-    })
-    .collect()
+    KEY_BINDINGS
+        .iter()
+        .map(|&(key, ctrl, shift, action)| {
+            let alt = matches!(action, Action::NudgeLeft | Action::NudgeRight);
+            (with(key, ctrl, shift, alt), action)
+        })
+        .collect()
+}
+
+impl Action {
+    fn shortcut_group(self) -> &'static str {
+        match self {
+            Self::PlayPause
+            | Self::StepBack
+            | Self::StepForward
+            | Self::SecondBack
+            | Self::SecondForward
+            | Self::ToStart
+            | Self::ToEnd => "Playback",
+            Self::Undo
+            | Self::Redo
+            | Self::Delete
+            | Self::RippleDelete
+            | Self::SelectAll
+            | Self::Escape
+            | Self::Copy
+            | Self::Cut
+            | Self::Paste
+            | Self::Duplicate
+            | Self::Split
+            | Self::AddTitle => "Editing",
+            Self::NudgeLeft | Self::NudgeRight | Self::ZoomIn | Self::ZoomOut => "Timeline",
+            Self::New | Self::Open | Self::Save | Self::SaveAs | Self::Import | Self::Export => {
+                "File"
+            }
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Undo => "Undo",
+            Self::Redo => "Redo",
+            Self::Delete => "Remove selection",
+            Self::RippleDelete => "Ripple delete",
+            Self::SelectAll => "Select all",
+            Self::Escape => "Clear / close",
+            Self::Copy => "Copy",
+            Self::Cut => "Cut",
+            Self::Paste => "Paste",
+            Self::Duplicate => "Duplicate",
+            Self::Split => "Split at playhead",
+            Self::PlayPause => "Play / pause",
+            Self::StepBack => "Previous frame",
+            Self::StepForward => "Next frame",
+            Self::SecondBack => "Back one second",
+            Self::SecondForward => "Forward one second",
+            Self::ToStart => "Go to start",
+            Self::ToEnd => "Go to end",
+            Self::NudgeLeft => "Nudge left",
+            Self::NudgeRight => "Nudge right",
+            Self::ZoomIn => "Zoom in",
+            Self::ZoomOut => "Zoom out",
+            Self::AddTitle => "Add title",
+            Self::New => "New project",
+            Self::Open => "Open project",
+            Self::Save => "Save project",
+            Self::SaveAs => "Save project as",
+            Self::Import => "Import media",
+            Self::Export => "Export",
+        }
+    }
+}
+
+fn shortcut_label(shortcut: &Shortcut) -> String {
+    let key = match shortcut.key {
+        Key::Char(' ') => "Space".into(),
+        Key::Char(c) => c.to_uppercase().to_string(),
+        Key::Left => "←".into(),
+        Key::Right => "→".into(),
+        Key::Delete => "Del".into(),
+        Key::Backspace => "Bksp".into(),
+        Key::Escape => "Esc".into(),
+        Key::Home => "Home".into(),
+        Key::End => "End".into(),
+        key => format!("{key:?}"),
+    };
+    format!(
+        "{}{}{}{key}",
+        if shortcut.modifiers.logo {
+            "Cmd "
+        } else if shortcut.modifiers.ctrl {
+            "Ctrl "
+        } else {
+            ""
+        },
+        if shortcut.modifiers.shift {
+            "Shift "
+        } else {
+            ""
+        },
+        if shortcut.modifiers.alt { "Alt " } else { "" },
+    )
+}
+
+pub(super) struct ShortcutHelp {
+    pub title: &'static str,
+    pub bindings: Vec<(String, &'static str)>,
+}
+
+pub(super) fn shortcut_help() -> Vec<ShortcutHelp> {
+    let mut groups: Vec<(Action, Vec<String>)> = Vec::new();
+    for (shortcut, action) in shortcuts() {
+        let label = shortcut_label(&shortcut);
+        if let Some((_, keys)) = groups.iter_mut().find(|(group, _)| *group == action) {
+            keys.push(label);
+        } else {
+            groups.push((action, vec![label]));
+        }
+    }
+    ["Playback", "Editing", "Timeline", "File"]
+        .into_iter()
+        .map(|title| ShortcutHelp {
+            title,
+            bindings: groups
+                .iter()
+                .filter(|(action, _)| action.shortcut_group() == title)
+                .map(|(action, keys)| (keys.join(" / "), action.description()))
+                .collect(),
+        })
+        .collect()
 }
 
 fn distance(a: Point, b: Point) -> f32 {
@@ -1451,6 +1574,34 @@ mod tests {
             state.run(Action::Escape);
             assert!(!help.visible());
         });
+    }
+
+    #[test]
+    fn inspector_help_covers_every_registered_shortcut() {
+        let help = shortcut_help();
+        assert!(help.iter().all(|group| !group.bindings.is_empty()));
+        let help: Vec<_> = help.iter().flat_map(|group| &group.bindings).collect();
+        for (shortcut, action) in shortcuts() {
+            let keys = help
+                .iter()
+                .find(|(_, description)| *description == action.description())
+                .expect("every registered action must have inspector help");
+            assert!(
+                keys.0
+                    .split(" / ")
+                    .any(|key| key == shortcut_label(&shortcut))
+            );
+        }
+        assert_eq!(
+            help.iter()
+                .map(|(keys, _)| keys.split(" / ").count())
+                .sum::<usize>(),
+            shortcuts().len()
+        );
+        assert!(
+            help.iter()
+                .all(|(keys, description)| !keys.is_empty() && !description.is_empty())
+        );
     }
 
     #[test]

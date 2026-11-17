@@ -2080,35 +2080,37 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 property("Sources", project.media().len().to_string()),
             ],
         ));
-        rows.push(section(
-            "Shortcuts",
-            [
-                ("Space", "Play / pause"),
-                ("← →", "Step a frame (Shift: 1 s)"),
-                ("Ctrl Z / Ctrl Shift Z", "Undo / redo"),
-                ("Delete", "Remove (Shift: ripple)"),
-                ("Ctrl C / X / V / D", "Copy, cut, paste, duplicate"),
-                ("S · Ctrl K", "Split at playhead"),
-                ("Ctrl A · Esc", "Select all · clear"),
-                ("Alt ← →", "Nudge selection"),
-                ("Ctrl + wheel · + −", "Zoom timeline"),
-            ]
+        let groups = super::interaction::shortcut_help()
             .into_iter()
-            .map(|(keys, action)| {
-                Box::new(
-                    Flex::row()
-                        .gap(8.0)
-                        .align(Align::Center)
-                        .child(Box::new(Flex::row().width(112.0).child(text(
-                            keys,
-                            text_color(),
-                            10.0,
-                        ))))
-                        .child(text(action, muted(), 10.0)),
-                ) as BoxedWidget
+            .map(|group| {
+                let mut bindings = group.bindings;
+                if group.title == "Timeline" {
+                    bindings.push(("Ctrl + wheel".into(), "Zoom timeline"));
+                }
+                Box::new(append(
+                    Flex::column()
+                        .gap(5.0)
+                        .child(heading(group.title, muted(), 10.0)),
+                    bindings
+                        .into_iter()
+                        .map(|(keys, action)| {
+                            Box::new(
+                                Flex::row()
+                                    .gap(8.0)
+                                    .align(Align::Center)
+                                    .child(Box::new(Flex::row().width(112.0).child(text(
+                                        keys,
+                                        text_color(),
+                                        10.0,
+                                    ))))
+                                    .child(text(action, muted(), 10.0)),
+                            ) as BoxedWidget
+                        })
+                        .collect(),
+                )) as BoxedWidget
             })
-            .collect(),
-        ));
+            .collect();
+        rows.push(section("Shortcuts", groups));
     }
     Box::new(
         Flex::column()
@@ -4239,7 +4241,14 @@ mod tests {
     #[test]
     fn source_transport_does_not_advertise_sequence_keyboard_shortcuts() {
         let state = UiState::new();
-        render(&state, 1280.0, 760.0);
+        let shortcut_count = |painter: &TestPainter| {
+            painter
+                .labels
+                .iter()
+                .filter(|label| *label == "Space / K")
+                .count()
+        };
+        let baseline = shortcut_count(&render(&state, 1280.0, 760.0));
         let source = state
             .tooltips
             .borrow()
@@ -4254,7 +4263,7 @@ mod tests {
                 .iter()
                 .any(|label| label == "Play / pause source")
         );
-        assert!(!painter.labels.iter().any(|label| label == "Space / K"));
+        assert_eq!(shortcut_count(&painter), baseline);
         source.focus(false);
         state
             .tooltips
@@ -4263,7 +4272,7 @@ mod tests {
             .unwrap()
             .focus(true);
         let painter = render(&state, 1280.0, 760.0);
-        assert!(painter.labels.iter().any(|label| label == "Space / K"));
+        assert_eq!(shortcut_count(&painter), baseline + 1);
     }
 
     #[test]

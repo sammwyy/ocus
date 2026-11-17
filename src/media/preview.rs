@@ -65,7 +65,7 @@ pub fn storyboard(
             .ok_or("Storyboard frame range overflows")?;
         let mut reader = FrameReader::open(&source, target, key.fps, (160, 90), cancelled.clone())?;
         let mut image = reader.frame_at(target, &cancelled)?;
-        for pixel in image.pixels.chunks_exact_mut(4) {
+        for pixel in image.pixels.as_chunks_mut::<4>().0 {
             for channel in 0..3 {
                 pixel[channel] =
                     ((u16::from(pixel[channel]) * u16::from(pixel[3]) + 127) / 255) as u8;
@@ -107,7 +107,7 @@ impl VideoLayers {
     ) -> Result<Option<FrameImage>, String> {
         let mut active = Vec::new();
         let mut pixels = vec![0; self.output.0 as usize * self.output.1 as usize * 4];
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
             pixel[3] = 255;
         }
         for source in sources.iter().rev() {
@@ -116,7 +116,12 @@ impl VideoLayers {
             }
             active.push(source.clip_id);
             let image = self.layer_at(source, position, cancelled)?;
-            for (dst, src) in pixels.chunks_exact_mut(4).zip(image.pixels.chunks_exact(4)) {
+            for (dst, src) in pixels
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(image.pixels.as_chunks::<4>().0)
+            {
                 blend(dst, src);
             }
         }

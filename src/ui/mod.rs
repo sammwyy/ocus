@@ -3,6 +3,7 @@ mod edits;
 mod interaction;
 mod state;
 mod timeline_view;
+pub(crate) mod title_fonts;
 pub(crate) mod title_markup;
 mod window;
 

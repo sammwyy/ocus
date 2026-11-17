@@ -1,7 +1,7 @@
 use super::preview::{FrameImage, FrameSource, VideoLayers, blend};
 use crate::project::Project;
 use crate::timeline::{ClipContent, Title, TrackKind};
-use crate::ui::title_markup;
+use crate::ui::{title_fonts, title_markup};
 use creamui::fonts::{FontWeight, HorizontalAlign, LayoutSettings, cached_layout, resolve};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -210,12 +210,13 @@ impl Glyphs {
         }
         let line_height = size * 1.35;
         let start_y = height as f32 * title.y - line_height * lines.len() as f32 / 2.0;
+        let family = title_fonts::family_stack(&title.font_family);
         for (line_index, line) in lines.iter().enumerate() {
             let layouts: Vec<_> = line
                 .iter()
                 .map(|run| {
                     let face = resolve(
-                        &title.font_family,
+                        &family,
                         if run.bold {
                             FontWeight::Bold
                         } else {
@@ -352,6 +353,26 @@ mod tests {
         let mut background = [20, 40, 80, 255];
         crate::media::preview::blend(&mut background, &[220, 120, 0, 128]);
         assert_eq!(background, [120, 80, 40, 255]);
+    }
+
+    #[test]
+    fn serif_title_matches_the_installed_serif_face() {
+        let render = |family: &str| {
+            let title = Title {
+                text: "Serif".into(),
+                font_family: family.into(),
+                font_size: 42.0,
+                ..Title::default()
+            };
+            let mut pixels = vec![0; 160 * 90 * 4];
+            Glyphs::default().draw(&title, 160, 90, 160, 160 * 4, &mut pixels);
+            pixels
+        };
+        let serif = render("Times New Roman, Georgia, DejaVu Serif, Liberation Serif, Noto Serif");
+        assert!(
+            render("Serif") == serif,
+            "the generic Serif title should render like its concrete serif family"
+        );
     }
 
     #[test]

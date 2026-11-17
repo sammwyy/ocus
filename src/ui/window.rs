@@ -12,8 +12,8 @@ use super::state::{
     media_frames,
 };
 use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
-use super::title_markup;
 use super::{MediaFilter, Sidebar, UiState};
+use super::{title_fonts, title_markup};
 use crate::media::preview::StoryboardKey;
 use crate::media::{Media, MediaKind};
 use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, VideoCodec};
@@ -519,6 +519,7 @@ fn title_box(title: &Title, rect: Rect, aspect: f32, resolution: (u32, u32)) -> 
     let mut longest = 0.0_f32;
     let mut line_width = 0.0;
     let mut lines = 1;
+    let family = title_fonts::family_stack(&title.font_family);
     for run in title_markup::parse(title) {
         for (index, part) in run.text.split('\n').enumerate() {
             if index > 0 {
@@ -526,7 +527,7 @@ fn title_box(title: &Title, rect: Rect, aspect: f32, resolution: (u32, u32)) -> 
                 line_width = 0.0;
                 lines += 1;
             }
-            line_width += run_width(part, size, &title.font_family, run.bold);
+            line_width += run_width(part, size, &family, run.bold);
         }
     }
     let box_width = (longest.max(line_width) + 16.0).clamp(32.0, width.max(32.0));
@@ -581,6 +582,7 @@ impl Widget for ProgramCanvas {
                 continue;
             }
             let size = (title.font_size * scale).max(1.0).min(height * 2.0);
+            let family = title_fonts::family_stack(&title.font_family);
             let runs = title_markup::parse(title);
             let lines: Vec<Vec<_>> = {
                 let mut lines = vec![Vec::new()];
@@ -604,7 +606,7 @@ impl Widget for ProgramCanvas {
             for (index, line) in lines.iter().enumerate() {
                 let widths: Vec<_> = line
                     .iter()
-                    .map(|run| run_width(&run.text, size, &title.font_family, run.bold))
+                    .map(|run| run_width(&run.text, size, &family, run.bold))
                     .collect();
                 let line_width: f32 = widths.iter().sum();
                 let mut x = bounds.x + width * title.x - line_width / 2.0;
@@ -628,7 +630,7 @@ impl Widget for ProgramCanvas {
                                     Color::rgba(0, 0, 0, run.color.a),
                                     size,
                                     TextAlign::Start,
-                                    Some(&title.font_family),
+                                    Some(&family),
                                     run.bold,
                                     run.italic,
                                 );
@@ -640,7 +642,7 @@ impl Widget for ProgramCanvas {
                             run.color,
                             size,
                             TextAlign::Start,
-                            Some(&title.font_family),
+                            Some(&family),
                             run.bold,
                             run.italic,
                         );

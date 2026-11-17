@@ -18,8 +18,9 @@ whose duration can be changed in the inspector; over footage
 it places the title on a free video track at the playhead. Selecting a title
 shows a frame around it in the Program monitor: drag inside to move it or drag
 its bottom-right handle to resize it. The inspector edits its multiline text,
-font family, size, color (picker or hex), bold, italic and outline. Independent
-HTML and Markdown switches parse `<b>` / `<bold>`, `<i>` / `<italic>`,
+font family, size, color (picker or hex), bold, italic and outline. Use `Serif`
+to request an installed serif font; if none is found, the default font is used.
+Independent HTML and Markdown switches parse `<b>` / `<bold>`, `<i>` / `<italic>`,
 `<color=red>` / `<color=#ff0000>`, `**bold**` and `_italic_` in the preview;
 other HTML remains literal text. These edits can be undone and are saved with
 the project. The workspace also supports splitting, moving, trimming, deleting

@@ -73,6 +73,22 @@ const SAVE_CHOICE: &str = "Save";
 const DISCARD_CHOICE: &str = "Don't Save";
 const CANCEL_CHOICE: &str = "Cancel";
 const MAX_THUMBNAILS: usize = 256;
+
+fn folder_matches(
+    sources: &[Media],
+    folder: &Path,
+    files: &HashSet<PathBuf>,
+) -> Vec<(Media, PathBuf)> {
+    sources
+        .iter()
+        .filter_map(|source| {
+            let candidate = folder.join(source.path.file_name()?);
+            files
+                .contains(&candidate)
+                .then(|| (source.clone(), candidate))
+        })
+        .collect()
+}
 const MAX_STORYBOARDS: usize = 64;
 /// Seconds shown across the timeline at each zoom level, closest first.
 pub(crate) const ZOOM_SECONDS: [u64; 16] = [
@@ -195,6 +211,7 @@ pub(crate) struct UiState {
     pub ui_revision: Signal<u64>,
     pub selected: Signal<Vec<ClipRef>>,
     pub selected_media: Signal<Option<u64>>,
+    pub missing_media: Signal<HashSet<u64>>,
     pub program: Monitor,
     pub source: Monitor,
     pub preview_available: Signal<bool>,
@@ -283,6 +300,7 @@ impl UiState {
             ui_revision: Signal::new(0),
             selected: Signal::new(Vec::new()),
             selected_media: Signal::new(None),
+            missing_media: Signal::new(HashSet::new()),
             program: Monitor::new(),
             source: Monitor::new(),
             preview_available: Signal::new(false),
@@ -495,6 +513,7 @@ impl UiState {
         self.revision.update(|revision| *revision += 1);
         let dirty = self.editor.borrow().is_dirty();
         self.dirty.set(dirty);
+        self.refresh_missing_media();
         let checkpoint = if dirty {
             "Unsaved changes"
         } else if self.project_path.peek().is_some() {
@@ -507,9 +526,6 @@ impl UiState {
         } else {
             format!("{status} · {checkpoint}")
         });
-        self.request_preview();
-        self.request_source_preview();
-        self.queue_storyboards();
     }
 
     pub fn edit(&self, command: Command) -> bool {
@@ -521,6 +537,32 @@ impl UiState {
                 .set("Edit rejected: check range, track and clip".into());
         }
         changed
+    }
+
+    fn refresh_missing_media(&self) {
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let sources = self.editor.borrow().project().media().to_vec();
+        let revision = self.revision.peek();
+        let state = self.clone();
+        app.spawn_background(
+            move || {
+                sources
+                    .into_iter()
+                    .filter(|media| !media.path.is_file())
+                    .map(|media| media.id)
+                    .collect::<HashSet<_>>()
+            },
+            move |missing| {
+                if state.revision.peek() == revision {
+                    state.missing_media.set(missing);
+                    state.request_preview();
+                    state.request_source_preview();
+                    state.queue_storyboards();
+                }
+            },
+        );
     }
 
     pub fn undo(&self) {
@@ -711,6 +753,9 @@ impl UiState {
             let ClipContent::Media { media_id } = clip.content else {
                 return None;
             };
+            if self.missing_media.peek().contains(&media_id) {
+                return None;
+            }
             let media = project.media().iter().find(|media| media.id == media_id)?;
             return Some(SourceRange {
                 path: media.path.clone(),
@@ -720,6 +765,9 @@ impl UiState {
             });
         }
         let media_id = self.selected_media.peek()?;
+        if self.missing_media.peek().contains(&media_id) {
+            return None;
+        }
         let media = project.media().iter().find(|media| media.id == media_id)?;
         let rate = &project.settings().frame_rate;
         Some(SourceRange {
@@ -905,6 +953,10 @@ impl UiState {
     }
 
     pub(super) fn request_preview(&self) {
+        if self.has_missing_timeline_media() {
+            self.stop(&self.program);
+            return;
+        }
         let editor = self.editor.borrow();
         let project = editor.project();
         let mut sources = Vec::new();
@@ -965,6 +1017,14 @@ impl UiState {
     }
 
     fn request_source_preview(&self) {
+        if self
+            .selected_media
+            .peek()
+            .is_some_and(|id| self.missing_media.peek().contains(&id))
+        {
+            self.stop(&self.source);
+            return;
+        }
         let range = self.source_range();
         let editor = self.editor.borrow();
         let settings = editor.project().settings();
@@ -1227,7 +1287,6 @@ impl UiState {
                             state.ui_revision.update(|revision| *revision += 1);
                         }
                     }
-                    Err(error) => state.status.set(format!("Timeline thumbnail: {error}")),
                     _ => {}
                 }
             },
@@ -1270,6 +1329,9 @@ impl UiState {
                 let ClipContent::Media { media_id } = clip.content else {
                     return None;
                 };
+                if self.missing_media.peek().contains(&media_id) {
+                    return None;
+                }
                 let media = project.media().iter().find(|media| media.id == media_id)?;
                 Some((
                     StoryboardKey {
@@ -1348,6 +1410,7 @@ impl UiState {
             return;
         }
         *self.editor.borrow_mut() = Editor::new(Project::new("Untitled"));
+        self.missing_media.set(HashSet::new());
         self.export_modal.set(false);
         self.project_path.set(None);
         self.thumbnails.borrow_mut().clear();
@@ -1392,16 +1455,28 @@ impl UiState {
         app.spawn_background(
             {
                 let path = path.clone();
-                move || store::load(&path)
+                move || {
+                    store::load(&path).map(|project| {
+                        let missing = project
+                            .media()
+                            .iter()
+                            .filter(|media| !media.path.is_file())
+                            .map(|media| media.id)
+                            .collect::<HashSet<_>>();
+                        (project, missing)
+                    })
+                }
             },
             move |result| {
                 state.busy.set(false);
                 match result {
-                    Ok(project) if state.revision.peek() == revision => {
+                    Ok((project, missing)) if state.revision.peek() == revision => {
                         let sources: Vec<_> = project
                             .media()
                             .iter()
-                            .filter(|media| media.kind != MediaKind::Audio)
+                            .filter(|media| {
+                                media.kind != MediaKind::Audio && !missing.contains(&media.id)
+                            })
                             .map(|media| media.path.clone())
                             .take(MAX_THUMBNAILS)
                             .collect();
@@ -1417,7 +1492,12 @@ impl UiState {
                         state.revision.update(|revision| *revision += 1);
                         state.dirty.set(false);
                         state.sidebar.set(Sidebar::Media);
-                        state.status.set("Project opened".into());
+                        state.status.set(if missing.is_empty() {
+                            "Project opened".into()
+                        } else {
+                            format!("Project opened · {} media files missing", missing.len())
+                        });
+                        state.missing_media.set(missing);
                         state.load_thumbnails(sources);
                         state.queue_storyboards();
                         state.request_preview();
@@ -1913,7 +1993,17 @@ impl UiState {
         }
     }
 
+    pub fn has_missing_timeline_media(&self) -> bool {
+        let missing = self.missing_media.get();
+        self.editor.borrow().project().tracks().iter().flat_map(|track| &track.clips).any(|clip| matches!(clip.content, ClipContent::Media { media_id } if missing.contains(&media_id)))
+    }
+
     fn start_export(&self, path: PathBuf, settings: ExportSettings, quick: bool) {
+        if self.has_missing_timeline_media() {
+            self.status
+                .set("Cannot export: relink the missing media used in your timeline first".into());
+            return;
+        }
         if self.busy.peek() || !export::can_render(self.editor.borrow().project()) {
             return;
         }
@@ -2014,6 +2104,128 @@ impl UiState {
 
     pub fn export_control(&self) -> Option<Arc<ExportControl>> {
         self.export_control.borrow().clone()
+    }
+
+    pub fn relink_dialog(&self, media_id: Option<u64>) {
+        if self.busy.peek() {
+            return;
+        }
+        let path = if media_id.is_some() {
+            FileDialog::new()
+                .set_title("Locate missing media file")
+                .pick_file()
+        } else {
+            FileDialog::new()
+                .set_title("Locate folder containing missing media")
+                .pick_folder()
+        };
+        if let Some(path) = path {
+            self.relink_path(media_id, path);
+        }
+    }
+
+    pub fn relink_path(&self, media_id: Option<u64>, path: PathBuf) {
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        if self.busy.peek() {
+            return;
+        }
+        let missing = self.missing_media.peek();
+        let sources: Vec<_> = self
+            .editor
+            .borrow()
+            .project()
+            .media()
+            .iter()
+            .filter(|media| missing.contains(&media.id))
+            .cloned()
+            .collect();
+        let revision = self.revision.peek();
+        self.busy.set(true);
+        self.status.set("Relinking media…".into());
+        let state = self.clone();
+        app.spawn_background(
+            move || {
+                let folder = if media_id.is_some() {
+                    path.parent().unwrap_or(Path::new(".")).to_path_buf()
+                } else {
+                    path.clone()
+                };
+                let entries = match std::fs::read_dir(&folder) {
+                    Ok(entries) => entries,
+                    Err(error) => return vec![Err(format!("Cannot read folder: {error}"))],
+                };
+                let files = entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+                    .map(|entry| entry.path())
+                    .collect();
+                let mut matches = folder_matches(&sources, &folder, &files);
+                if let Some(id) = media_id {
+                    matches.retain(|(source, _)| source.id != id);
+                    if let Some(source) = sources.iter().find(|source| source.id == id) {
+                        matches.insert(0, (source.clone(), path));
+                    }
+                }
+                matches
+                    .into_iter()
+                    .map(|(source, path)| {
+                        let info = probe(&path)?;
+                        if info.kind != source.kind {
+                            return Err("The selected file has a different media type".to_string());
+                        }
+                        Ok(Media {
+                            path,
+                            duration_us: info.duration_us,
+                            has_audio: info.has_audio,
+                            ..source
+                        })
+                    })
+                    .collect::<Vec<Result<Media, String>>>()
+            },
+            move |results| {
+                state.busy.set(false);
+                if state.revision.peek() != revision {
+                    state.status.set("Relink cancelled: project changed".into());
+                    return;
+                }
+                let mut count = 0;
+                let mut errors = Vec::new();
+                let mut paths = Vec::new();
+                for result in results {
+                    match result {
+                        Ok(media) => {
+                            let id = media.id;
+                            let path = media.path.clone();
+                            if state.edit(Command::RelinkMedia(media)) {
+                                state.missing_media.update(|missing| {
+                                    missing.remove(&id);
+                                });
+                                paths.push(path);
+                                count += 1;
+                            } else {
+                                errors.push("File does not fit the existing timeline".to_string());
+                            }
+                        }
+                        Err(error) => errors.push(error),
+                    }
+                }
+                state.load_thumbnails(paths);
+                state.queue_storyboards();
+                state.request_preview();
+                state.request_source_preview();
+                let remaining = state.missing_media.peek().len();
+                let mut status = format!("Relinked {count} files");
+                if remaining > 0 {
+                    status.push_str(&format!(" · {remaining} still missing"));
+                }
+                if let Some(error) = errors.first() {
+                    status.push_str(&format!(" · {error}"));
+                }
+                state.status.set(status);
+            },
+        );
     }
 
     /// Imports files on a worker; with a placement (`track_id`, frame) the
@@ -2160,10 +2372,21 @@ impl UiState {
             return;
         };
         let state = self.clone();
+        let missing = self.missing_media.peek();
+        let missing_paths: HashSet<_> = self
+            .editor
+            .borrow()
+            .project()
+            .media()
+            .iter()
+            .filter(|media| missing.contains(&media.id))
+            .map(|media| media.path.clone())
+            .collect();
         app.spawn_background(
             move || {
                 sources
                     .into_iter()
+                    .filter(|path| !missing_paths.contains(path))
                     .filter_map(|path| thumbnail(&path).ok().map(|image| (path, image)))
                     .collect::<Vec<_>>()
             },
@@ -2495,6 +2718,13 @@ mod tests {
         state.zoom_to_fit();
         assert!(state.storyboard_requests().is_empty());
         assert_eq!(state.storyboards.borrow().len(), MAX_STORYBOARDS);
+        state.missing_media.set(HashSet::from([1]));
+        assert!(state.storyboard_requests().is_empty());
+        assert!(state.storyboards.borrow().is_empty());
+        state.select_media(1);
+        assert!(state.source_range().is_none());
+        state.select_clip(Some((0, 0)));
+        assert!(state.source_range().is_none());
     }
 
     #[test]
@@ -2628,6 +2858,62 @@ mod tests {
         assert!(state.dirty.peek());
     }
 
+    #[test]
+    fn relink_marks_changes_for_the_unsaved_prompt_and_undo_restores_source() {
+        let state = UiState::new();
+        let original = Media {
+            id: 1,
+            path: "old.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(1_000_000),
+            has_audio: false,
+        };
+        assert!(state.edit(Command::ImportMedia(original.clone())));
+        let revision = state.editor.borrow().revision();
+        state.finish_save("cut.ocus".into(), revision, None, None, Ok(()));
+        assert!(!state.dirty.peek());
+        assert!(state.edit(Command::RelinkMedia(Media {
+            path: "new.mp4".into(),
+            ..original.clone()
+        })));
+        assert!(state.dirty.peek());
+        assert!(!state.apply_unsaved_choice(UnsavedChoice::Cancel, |_| panic!("cancelled")));
+        assert!(state.apply_unsaved_choice(UnsavedChoice::Discard, |_| panic!("discarded")));
+        state.undo();
+        assert_eq!(state.editor.borrow().project().media(), &[original]);
+        assert!(!state.dirty.peek());
+        state.redo();
+        assert!(state.dirty.peek());
+    }
+
+    #[test]
+    fn folder_relink_matches_only_exact_filenames() {
+        let source = Media {
+            id: 1,
+            path: "/old/clip.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: None,
+            has_audio: false,
+        };
+        let folder = Path::new("/new");
+        assert!(folder_matches(&[], folder, &HashSet::new()).is_empty());
+        assert!(
+            folder_matches(
+                std::slice::from_ref(&source),
+                folder,
+                &HashSet::from([folder.join("CLIP.mp4"), folder.join("nested/clip.mp4")])
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            folder_matches(
+                std::slice::from_ref(&source),
+                folder,
+                &HashSet::from([folder.join("clip.mp4")])
+            ),
+            vec![(source, folder.join("clip.mp4"))]
+        );
+    }
     #[test]
     fn export_destinations_keep_project_paths_ahead_of_the_user_default() {
         let state = UiState::new();

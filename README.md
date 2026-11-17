@@ -1,5 +1,12 @@
 # Ocus
 
+Projects open even when source files have moved. Missing files are marked in the
+media bin; choose **Relink…** to search a folder by exact filename, or right-click
+a missing item and choose **Relink file…** to locate a renamed file. Locating one
+file also reconnects missing files with matching names in the same folder. Each
+relinked file can be undone independently. Relink missing timeline media before
+exporting, then save the project to keep its updated source paths.
+
 Ocus is an early-stage, lightweight video editor written in Rust. The
 [roadmap](ROADMAP.md) tracks its intended milestones. The CreamUI editor
 supports importing media, editing and previewing a multitrack timeline,

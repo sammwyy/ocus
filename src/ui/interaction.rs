@@ -179,6 +179,34 @@ pub(crate) fn shortcuts() -> Vec<(Shortcut, Action)> {
 }
 
 impl Action {
+    fn shortcut_group(self) -> &'static str {
+        match self {
+            Self::PlayPause
+            | Self::StepBack
+            | Self::StepForward
+            | Self::SecondBack
+            | Self::SecondForward
+            | Self::ToStart
+            | Self::ToEnd => "Playback",
+            Self::Undo
+            | Self::Redo
+            | Self::Delete
+            | Self::RippleDelete
+            | Self::SelectAll
+            | Self::Escape
+            | Self::Copy
+            | Self::Cut
+            | Self::Paste
+            | Self::Duplicate
+            | Self::Split
+            | Self::AddTitle => "Editing",
+            Self::NudgeLeft | Self::NudgeRight | Self::ZoomIn | Self::ZoomOut => "Timeline",
+            Self::New | Self::Open | Self::Save | Self::SaveAs | Self::Import | Self::Export => {
+                "File"
+            }
+        }
+    }
+
     fn description(self) -> &'static str {
         match self {
             Self::Undo => "Undo",
@@ -220,8 +248,8 @@ fn shortcut_label(shortcut: &Shortcut) -> String {
         Key::Char(c) => c.to_uppercase().to_string(),
         Key::Left => "←".into(),
         Key::Right => "→".into(),
-        Key::Delete => "Delete".into(),
-        Key::Backspace => "Backspace".into(),
+        Key::Delete => "Del".into(),
+        Key::Backspace => "Bksp".into(),
         Key::Escape => "Esc".into(),
         Key::Home => "Home".into(),
         Key::End => "End".into(),
@@ -245,7 +273,12 @@ fn shortcut_label(shortcut: &Shortcut) -> String {
     )
 }
 
-pub(super) fn shortcut_help() -> Vec<(String, &'static str)> {
+pub(super) struct ShortcutHelp {
+    pub title: &'static str,
+    pub bindings: Vec<(String, &'static str)>,
+}
+
+pub(super) fn shortcut_help() -> Vec<ShortcutHelp> {
     let mut groups: Vec<(Action, Vec<String>)> = Vec::new();
     for (shortcut, action) in shortcuts() {
         let label = shortcut_label(&shortcut);
@@ -255,11 +288,19 @@ pub(super) fn shortcut_help() -> Vec<(String, &'static str)> {
             groups.push((action, vec![label]));
         }
     }
-    groups
+    ["Playback", "Editing", "Timeline", "File"]
         .into_iter()
-        .map(|(action, keys)| (keys.join(" / "), action.description()))
+        .map(|title| ShortcutHelp {
+            title,
+            bindings: groups
+                .iter()
+                .filter(|(action, _)| action.shortcut_group() == title)
+                .map(|(action, keys)| (keys.join(" / "), action.description()))
+                .collect(),
+        })
         .collect()
 }
+
 fn distance(a: Point, b: Point) -> f32 {
     (a.x - b.x).hypot(a.y - b.y)
 }
@@ -1472,6 +1513,8 @@ mod tests {
     #[test]
     fn inspector_help_covers_every_registered_shortcut() {
         let help = shortcut_help();
+        assert!(help.iter().all(|group| !group.bindings.is_empty()));
+        let help: Vec<_> = help.iter().flat_map(|group| &group.bindings).collect();
         for (shortcut, action) in shortcuts() {
             let keys = help
                 .iter()

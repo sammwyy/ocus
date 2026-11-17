@@ -1947,26 +1947,37 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 property("Sources", project.media().len().to_string()),
             ],
         ));
-        rows.push(section(
-            "Shortcuts",
-            super::interaction::shortcut_help()
-                .into_iter()
-                .chain(std::iter::once(("Ctrl + wheel".into(), "Zoom timeline")))
-                .map(|(keys, action)| {
-                    Box::new(
-                        Flex::row()
-                            .gap(8.0)
-                            .align(Align::Center)
-                            .child(Box::new(Flex::row().width(112.0).child(text(
-                                &keys,
-                                text_color(),
-                                10.0,
-                            ))))
-                            .child(text(action, muted(), 10.0)),
-                    ) as BoxedWidget
-                })
-                .collect(),
-        ));
+        let groups = super::interaction::shortcut_help()
+            .into_iter()
+            .map(|group| {
+                let mut bindings = group.bindings;
+                if group.title == "Timeline" {
+                    bindings.push(("Ctrl + wheel".into(), "Zoom timeline"));
+                }
+                Box::new(append(
+                    Flex::column()
+                        .gap(5.0)
+                        .child(heading(group.title, muted(), 10.0)),
+                    bindings
+                        .into_iter()
+                        .map(|(keys, action)| {
+                            Box::new(
+                                Flex::row()
+                                    .gap(8.0)
+                                    .align(Align::Center)
+                                    .child(Box::new(Flex::row().width(112.0).child(text(
+                                        keys,
+                                        text_color(),
+                                        10.0,
+                                    ))))
+                                    .child(text(action, muted(), 10.0)),
+                            ) as BoxedWidget
+                        })
+                        .collect(),
+                )) as BoxedWidget
+            })
+            .collect();
+        rows.push(section("Shortcuts", groups));
     }
     Box::new(
         Flex::column()

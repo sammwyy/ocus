@@ -408,6 +408,7 @@ fn program_layers(project: &Project, frame: u64) -> (bool, Vec<(ClipRef, Title)>
 struct ProgramCanvas {
     slot: GpuFrameSlot,
     picture: bool,
+    picture_unavailable: bool,
     titles: Vec<(ClipRef, Title)>,
     selected: Option<ClipRef>,
     state: UiState,
@@ -580,6 +581,25 @@ impl Widget for ProgramCanvas {
             }
         }
         painter.pop_clip();
+        if self.picture_unavailable {
+            let label = "Video preview unavailable";
+            let pill_width = (run_width(label, 11.0, "", false) + 20.0).min(width);
+            let pill = Rect {
+                x: bounds.x + (width - pill_width) / 2.0,
+                y: bounds.y + 8.0,
+                width: pill_width,
+                height: 22.0,
+            };
+            painter.fill_rect(pill, surface(), 11.0);
+            painter.stroke_rect(pill, border(), 1.0, 11.0);
+            painter.fill_text(
+                pill,
+                label,
+                text_color().mix(muted(), 0.3),
+                11.0,
+                TextAlign::Center,
+            );
+        }
         if let Some(box_rect) = self.title_box(rect) {
             painter.stroke_rect(box_rect, accent(), 1.5, 0.0);
             painter.fill_rect(
@@ -2116,6 +2136,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         Box::new(ProgramCanvas {
             slot: state.program.slot.clone(),
             picture: (picture || !titles.is_empty()) && gpu_preview,
+            picture_unavailable: picture && !gpu_preview,
             titles,
             selected: state.selected.get().last().copied(),
             state: state.clone(),
@@ -3740,6 +3761,35 @@ mod tests {
     }
 
     #[test]
+    fn program_keeps_the_unavailable_video_notice_under_a_title() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/tmp/footage.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(3_000_000),
+            has_audio: false,
+        })));
+        state.insert_media(1);
+        state.focus_frame(0);
+        state.select_clip(None);
+        let notices = |painter: &TestPainter| {
+            painter
+                .labels
+                .iter()
+                .filter(|label| *label == "Video preview unavailable")
+                .count()
+        };
+        let without_title = notices(&render(&state, 1280.0, 760.0));
+        assert!(without_title > 0);
+        assert!(state.add_title());
+        state.select_clip(None);
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(painter.labels.iter().any(|label| label == "Title 2"));
+        assert_eq!(notices(&painter), without_title);
+    }
+
+    #[test]
     fn a_title_can_play_without_a_video_device() {
         let state = UiState::new();
         assert!(state.add_title());
@@ -3781,6 +3831,7 @@ mod tests {
         ProgramCanvas {
             slot: GpuFrameSlot::new(),
             picture: false,
+            picture_unavailable: false,
             titles: vec![((0, 1), title)],
             selected: None,
             state: UiState::new(),
@@ -3809,6 +3860,7 @@ mod tests {
         let canvas = ProgramCanvas {
             slot: GpuFrameSlot::new(),
             picture: false,
+            picture_unavailable: false,
             titles: vec![((0, 1), title.clone())],
             selected: Some((0, 1)),
             state: state.clone(),

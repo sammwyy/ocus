@@ -25,7 +25,14 @@ impl Rotation {
                 // FFmpeg expects an aligned matrix of nine native-endian i32 values.
                 Some(unsafe { ffmpeg::ffi::av_display_rotation_get(matrix.as_ptr()) })
             })
-            .or_else(|| stream.metadata().get("rotate")?.parse::<f64>().ok())
+            .or_else(|| {
+                stream
+                    .metadata()
+                    .get("rotate")?
+                    .parse::<f64>()
+                    .ok()
+                    .map(|angle| -angle)
+            })
             .unwrap_or(0.0);
         Self(if angle.is_finite() {
             ((angle / 90.0).round() as i32).rem_euclid(4) as u32
@@ -273,6 +280,33 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn legacy_rotation_metadata_is_clockwise() {
+        ffmpeg::init().unwrap();
+        let path =
+            std::env::temp_dir().join(format!("ocus-rotation-tags-{}.mp4", std::process::id()));
+        let mut output = ffmpeg::format::output(&path).unwrap();
+        let mut stream = output
+            .add_stream(ffmpeg::encoder::find(ffmpeg::codec::Id::H264))
+            .unwrap();
+        assert_eq!(Rotation::from_stream(&stream).0, 0);
+        for (value, turns) in [
+            ("90", 3),
+            ("180", 2),
+            ("270", 1),
+            ("-90", 1),
+            ("invalid", 0),
+            ("NaN", 0),
+        ] {
+            let mut metadata = ffmpeg::Dictionary::new();
+            metadata.set("rotate", value);
+            stream.set_metadata(metadata);
+            assert_eq!(Rotation::from_stream(&stream).0, turns, "{value}");
+        }
+        drop(output);
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn probes_video_audio_and_still_images_from_contents() {

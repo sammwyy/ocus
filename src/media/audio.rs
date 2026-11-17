@@ -178,7 +178,7 @@ pub fn feed(
                 .read(&mut sound, (until - from) as usize, &cancelled)
             {
                 Ok(_) => {
-                    for (index, frame) in sound.chunks_exact(CHANNELS).enumerate() {
+                    for (index, frame) in sound.as_chunks::<CHANNELS>().0.iter().enumerate() {
                         let offset = (from - position) as usize * CHANNELS + index * CHANNELS;
                         mix[offset] += frame[0] * slot.volume;
                         mix[offset + 1] += frame[1] * slot.volume;

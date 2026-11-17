@@ -1,8 +1,8 @@
 pub mod presets;
 
-use crate::media::MediaKind;
 use crate::media::audio::{self, AudioPlan, AudioQueue, AudioSource};
 use crate::media::composite::{Compositor, VisualPlan};
+use crate::media::{MediaKind, fitted_dimensions};
 use crate::project::Project;
 use crate::project::export_settings::{AudioCodec, EncodingSpeed, ExportSettings, VideoCodec};
 use crate::timeline::{ClipContent, TrackKind};
@@ -451,17 +451,6 @@ fn render_to(
     })
 }
 
-fn fitted_dimensions(source_width: u32, source_height: u32, width: u32, height: u32) -> (u32, u32) {
-    if u64::from(width) * u64::from(source_height) <= u64::from(height) * u64::from(source_width) {
-        let fitted = (u64::from(width) * u64::from(source_height) / u64::from(source_width)) as u32;
-        (width, fitted.max(2) & !1)
-    } else {
-        let fitted =
-            (u64::from(height) * u64::from(source_width) / u64::from(source_height)) as u32;
-        (fitted.max(2) & !1, height)
-    }
-}
-
 pub fn output_frames(end: u64, source: (u32, u32), target: (u32, u32)) -> Result<u64, String> {
     let numerator = u128::from(end) * u128::from(source.1) * u128::from(target.0);
     let denominator = u128::from(source.0) * u128::from(target.1);
@@ -741,13 +730,13 @@ mod tests {
             decoder.send_packet(&packet).unwrap();
             let mut decoded = ffmpeg::frame::Video::empty();
             while decoder.receive_frame(&mut decoded).is_ok() {
-                shades.push(decoded.data(0)[0]);
+                shades.push(decoded.data(0)[decoded.stride(0) * 45 + 80]);
             }
         }
         decoder.send_eof().unwrap();
         let mut decoded = ffmpeg::frame::Video::empty();
         while decoder.receive_frame(&mut decoded).is_ok() {
-            shades.push(decoded.data(0)[0]);
+            shades.push(decoded.data(0)[decoded.stride(0) * 45 + 80]);
         }
         assert_eq!(shades.len(), 30);
         assert!(shades[0] < 120 && shades[29] > 140);
@@ -910,7 +899,7 @@ mod tests {
             decoder.send_packet(&packet).unwrap();
             let mut frame = ffmpeg::frame::Video::empty();
             while decoder.receive_frame(&mut frame).is_ok() {
-                shades.push(frame.data(0)[frame.stride(0) * 10 + 10]);
+                shades.push(frame.data(0)[frame.stride(0) * 10 + 80]);
                 if shades.len() == 1 {
                     title_pixels = frame.data(0).iter().filter(|&&value| value > 120).count();
                 }
@@ -919,7 +908,7 @@ mod tests {
         decoder.send_eof().unwrap();
         let mut frame = ffmpeg::frame::Video::empty();
         while decoder.receive_frame(&mut frame).is_ok() {
-            shades.push(frame.data(0)[frame.stride(0) * 10 + 10]);
+            shades.push(frame.data(0)[frame.stride(0) * 10 + 80]);
         }
         assert_eq!(shades.len(), 45);
         assert!(

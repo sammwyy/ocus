@@ -427,7 +427,8 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut compositor = Compositor::new(plan.clone(), 160, 90, (30, 1));
         let image = compositor.frame(0, &cancelled).unwrap().unwrap();
-        assert!(image.pixels[2] > 180 && image.pixels[0] < 60);
+        let picture = 80 * 4;
+        assert!(image.pixels[picture + 2] > 180 && image.pixels[picture] < 60);
         assert!(
             image
                 .pixels

@@ -71,7 +71,10 @@ and duplicate, S or Ctrl+K splits at the playhead, Ctrl+A selects all, Esc
 clears the selection or cancels a drag, Space or K plays and pauses, the
 arrows step a frame (Shift: one second, Alt: nudge the selection), Home/End
 jump, +/− zoom, T adds a title, and Ctrl+N/O/S/Shift+S/I/E run the file
-actions. Every edit is one undoable step. On the timeline, vertical scrolling
+actions. Hover or keyboard-focus an icon-only control to see what it does;
+its tooltip includes a shortcut when one is available for that action. Source
+transport controls do not show sequence-only shortcuts.
+Every edit is one undoable step. On the timeline, vertical scrolling
 only moves through the tracks (when they overflow) and horizontal scrolling
 only moves through time, so two-finger touchpad gestures follow their axis;
 with a plain mouse wheel, Shift+wheel scrolls time. Ctrl+wheel (or a touchpad

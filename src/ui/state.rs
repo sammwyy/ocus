@@ -15,7 +15,9 @@ use crate::project::{Command, Editor, Project, store};
 use crate::settings::{self, Settings, ThemeMode};
 use crate::timeline::{Clip, ClipContent, Title, TrackKind};
 use creamui::core::{Modifiers, Point, Rect, RgbaImage};
-use creamui::widgets::{ColorPickerController, ScrollController, TextController};
+use creamui::widgets::{
+    ColorPickerController, ScrollController, TextController, TooltipController,
+};
 use creamui::{AppHandle, GpuFrame, GpuFrameSlot, Signal, WindowHandle};
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use std::cell::{Cell, RefCell};
@@ -123,6 +125,8 @@ pub(crate) struct UiState {
     pub editor: Rc<RefCell<Editor>>,
     pub revision: Signal<u64>,
     pub ui_revision: Signal<u64>,
+    pub tooltips: Rc<RefCell<HashMap<(&'static str, u64), TooltipController>>>,
+    pub tooltip_viewport: Rc<Cell<creamui::Size>>,
     pub selected: Signal<Vec<ClipRef>>,
     pub selected_media: Signal<Option<u64>>,
     pub program: Monitor,
@@ -205,6 +209,8 @@ impl UiState {
             editor: Rc::new(RefCell::new(Editor::new(Project::new("Untitled")))),
             revision: Signal::new(0),
             ui_revision: Signal::new(0),
+            tooltips: Rc::new(RefCell::new(HashMap::new())),
+            tooltip_viewport: Rc::new(Cell::new(creamui::Size::default())),
             selected: Signal::new(Vec::new()),
             selected_media: Signal::new(None),
             program: Monitor::new(),

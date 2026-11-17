@@ -4,7 +4,7 @@ use crate::media::MediaKind;
 use creamui::core::layout::{Dimension, LengthPercentageAuto, Position, Style};
 use creamui::core::{CursorIcon, Painter, Point, Rect, RgbaImage, TextAlign, Widget};
 use creamui::widgets::layout::{Align, Justify, StyleExt};
-use creamui::widgets::{Icon, RawButton, RawText, Symbol};
+use creamui::widgets::{Icon, RawButton, RawText, Symbol, Tooltip, TooltipController};
 use creamui::{BoxedWidget, Color, StateStyle, Styled};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -583,15 +583,65 @@ fn pressable(
 /// A square, borderless button showing only a glyph.
 pub(super) fn icon_button(
     icon: Glyph,
+    help: Help,
     enabled: bool,
     state: &UiState,
     operation: impl Fn(&UiState) + 'static,
 ) -> BoxedWidget {
-    sized_icon_button(icon, 28.0, enabled, false, state, operation)
+    sized_icon_button(icon, help, 28.0, enabled, false, state, operation)
+}
+
+pub(super) struct Help {
+    label: &'static str,
+    shortcut: Option<&'static str>,
+    instance: u64,
+}
+
+impl Help {
+    pub fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            shortcut: None,
+            instance: 0,
+        }
+    }
+
+    pub fn shortcut(mut self, shortcut: &'static str) -> Self {
+        self.shortcut = Some(shortcut);
+        self
+    }
+
+    pub fn instance(mut self, instance: u64) -> Self {
+        self.instance = instance;
+        self
+    }
+}
+
+fn with_help(widget: BoxedWidget, help: Help, state: &UiState) -> BoxedWidget {
+    let controller = state
+        .tooltips
+        .borrow_mut()
+        .entry((help.label, help.instance))
+        .or_insert_with(TooltipController::default)
+        .clone();
+    controller.set_viewport(state.tooltip_viewport.get());
+    let layout = widget.style().layout;
+    let mut style = Style::default().flex_row();
+    style.size = layout.size;
+    style.min_size = layout.min_size;
+    style.flex_grow = layout.flex_grow;
+    style.flex_shrink = layout.flex_shrink;
+    style.flex_basis = layout.flex_basis;
+    let mut tooltip = Tooltip::new(&controller, widget, help.label).with_style(style);
+    if let Some(shortcut) = help.shortcut {
+        tooltip = tooltip.shortcut(shortcut);
+    }
+    Box::new(tooltip)
 }
 
 pub(super) fn sized_icon_button(
     icon: Glyph,
+    help: Help,
     size: f32,
     enabled: bool,
     active: bool,
@@ -605,7 +655,7 @@ pub(super) fn sized_icon_button(
     } else {
         text_color().mix(muted(), 0.35)
     };
-    pressable(
+    let button = pressable(
         Look {
             background: if active { surface() } else { CLEAR },
             hover: surface_hover(),
@@ -618,17 +668,19 @@ pub(super) fn sized_icon_button(
         vec![glyph(icon, color, (size * 0.6).round())],
         state,
         operation,
-    )
+    );
+    with_help(button, help, state)
 }
 
 /// The round accent play/pause control of a monitor transport.
 pub(super) fn play_button(
     playing: bool,
+    help: Help,
     enabled: bool,
     state: &UiState,
     operation: impl Fn(&UiState) + 'static,
 ) -> BoxedWidget {
-    pressable(
+    let button = pressable(
         Look {
             background: if enabled { accent() } else { surface() },
             hover: accent().mix(text_color(), 0.25),
@@ -645,7 +697,8 @@ pub(super) fn play_button(
         )],
         state,
         operation,
-    )
+    );
+    with_help(button, help, state)
 }
 
 /// A compact, borderless glyph-and-label control for toolbars.
@@ -1148,12 +1201,13 @@ impl Widget for ZoomSlider {
 pub(super) fn segment(
     icon: Option<Glyph>,
     label: Option<&str>,
+    help: Help,
     count: usize,
     active: bool,
     state: &UiState,
     operation: impl Fn(&UiState) + 'static,
 ) -> BoxedWidget {
-    let state = state.clone();
+    let button_state = state.clone();
     let color = if active { text_color() } else { muted() };
     let mut style = Style::default()
         .flex_row()
@@ -1182,8 +1236,8 @@ pub(super) fn segment(
                 10.0,
             )),
     ));
-    Box::new(
-        RawButton::new(style, move || operation(&state))
+    let button = Box::new(
+        RawButton::new(style, move || operation(&button_state))
             .with_children(children)
             .background(if active { surface_hover() } else { CLEAR })
             .border(if active { border() } else { CLEAR }, 1.0)
@@ -1194,7 +1248,8 @@ pub(super) fn segment(
                 surface()
             }))
             .focus_style(StateStyle::new().outline(accent(), 2.0)),
-    )
+    );
+    with_help(button, help, state)
 }
 
 /// A full-width, borderless row that highlights on hover and runs

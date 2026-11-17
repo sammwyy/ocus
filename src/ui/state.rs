@@ -963,7 +963,7 @@ impl UiState {
                     decode_sequence(&plan, start, playing, cancelled, clock, |event| {
                         if matches!(event, PreviewEvent::Frame(..))
                             && worker_pending
-                                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                                .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                                     (count < 2).then_some(count + 1)
                                 })
                                 .is_err()

@@ -1476,6 +1476,8 @@ impl Widget for TimelineView {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn edge_hit_keeps_narrow_clip_body_movable() {
         assert_eq!(super::trim_hit(101.0, 100.0, 200.0), Some(true));
@@ -1486,8 +1488,6 @@ mod tests {
         assert_eq!(super::trim_hit(103.5, 100.0, 104.0), Some(false));
         assert_eq!(super::trim_hit(99.0, 100.0, 104.0), None);
     }
-    use super::*;
-
     #[test]
     fn ruler_ticks_stay_readable_at_every_zoom() {
         assert_eq!(tick_spacing(300.0), (1.0, 5));

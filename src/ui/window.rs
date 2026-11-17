@@ -1952,6 +1952,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
 
 fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<Lane> {
     let labels = track_labels(project);
+    let draft = state.trim_draft.get();
     project
         .tracks()
         .iter()
@@ -1970,6 +1971,22 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                 .clips
                 .iter()
                 .map(|clip| {
+                    let preview = match &draft {
+                        Some(Command::Trim {
+                            track_id,
+                            clip_id,
+                            start_frame,
+                            source_start_frame,
+                            duration_frames,
+                        }) if *track_id == track.id && *clip_id == clip.id => Some(Clip {
+                            start_frame: *start_frame,
+                            source_start_frame: *source_start_frame,
+                            duration_frames: *duration_frames,
+                            ..clip.clone()
+                        }),
+                        _ => None,
+                    };
+                    let clip = preview.as_ref().unwrap_or(clip);
                     let media = match clip.content {
                         ClipContent::Media { media_id } => {
                             project.media().iter().find(|media| media.id == media_id)
@@ -4383,6 +4400,17 @@ mod tests {
         drag_to(&timeline, at(30.0), 50.0);
         assert_eq!(selected_clip(&state).unwrap().1, original);
         assert!(state.trim_draft.peek().is_some());
+        let preview = view(&state);
+        assert_eq!(preview.lanes[0].clips[0].start, 30);
+        assert_eq!(
+            preview.lanes[0].clips[0].duration,
+            original.duration_frames - 30
+        );
+        let mut painter = TestPainter::default();
+        preview.paint(&mut painter, TIMELINE);
+        assert!(painter.labels.iter().any(
+            |label| label == &format!("{:.1}s", (original.duration_frames - 30) as f64 / 30.0)
+        ));
         release(&timeline);
         let trimmed = selected_clip(&state).unwrap().1;
         assert_eq!(trimmed.start_frame, 30);

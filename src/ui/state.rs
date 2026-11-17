@@ -511,15 +511,27 @@ impl UiState {
             );
         }
         self.revision.update(|revision| *revision += 1);
-        self.dirty.set(true);
+        let dirty = self.editor.borrow().is_dirty();
+        self.dirty.set(dirty);
         self.refresh_missing_media();
-        self.status.set(status.into());
+        let checkpoint = if dirty {
+            "Unsaved changes"
+        } else if self.project_path.peek().is_some() {
+            "Project saved"
+        } else {
+            "No changes · Project not saved"
+        };
+        self.status.set(if status.is_empty() {
+            checkpoint.into()
+        } else {
+            format!("{status} · {checkpoint}")
+        });
     }
 
     pub fn edit(&self, command: Command) -> bool {
         let changed = self.editor.borrow_mut().apply(command);
         if changed {
-            self.refresh_after_edit("Unsaved changes");
+            self.refresh_after_edit("");
         } else {
             self.status
                 .set("Edit rejected: check range, track and clip".into());
@@ -555,14 +567,14 @@ impl UiState {
 
     pub fn undo(&self) {
         if self.editor.borrow_mut().undo() {
-            self.refresh_after_edit("Undid edit · Unsaved changes");
+            self.refresh_after_edit("Undid edit");
             self.sync_title_controllers();
         }
     }
 
     pub fn redo(&self) {
         if self.editor.borrow_mut().redo() {
-            self.refresh_after_edit("Redid edit · Unsaved changes");
+            self.refresh_after_edit("Redid edit");
             self.sync_title_controllers();
         }
     }
@@ -1592,7 +1604,7 @@ impl UiState {
             return;
         }
         let project = self.editor.borrow().project().clone();
-        let revision = self.revision.peek();
+        let revision = self.editor.borrow().revision();
         self.busy.set(true);
         self.status.set("Saving project…".into());
         let state = self.clone();
@@ -1614,17 +1626,22 @@ impl UiState {
         result: std::io::Result<()>,
     ) {
         self.busy.set(false);
-        let saved_current = result.is_ok() && self.revision.peek() == revision;
+        let saved_current = result.is_ok() && self.editor.borrow().revision() == revision;
         self.status.set(match result {
-            Ok(()) if saved_current => {
+            Ok(()) => {
+                self.editor.borrow_mut().mark_saved(revision);
                 self.project_path.set(Some(path));
-                self.dirty.set(false);
-                exported.map_or_else(
-                    || "Project saved".into(),
-                    |path| format!("Exported: {} · project saved", path.display()),
-                )
+                let dirty = self.editor.borrow().is_dirty();
+                self.dirty.set(dirty);
+                if dirty {
+                    "Saved previous version · Unsaved changes".into()
+                } else {
+                    exported.map_or_else(
+                        || "Project saved".into(),
+                        |path| format!("Exported: {} · project saved", path.display()),
+                    )
+                }
             }
-            Ok(()) => "Saved previous version · Unsaved changes".into(),
             Err(error) => exported.map_or_else(
                 || format!("Save failed: {error}"),
                 |path| {
@@ -2735,6 +2752,113 @@ mod tests {
     }
 
     #[test]
+    fn undoing_all_edits_clears_dirty_state_and_discard_warning() {
+        let state = UiState::new();
+        assert!(!state.dirty.peek());
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 4,
+            path: "scene.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: true,
+        })));
+        state.insert_media(4);
+        state.add_title();
+        assert!(state.dirty.peek());
+
+        state.undo();
+        state.undo();
+        state.undo();
+
+        let editor = state.editor.borrow();
+        assert!(editor.project().media().is_empty());
+        assert!(
+            editor
+                .project()
+                .tracks()
+                .iter()
+                .all(|track| track.clips.is_empty())
+        );
+        assert!(!state.dirty.peek());
+        assert!(!state.status.peek().contains("Unsaved changes"));
+        assert!(state.settle_unsaved_changes(|_| {}));
+        drop(editor);
+
+        state.redo();
+        assert!(state.dirty.peek());
+        assert!(state.status.peek().contains("Unsaved changes"));
+        state.undo();
+        assert!(!state.dirty.peek());
+    }
+
+    #[test]
+    fn saving_an_older_snapshot_marks_only_that_history_revision_clean() {
+        let state = UiState::new();
+        assert!(state.edit(Command::RenameProject("Saved".into())));
+        let saved = state.editor.borrow().revision();
+        assert!(state.edit(Command::RenameProject("Later".into())));
+        let path = PathBuf::from("cut.ocus");
+        state.finish_save(path.clone(), saved, None, None, Ok(()));
+        assert_eq!(state.project_path.peek(), Some(path));
+        assert!(state.dirty.peek());
+
+        state.undo();
+        assert!(!state.dirty.peek());
+        assert_eq!(state.status.peek(), "Undid edit · Project saved");
+        assert!(state.settle_unsaved_changes(|_| {}));
+        state.undo();
+        assert!(state.dirty.peek());
+        state.redo();
+        assert!(!state.dirty.peek());
+        assert_eq!(state.status.peek(), "Redid edit · Project saved");
+        state.redo();
+        assert!(state.dirty.peek());
+    }
+
+    #[test]
+    fn returning_to_an_in_flight_save_clears_dirty_state_on_completion() {
+        let state = UiState::new();
+        let runs = Rc::new(Cell::new(0));
+        assert!(state.edit(Command::RenameProject("Saved".into())));
+        let saved = state.editor.borrow().revision();
+        state.undo();
+        state.redo();
+        state.finish_save(
+            "cut.ocus".into(),
+            saved,
+            None,
+            Some(Box::new(counting(&runs))),
+            Ok(()),
+        );
+        assert_eq!(runs.get(), 1);
+        assert!(!state.dirty.peek());
+        assert_eq!(state.status.peek(), "Project saved");
+    }
+
+    #[test]
+    fn failed_save_preserves_the_previous_path_and_clean_checkpoint() {
+        let state = UiState::new();
+        let saved = state.editor.borrow().revision();
+        state.finish_save("original.ocus".into(), saved, None, None, Ok(()));
+        assert!(state.edit(Command::RenameProject("Unsaved".into())));
+        let failed = state.editor.borrow().revision();
+        state.finish_save(
+            "failed.ocus".into(),
+            failed,
+            None,
+            None,
+            Err(std::io::Error::other("disk full")),
+        );
+        assert_eq!(state.project_path.peek(), Some("original.ocus".into()));
+        assert_eq!(state.status.peek(), "Save failed: disk full");
+        assert!(state.dirty.peek());
+        state.undo();
+        assert!(!state.dirty.peek());
+        state.redo();
+        assert!(state.dirty.peek());
+    }
+
+    #[test]
     fn relink_marks_changes_for_the_unsaved_prompt_and_undo_restores_source() {
         let state = UiState::new();
         let original = Media {
@@ -2745,7 +2869,9 @@ mod tests {
             has_audio: false,
         };
         assert!(state.edit(Command::ImportMedia(original.clone())));
-        state.dirty.set(false);
+        let revision = state.editor.borrow().revision();
+        state.finish_save("cut.ocus".into(), revision, None, None, Ok(()));
+        assert!(!state.dirty.peek());
         assert!(state.edit(Command::RelinkMedia(Media {
             path: "new.mp4".into(),
             ..original.clone()
@@ -2755,6 +2881,9 @@ mod tests {
         assert!(state.apply_unsaved_choice(UnsavedChoice::Discard, |_| panic!("discarded")));
         state.undo();
         assert_eq!(state.editor.borrow().project().media(), &[original]);
+        assert!(!state.dirty.peek());
+        state.redo();
+        assert!(state.dirty.peek());
     }
 
     #[test]
@@ -3003,7 +3132,7 @@ mod tests {
     fn dirty_state() -> (UiState, Rc<Cell<u32>>) {
         let state = UiState::new();
         state.project_path.set(Some("cut.ocus".into()));
-        state.dirty.set(true);
+        assert!(state.edit(Command::RenameProject("Unsaved".into())));
         (state, Rc::new(Cell::new(0)))
     }
 
@@ -3053,10 +3182,10 @@ mod tests {
         assert!(state.dirty.peek());
         assert_eq!(state.status.peek(), "Save failed: disk full");
 
-        state.revision.set(1);
+        assert!(state.edit(Command::RenameProject("Later edit".into())));
         state.finish_save(
             path.clone(),
-            0,
+            1,
             None,
             Some(Box::new(counting(&runs))),
             Ok(()),
@@ -3064,7 +3193,7 @@ mod tests {
         assert_eq!(runs.get(), 0);
         assert!(state.dirty.peek());
 
-        state.finish_save(path, 1, None, Some(Box::new(counting(&runs))), Ok(()));
+        state.finish_save(path, 2, None, Some(Box::new(counting(&runs))), Ok(()));
         assert_eq!(runs.get(), 1);
         assert!(!state.dirty.peek());
         assert_eq!(state.status.peek(), "Project saved");
@@ -3074,9 +3203,10 @@ mod tests {
     fn saving_before_new_project_resumes_new_project() {
         let (state, _) = dirty_state();
         state.focus_frame(600);
+        let revision = state.editor.borrow().revision();
         state.finish_save(
             "cut.ocus".into(),
-            state.revision.peek(),
+            revision,
             None,
             Some(Box::new(UiState::new_project)),
             Ok(()),

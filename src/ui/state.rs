@@ -1831,11 +1831,15 @@ impl UiState {
         self.busy.set(true);
         self.status.set(format!("Probing {} files…", paths.len()));
         let state = self.clone();
+        let dialog_app = app.clone();
         app.spawn_background(
             move || {
                 paths
                     .into_iter()
-                    .map(|path| inspect_source(&path))
+                    .map(|path| {
+                        let result = inspect_source(&path);
+                        (path, result)
+                    })
                     .collect::<Vec<_>>()
             },
             move |results| {
@@ -1844,7 +1848,7 @@ impl UiState {
                 let mut imported = 0;
                 let mut ready = Vec::new();
                 let mut errors = Vec::new();
-                for result in results {
+                for (source_path, result) in results {
                     match result {
                         Ok((path, info, thumb)) => {
                             let existing = state
@@ -1885,7 +1889,10 @@ impl UiState {
                                     imported += 1;
                                     ready.push(id);
                                 } else {
-                                    errors.push("Source rejected by project validation".into());
+                                    errors.push((
+                                        source_path,
+                                        "Source rejected by project validation".into(),
+                                    ));
                                 }
                                 if let Some(thumb) = thumb
                                     && state
@@ -1908,21 +1915,12 @@ impl UiState {
                                     }
                                 }
                             } else {
-                                errors.push("Media ID limit reached".to_string());
+                                errors.push((source_path, "Media ID limit reached".into()));
                             }
                         }
-                        Err(error) => errors.push(error),
+                        Err(error) => errors.push((source_path, error)),
                     }
                 }
-                state.status.set(if errors.is_empty() {
-                    format!("{imported} of {total} files imported")
-                } else {
-                    format!(
-                        "{imported} of {total} imported · {} failed: {}",
-                        errors.len(),
-                        errors[0]
-                    )
-                });
                 if let Some((track_id, mut frame)) = placement {
                     for id in ready {
                         let track =
@@ -1935,6 +1933,26 @@ impl UiState {
                             None => break,
                         }
                     }
+                }
+                let summary = import_summary(imported, total, &errors);
+                if errors.is_empty() {
+                    state.status.set(summary);
+                } else {
+                    state.status.set(format!(
+                        "{imported} of {total} files imported · {} failed",
+                        errors.len()
+                    ));
+                    dialog_app.spawn_background(
+                        move || {
+                            MessageDialog::new()
+                                .set_level(MessageLevel::Warning)
+                                .set_title("Import incomplete")
+                                .set_description(&summary)
+                                .set_buttons(MessageButtons::Ok)
+                                .show()
+                        },
+                        |_| {},
+                    );
                 }
             },
         );
@@ -2137,9 +2155,69 @@ fn inspect_source(path: &Path) -> Result<(PathBuf, MediaProbe, Option<Thumbnail>
     Ok((path, info, thumb))
 }
 
+fn import_summary(imported: usize, total: usize, errors: &[(PathBuf, String)]) -> String {
+    if errors.is_empty() {
+        format!("{imported} of {total} files imported")
+    } else {
+        let mut summary = format!("{} of {total} files couldn't be imported:", errors.len());
+        for (path, error) in errors.iter().take(8) {
+            let name = path
+                .file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy();
+            summary.push_str(&format!("\n{name} — {error}"));
+        }
+        if errors.len() > 8 {
+            summary.push_str(&format!("\nand {} more", errors.len() - 8));
+        }
+        summary
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_summary_names_each_failed_file() {
+        let errors = vec![
+            (PathBuf::from("/media/notes.txt"), "No media streams".into()),
+            (
+                PathBuf::from("/media/broken.mp4"),
+                "Cannot probe source".into(),
+            ),
+        ];
+        assert_eq!(
+            import_summary(1, 3, &errors),
+            "2 of 3 files couldn't be imported:\nnotes.txt — No media streams\nbroken.mp4 — Cannot probe source"
+        );
+        assert_eq!(
+            import_summary(0, 1, &errors[..1]),
+            "1 of 1 files couldn't be imported:\nnotes.txt — No media streams"
+        );
+    }
+
+    #[test]
+    fn import_summary_handles_success_and_empty_batches() {
+        assert_eq!(import_summary(3, 3, &[]), "3 of 3 files imported");
+        assert_eq!(import_summary(0, 0, &[]), "0 of 0 files imported");
+    }
+
+    #[test]
+    fn import_summary_bounds_long_failure_lists() {
+        let errors: Vec<_> = (0..12)
+            .map(|index| {
+                (
+                    PathBuf::from(format!("clip-{index}.mp4")),
+                    "Invalid data".into(),
+                )
+            })
+            .collect();
+        let summary = import_summary(1, 13, &errors);
+        assert!(summary.contains("clip-7.mp4 — Invalid data"));
+        assert!(!summary.contains("clip-8.mp4"));
+        assert!(summary.ends_with("and 4 more"));
+    }
 
     #[test]
     fn quick_exports_get_new_numbered_names_without_file_access() {

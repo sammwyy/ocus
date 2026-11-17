@@ -1446,11 +1446,16 @@ impl UiState {
         }
     }
 
+    fn replace_project(&self, project: Project) {
+        *self.editor.borrow_mut() = Editor::new(project);
+        self.clipboard.borrow_mut().clear();
+    }
+
     pub fn new_project(&self) {
         if self.busy.peek() || !self.settle_unsaved_changes(Self::new_project) {
             return;
         }
-        *self.editor.borrow_mut() = Editor::new(Project::new("Untitled"));
+        self.replace_project(Project::new("Untitled"));
         self.missing_media.set(HashSet::new());
         self.export_modal.set(false);
         self.project_path.set(None);
@@ -1521,7 +1526,7 @@ impl UiState {
                             .map(|media| media.path.clone())
                             .take(MAX_THUMBNAILS)
                             .collect();
-                        *state.editor.borrow_mut() = Editor::new(project);
+                        state.replace_project(project);
                         state.export_modal.set(false);
                         state.thumbnails.borrow_mut().clear();
                         state.cancel_storyboards();
@@ -3378,6 +3383,47 @@ mod tests {
         assert_eq!(state.project_path.peek(), None);
         assert_eq!(state.timeline_start.peek(), 0);
         assert_eq!(state.status.peek(), "New project · Not saved");
+    }
+
+    #[test]
+    fn new_project_does_not_paste_clips_from_the_previous_project() {
+        use super::super::interaction::Action;
+
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "project-a.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(1_000_000),
+            has_audio: false,
+        })));
+        state.insert_media(1);
+        state.run(Action::Copy);
+        assert_eq!(state.clipboard.borrow().len(), 1);
+        state.seek(60);
+        state.run(Action::Paste);
+        assert_eq!(state.editor.borrow().project().tracks()[0].clips.len(), 2);
+
+        state.dirty.set(false);
+        state.new_project();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "project-b.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(1_000_000),
+            has_audio: false,
+        })));
+        state.run(Action::Paste);
+        assert!(
+            state
+                .editor
+                .borrow()
+                .project()
+                .tracks()
+                .iter()
+                .all(|track| track.clips.is_empty())
+        );
+        assert!(state.clipboard.borrow().is_empty());
     }
 
     #[test]

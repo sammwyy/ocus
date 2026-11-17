@@ -97,6 +97,11 @@ pub struct Compositor {
     glyphs: Glyphs,
 }
 
+enum Layer<'a> {
+    Media(FrameImage),
+    Title(&'a Title),
+}
+
 impl Compositor {
     pub fn new(plan: VisualPlan, width: u32, height: u32, fps: (u32, u32)) -> Self {
         Self {
@@ -119,8 +124,9 @@ impl Compositor {
         }
         let mut active = Vec::new();
         let mut visible = false;
-        for track in &self.plan.tracks {
-            for clip in track {
+        let mut pending = Vec::new();
+        'layers: for track in self.plan.tracks.iter().rev() {
+            for clip in track.iter().rev() {
                 match clip {
                     VisualClip::Media(source)
                         if source.start <= position
@@ -129,13 +135,18 @@ impl Compositor {
                         visible = true;
                         active.push(source.clip_id);
                         let image = self.layers.layer_at(source, position, cancelled)?;
-                        for (dest, src) in pixels
-                            .as_chunks_mut::<4>()
-                            .0
-                            .iter_mut()
-                            .zip(image.pixels.as_chunks::<4>().0)
-                        {
-                            blend(dest, src);
+                        let opaque = image.width == self.width
+                            && image.height == self.height
+                            && image.pixels.len() == pixels.len()
+                            && image
+                                .pixels
+                                .as_chunks::<4>()
+                                .0
+                                .iter()
+                                .all(|pixel| pixel[3] == 255);
+                        pending.push(Layer::Media(image));
+                        if opaque {
+                            break 'layers;
                         }
                     }
                     VisualClip::Title {
@@ -145,16 +156,33 @@ impl Compositor {
                         title,
                     } if *start <= position && position - *start < *duration => {
                         visible = true;
-                        self.glyphs.draw(
-                            title,
-                            self.width,
-                            self.height,
-                            self.plan.resolution.0,
-                            self.width as usize * 4,
-                            &mut pixels,
-                        );
+                        pending.push(Layer::Title(title));
                     }
                     _ => {}
+                }
+            }
+        }
+        for layer in pending.into_iter().rev() {
+            match layer {
+                Layer::Media(image) => {
+                    for (dest, src) in pixels
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
+                        .zip(image.pixels.as_chunks::<4>().0)
+                    {
+                        blend(dest, src);
+                    }
+                }
+                Layer::Title(title) => {
+                    self.glyphs.draw(
+                        title,
+                        self.width,
+                        self.height,
+                        self.plan.resolution.0,
+                        self.width as usize * 4,
+                        &mut pixels,
+                    );
                 }
             }
         }
@@ -353,6 +381,155 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    fn full_blend(plan: &VisualPlan, position: u64) -> Vec<u8> {
+        let (width, height) = plan.resolution;
+        let mut pixels = [0, 0, 0, 255].repeat(width as usize * height as usize);
+        let mut layers = VideoLayers::new((30, 1), (width, height));
+        let mut glyphs = Glyphs::default();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        for clip in plan.tracks.iter().flatten() {
+            match clip {
+                VisualClip::Media(source)
+                    if source.start <= position && position - source.start < source.duration =>
+                {
+                    let image = layers.layer_at(source, position, &cancelled).unwrap();
+                    for (dest, src) in pixels
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
+                        .zip(image.pixels.as_chunks::<4>().0)
+                    {
+                        blend(dest, src);
+                    }
+                }
+                VisualClip::Title {
+                    start,
+                    duration,
+                    title,
+                    ..
+                } if *start <= position && position - *start < *duration => {
+                    glyphs.draw(title, width, height, width, width as usize * 4, &mut pixels);
+                }
+                _ => {}
+            }
+        }
+        pixels
+    }
+
+    #[test]
+    fn covered_layers_match_full_blend_without_decoding_hidden_media() {
+        let dir = std::env::temp_dir().join(format!(
+            "ocus-coverage-{}-{}",
+            std::process::id(),
+            NEXT_TEST.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        let fixture = |name: &str, width: u16, height: u16, alpha| {
+            let path = dir.join(name);
+            let mut tga = vec![0; 18];
+            tga[2] = 2;
+            tga[12..14].copy_from_slice(&width.to_le_bytes());
+            tga[14..16].copy_from_slice(&height.to_le_bytes());
+            tga[16] = 32;
+            tga[17] = 40;
+            tga.extend(
+                [210 - alpha / 2, 70, alpha / 2, alpha].repeat(width as usize * height as usize),
+            );
+            fs::write(&path, tga).unwrap();
+            path
+        };
+        let opaque = fixture("opaque.tga", 16, 9, 255);
+        let fitted = fixture("fitted.tga", 8, 9, 255);
+        let alpha = fixture("alpha.tga", 16, 9, 128);
+        let transparent = fixture("transparent.tga", 16, 9, 0);
+        let source = |id, path| {
+            VisualClip::Media(FrameSource {
+                clip_id: id,
+                path,
+                kind: MediaKind::Image,
+                start: 0,
+                source_start: 0,
+                duration: 3,
+            })
+        };
+        let title = VisualClip::Title {
+            clip_id: 20,
+            start: 0,
+            duration: 3,
+            title: Title {
+                text: "X".into(),
+                font_size: 20.0,
+                ..Title::default()
+            },
+        };
+        let stacked: Vec<_> = (0..10).map(|id| vec![source(id, opaque.clone())]).collect();
+        let mut titled = stacked.clone();
+        titled.push(vec![title.clone()]);
+        let scenarios = [
+            (stacked, 1),
+            (titled, 1),
+            (
+                vec![vec![source(0, opaque.clone())], vec![source(1, fitted)]],
+                2,
+            ),
+            (
+                vec![vec![source(0, opaque.clone())], vec![source(1, alpha)]],
+                2,
+            ),
+            (
+                vec![
+                    vec![source(0, opaque.clone())],
+                    vec![source(1, transparent)],
+                ],
+                2,
+            ),
+            (vec![vec![source(0, opaque.clone())], vec![title]], 1),
+        ];
+        let cancelled = Arc::new(AtomicBool::new(false));
+        for (tracks, decoded) in scenarios {
+            let mut plan = VisualPlan {
+                tracks,
+                resolution: (160, 90),
+            };
+            let expected = full_blend(&plan, 0);
+            let media_count = plan
+                .tracks
+                .iter()
+                .flatten()
+                .filter(|clip| matches!(clip, VisualClip::Media(_)))
+                .count();
+            for clip in plan
+                .tracks
+                .iter_mut()
+                .flatten()
+                .filter(|clip| matches!(clip, VisualClip::Media(_)))
+                .take(media_count - decoded)
+            {
+                if let VisualClip::Media(source) = clip {
+                    source.path = dir.join("must-not-be-decoded.tga");
+                }
+            }
+            let mut compositor = Compositor::new(plan, 160, 90, (30, 1));
+            assert_eq!(
+                compositor.frame(0, &cancelled).unwrap().unwrap().pixels,
+                expected
+            );
+            assert!(compositor.frame(3, &cancelled).unwrap().is_none());
+        }
+        let plan = VisualPlan {
+            tracks: vec![
+                vec![source(0, dir.join("missing.tga"))],
+                vec![source(1, opaque)],
+            ],
+            resolution: (160, 90),
+        };
+        let mut compositor = Compositor::new(plan, 160, 90, (30, 1));
+        assert!(compositor.frame(0, &cancelled).unwrap().is_some());
+        compositor.plan.tracks.pop();
+        assert!(compositor.frame(0, &cancelled).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn translucent_video_pixel_blends_over_lower_layer() {

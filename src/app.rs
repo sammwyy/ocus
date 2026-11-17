@@ -1,6 +1,6 @@
 use crate::settings::ThemeMode;
 use crate::ui::{UiState, build};
-use creamui::{AppBuilder, Theme, WindowOptions};
+use creamui::{AppBuilder, RenderBackend, Theme, WindowOptions};
 
 pub fn run_app() {
     let state = UiState::new();
@@ -20,6 +20,7 @@ pub fn run_app() {
                     width: 1280,
                     height: 760,
                     decorations: true,
+                    backend: RenderBackend::Gpu,
                     theme: if settings.theme == ThemeMode::System {
                         Theme::dark()
                     } else {

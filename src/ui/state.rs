@@ -680,41 +680,14 @@ impl UiState {
     }
 
     pub fn play(&self) {
-        let project = self.editor.borrow();
-        let mut has_picture = false;
-        let mut playable = false;
-        for track in project.project().tracks() {
-            for clip in &track.clips {
-                if track.kind == TrackKind::Video && matches!(clip.content, ClipContent::Title(_)) {
-                    playable = true;
-                }
-                let ClipContent::Media { media_id } = clip.content else {
-                    continue;
-                };
-                let Some(media) = project
-                    .project()
-                    .media()
-                    .iter()
-                    .find(|media| media.id == media_id)
-                else {
-                    continue;
-                };
-                if track.kind == TrackKind::Video && media.kind != MediaKind::Audio {
-                    has_picture = true;
-                    playable = true;
-                } else if audible(track.kind, clip, media) {
-                    playable = true;
-                }
-            }
-        }
-        drop(project);
-        if has_picture && !self.preview_available.peek() {
+        let content = SequenceContent::of(self.editor.borrow().project());
+        if content.has_picture && !self.preview_available.peek() {
             self.status
                 .set("Video preview is not available on this display".into());
             return;
         }
         let end = self.sequence_end();
-        if !playable || end == 0 {
+        if !content.playable || end == 0 {
             self.status
                 .set("Add a clip to the timeline to play the sequence".into());
             return;
@@ -2439,11 +2412,50 @@ impl UiState {
 
 /// Whether a clip contributes sound to preview playback.
 pub(crate) fn audible(kind: TrackKind, clip: &Clip, media: &Media) -> bool {
-    !clip.muted
-        && match kind {
-            TrackKind::Video => clip.linked_audio && media.has_audio,
-            TrackKind::Audio => media.kind == MediaKind::Audio || media.has_audio,
+    !clip.muted && carries_sound(kind, clip, media)
+}
+
+/// Whether the clip plays sound on its track when unmuted.
+fn carries_sound(kind: TrackKind, clip: &Clip, media: &Media) -> bool {
+    match kind {
+        TrackKind::Video => clip.linked_audio && media.has_audio,
+        TrackKind::Audio => media.kind == MediaKind::Audio || media.has_audio,
+    }
+}
+
+/// What the timeline gives program playback: whether anything can play
+/// (muted sound still plays, silently) and whether any of it is picture.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SequenceContent {
+    pub playable: bool,
+    pub has_picture: bool,
+}
+
+impl SequenceContent {
+    pub(crate) fn of(project: &Project) -> Self {
+        let mut content = Self::default();
+        for track in project.tracks() {
+            for clip in &track.clips {
+                let media_id = match clip.content {
+                    ClipContent::Title(_) => {
+                        content.playable |= track.kind == TrackKind::Video;
+                        continue;
+                    }
+                    ClipContent::Media { media_id } => media_id,
+                };
+                let Some(media) = project.media().iter().find(|media| media.id == media_id) else {
+                    continue;
+                };
+                if track.kind == TrackKind::Video && media.kind != MediaKind::Audio {
+                    content.has_picture = true;
+                    content.playable = true;
+                } else if carries_sound(track.kind, clip, media) {
+                    content.playable = true;
+                }
+            }
         }
+        content
+    }
 }
 
 /// Timeline frames a source occupies when inserted; stills default to 3 s.
@@ -3302,5 +3314,32 @@ mod tests {
         assert_eq!(state.timeline_start.peek(), 0);
         state.scroll_timeline_frames(-50);
         assert_eq!(state.timeline_start.peek(), 0);
+    }
+
+    #[test]
+    fn muted_only_audio_sequence_still_plays() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "voice.wav".into(),
+            kind: MediaKind::Audio,
+            duration_us: Some(2_000_000),
+            has_audio: true,
+        })));
+        assert!(state.edit(Command::InsertClip {
+            track_id: 2,
+            clip: Clip {
+                id: 0,
+                start_frame: 0,
+                source_start_frame: 0,
+                duration_frames: 60,
+                content: ClipContent::Media { media_id: 1 },
+                volume: 1.0,
+                muted: true,
+                linked_audio: false,
+            }
+        }));
+        state.play();
+        assert!(state.program.playing.peek());
     }
 }

@@ -8,7 +8,7 @@ use super::controls::{
 use super::edits::ClipRef;
 use super::interaction::{Action, DragPayload, MenuState};
 use super::state::{
-    ExportPage, MediaView, SettingsPage, SourceRange, TitleGesture, ZOOM_SECONDS, audible,
+    ExportPage, MediaView, SequenceContent, SettingsPage, SourceRange, TitleGesture, ZOOM_SECONDS,
     media_frames,
 };
 use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
@@ -2372,27 +2372,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             None,
         )
     };
-    let mut has_picture = false;
-    let mut playable = false;
-    for track in project.tracks() {
-        for clip in &track.clips {
-            if track.kind == TrackKind::Video && matches!(clip.content, ClipContent::Title(_)) {
-                playable = true;
-            }
-            let ClipContent::Media { media_id } = clip.content else {
-                continue;
-            };
-            let Some(media) = project.media().iter().find(|media| media.id == media_id) else {
-                continue;
-            };
-            if track.kind == TrackKind::Video && media.kind != MediaKind::Audio {
-                has_picture = true;
-                playable = true;
-            } else if audible(track.kind, clip, media) {
-                playable = true;
-            }
-        }
-    }
+    let content = SequenceContent::of(project);
     let program_playing = state.program.playing.get();
     let program = monitor(
         "Program",
@@ -2411,7 +2391,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 end: timeline_end,
                 fps,
                 playing: program_playing,
-                can_play: playable && (gpu_preview || !has_picture),
+                can_play: content.playable && (gpu_preview || !content.has_picture),
                 color: accent(),
                 compact: narrow,
             },

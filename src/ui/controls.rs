@@ -618,12 +618,7 @@ impl Help {
 }
 
 fn with_help(widget: BoxedWidget, help: Help, state: &UiState) -> BoxedWidget {
-    let controller = state
-        .tooltips
-        .borrow_mut()
-        .entry((help.label, help.instance))
-        .or_default()
-        .clone();
+    let controller = state.tooltip_controller((help.label, help.instance));
     controller.set_viewport(state.tooltip_viewport.get());
     let layout = widget.style().layout;
     let mut style = Style::default().flex_row();

@@ -127,6 +127,7 @@ pub(crate) struct UiState {
     pub ui_revision: Signal<u64>,
     pub tooltips: Rc<RefCell<HashMap<(&'static str, u64), TooltipController>>>,
     pub tooltip_viewport: Rc<Cell<creamui::Size>>,
+    tooltip_effects: Rc<RefCell<Vec<creamui::reactive::Effect>>>,
     pub selected: Signal<Vec<ClipRef>>,
     pub selected_media: Signal<Option<u64>>,
     pub program: Monitor,
@@ -201,6 +202,34 @@ pub(crate) struct UiState {
 }
 
 impl UiState {
+    pub(super) fn tooltip_controller(&self, key: (&'static str, u64)) -> TooltipController {
+        if let Some(controller) = self.tooltips.borrow().get(&key) {
+            return controller.clone();
+        }
+        let controller = TooltipController::default();
+        self.tooltips.borrow_mut().insert(key, controller.clone());
+        let controllers = self.tooltips.clone();
+        let active = controller.clone();
+        let effect = creamui::reactive::create_effect(move || {
+            if active.visible() {
+                let others: Vec<_> = controllers
+                    .borrow()
+                    .iter()
+                    .filter(|(other, _)| **other != key)
+                    .map(|(_, controller)| controller.clone())
+                    .collect();
+                creamui::reactive::batch(|| {
+                    for controller in others {
+                        controller.hover(false);
+                        controller.focus(false);
+                    }
+                });
+            }
+        });
+        self.tooltip_effects.borrow_mut().push(effect);
+        controller
+    }
+
     pub fn new() -> Self {
         let settings = settings::path()
             .and_then(|path| settings::load(&path).ok())
@@ -211,6 +240,7 @@ impl UiState {
             ui_revision: Signal::new(0),
             tooltips: Rc::new(RefCell::new(HashMap::new())),
             tooltip_viewport: Rc::new(Cell::new(creamui::Size::default())),
+            tooltip_effects: Rc::new(RefCell::new(Vec::new())),
             selected: Signal::new(Vec::new()),
             selected_media: Signal::new(None),
             program: Monitor::new(),

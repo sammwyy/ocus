@@ -3846,6 +3846,23 @@ mod tests {
     }
 
     #[test]
+    fn hovered_help_replaces_an_adjacent_focused_hint() {
+        let state = UiState::new();
+        render(&state, 1280.0, 760.0);
+        let undo = state.tooltips.borrow().get(&("Undo", 0)).unwrap().clone();
+        let redo = state.tooltips.borrow().get(&("Redo", 0)).unwrap().clone();
+        undo.focus(true);
+        redo.hover(true);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        render(&state, 1280.0, 760.0);
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(redo.visible());
+        assert!(!undo.visible());
+        assert!(painter.labels.iter().any(|label| label == "Redo"));
+        assert!(!painter.labels.iter().any(|label| label == "Undo"));
+    }
+
+    #[test]
     fn repeated_media_buttons_have_independent_help_and_keep_their_size() {
         let state = UiState::new();
         let viewport = Size {

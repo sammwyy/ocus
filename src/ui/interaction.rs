@@ -213,10 +213,13 @@ impl UiState {
 
     pub fn run(&self, action: Action) {
         if action == Action::Escape {
-            for controller in self.tooltips.borrow().values() {
-                controller.hover(false);
-                controller.focus(false);
-            }
+            let controllers: Vec<_> = self.tooltips.borrow().values().cloned().collect();
+            creamui::reactive::batch(|| {
+                for controller in controllers {
+                    controller.hover(false);
+                    controller.focus(false);
+                }
+            });
         }
         if self.settings_modal.peek() {
             if action == Action::Escape {
@@ -1407,6 +1410,24 @@ mod tests {
         state.run(Action::Escape);
         assert!(!help.visible());
         assert!(!state.settings_modal.peek());
+    }
+
+    #[test]
+    fn dismissing_help_can_synchronously_rebuild_the_tooltip_tree() {
+        use crate::ui::controls::{Glyph, Help, icon_button};
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let state = UiState::new();
+            let build_state = state.clone();
+            let _effect = creamui::reactive::create_effect(move || {
+                let _ = icon_button(Glyph::Undo, Help::new("Undo"), false, &build_state, |_| {});
+            });
+            let help = state.tooltips.borrow().get(&("Undo", 0)).unwrap().clone();
+            help.focus(true);
+            assert!(help.visible());
+            state.run(Action::Escape);
+            assert!(!help.visible());
+        });
     }
 
     #[test]

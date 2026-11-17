@@ -1,5 +1,5 @@
 use creamui::{Color, Theme, ThemeDefinition};
-use directories::ProjectDirs;
+use directories::{ProjectDirs, UserDirs};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,6 +19,8 @@ pub(crate) enum ThemeMode {
 pub(crate) struct Settings {
     pub theme: ThemeMode,
     pub accent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_export_directory: Option<PathBuf>,
 }
 
 impl Settings {
@@ -62,6 +64,26 @@ pub(crate) fn path() -> Option<PathBuf> {
     ProjectDirs::from("", "", "Ocus").map(|dirs| dirs.config_dir().join("settings.toml"))
 }
 
+pub(crate) fn export_directory(remembered: Option<&Path>) -> PathBuf {
+    let user = UserDirs::new();
+    first_existing_directory([
+        remembered,
+        user.as_ref().and_then(UserDirs::video_dir),
+        user.as_ref().and_then(UserDirs::document_dir),
+        user.as_ref().map(UserDirs::home_dir),
+    ])
+    .or_else(|| std::env::current_dir().ok())
+    .unwrap_or_default()
+}
+
+fn first_existing_directory(candidates: [Option<&Path>; 4]) -> Option<PathBuf> {
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|path| path.is_absolute() && path.is_dir())
+        .map(Path::to_path_buf)
+}
+
 pub(crate) fn load(path: &Path) -> Result<Settings, Box<dyn std::error::Error>> {
     match std::fs::read_to_string(path) {
         Ok(contents) => {
@@ -90,6 +112,7 @@ mod tests {
         let settings = Settings {
             theme: ThemeMode::Midnight,
             accent: Some("purple".into()),
+            ..Settings::default()
         };
         let serialized = toml::to_string(&settings).unwrap();
         let decoded: Settings = toml::from_str(&serialized).unwrap();
@@ -108,7 +131,8 @@ mod tests {
         assert!(
             Settings {
                 theme: ThemeMode::System,
-                accent: settings.accent
+                accent: settings.accent,
+                ..Settings::default()
             }
             .validate()
             .is_err()
@@ -117,7 +141,8 @@ mod tests {
         assert!(
             Settings {
                 accent: Some("invalid".into()),
-                theme: ThemeMode::Dark
+                theme: ThemeMode::Dark,
+                ..Settings::default()
             }
             .validate()
             .is_err()
@@ -140,6 +165,52 @@ mod tests {
     }
 
     #[test]
+    fn old_preferences_do_not_require_an_export_directory() {
+        let settings: Settings = toml::from_str("theme = 'dark'\naccent = 'purple'").unwrap();
+        assert_eq!(settings.last_export_directory, None);
+        assert_eq!(settings.theme, ThemeMode::Dark);
+    }
+
+    #[test]
+    fn export_directory_prefers_existing_user_folders() {
+        let root = std::env::temp_dir().join(format!(
+            "ocus-export-directories-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let chosen = root.join("chosen");
+        let videos = root.join("Videos");
+        let documents = root.join("Documents");
+        for directory in [&chosen, &videos, &documents] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        let mut candidates = [
+            Some(chosen.as_path()),
+            Some(videos.as_path()),
+            Some(documents.as_path()),
+            Some(root.as_path()),
+        ];
+        for expected in [&chosen, &videos, &documents, &root] {
+            assert_eq!(
+                first_existing_directory(candidates).as_ref(),
+                Some(expected)
+            );
+            if expected != &root {
+                std::fs::remove_dir(expected).unwrap();
+            }
+        }
+        candidates[0] = Some(Path::new("relative"));
+        std::fs::write(&videos, b"not a directory").unwrap();
+        assert_eq!(first_existing_directory(candidates), Some(root.clone()));
+        std::fs::remove_file(&videos).unwrap();
+        std::fs::remove_dir(&root).unwrap();
+        assert_eq!(first_existing_directory(candidates), None);
+    }
+
+    #[test]
     fn saved_preset_survives_reload() {
         let directory = std::env::temp_dir().join(format!(
             "ocus-settings-test-{}-{}",
@@ -153,6 +224,7 @@ mod tests {
         let settings = Settings {
             theme: ThemeMode::Light,
             accent: Some("orange".into()),
+            last_export_directory: Some(directory.clone()),
         };
         save(&path, &settings).unwrap();
         assert_eq!(load(&path).unwrap(), settings);

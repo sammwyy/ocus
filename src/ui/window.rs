@@ -12,8 +12,8 @@ use super::state::{
     media_frames,
 };
 use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
-use super::title_markup;
 use super::{MediaFilter, Sidebar, UiState};
+use super::{title_fonts, title_markup};
 use crate::media::preview::StoryboardKey;
 use crate::media::{Media, MediaKind};
 use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, VideoCodec};
@@ -519,6 +519,7 @@ fn title_box(title: &Title, rect: Rect, aspect: f32, resolution: (u32, u32)) -> 
     let mut longest = 0.0_f32;
     let mut line_width = 0.0;
     let mut lines = 1;
+    let family = title_fonts::family_stack(&title.font_family);
     for run in title_markup::parse(title) {
         for (index, part) in run.text.split('\n').enumerate() {
             if index > 0 {
@@ -526,7 +527,7 @@ fn title_box(title: &Title, rect: Rect, aspect: f32, resolution: (u32, u32)) -> 
                 line_width = 0.0;
                 lines += 1;
             }
-            line_width += run_width(part, size, &title.font_family, run.bold);
+            line_width += run_width(part, size, &family, run.bold);
         }
     }
     let box_width = (longest.max(line_width) + 16.0).clamp(32.0, width.max(32.0));
@@ -581,6 +582,7 @@ impl Widget for ProgramCanvas {
                 continue;
             }
             let size = (title.font_size * scale).max(1.0).min(height * 2.0);
+            let family = title_fonts::family_stack(&title.font_family);
             let runs = title_markup::parse(title);
             let lines: Vec<Vec<_>> = {
                 let mut lines = vec![Vec::new()];
@@ -604,7 +606,7 @@ impl Widget for ProgramCanvas {
             for (index, line) in lines.iter().enumerate() {
                 let widths: Vec<_> = line
                     .iter()
-                    .map(|run| run_width(&run.text, size, &title.font_family, run.bold))
+                    .map(|run| run_width(&run.text, size, &family, run.bold))
                     .collect();
                 let line_width: f32 = widths.iter().sum();
                 let mut x = bounds.x + width * title.x - line_width / 2.0;
@@ -628,7 +630,7 @@ impl Widget for ProgramCanvas {
                                     Color::rgba(0, 0, 0, run.color.a),
                                     size,
                                     TextAlign::Start,
-                                    Some(&title.font_family),
+                                    Some(&family),
                                     run.bold,
                                     run.italic,
                                 );
@@ -640,7 +642,7 @@ impl Widget for ProgramCanvas {
                             run.color,
                             size,
                             TextAlign::Start,
-                            Some(&title.font_family),
+                            Some(&family),
                             run.bold,
                             run.italic,
                         );
@@ -1205,6 +1207,19 @@ fn input(controller: &TextController, width: f32) -> BoxedWidget {
     Box::new(TextInput::controlled(controller).width(width).height(30.0))
 }
 
+fn title_input(
+    controller: &TextController,
+    width: f32,
+    state: &UiState,
+    apply: fn(&UiState),
+) -> TextInput {
+    let state = state.clone();
+    TextInput::controlled(controller)
+        .width(width)
+        .height(30.0)
+        .on_submit(move || apply(&state))
+}
+
 /// The inspector for several selected clips: a summary, the actions that
 /// apply to all of them and the list of clips.
 fn selection_rows(state: &UiState, project: &Project, inner: f32) -> Vec<BoxedWidget> {
@@ -1581,7 +1596,12 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 "Title",
                 vec![
                     text("Duration (seconds)", muted(), 11.0),
-                    input(&state.title_duration, inner),
+                    Box::new(title_input(
+                        &state.title_duration,
+                        inner,
+                        state,
+                        set_title_duration,
+                    )),
                     inline(secondary_button(
                         None,
                         "Apply duration",
@@ -1604,9 +1624,19 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         set_title_text,
                     )),
                     text("Font family", muted(), 11.0),
-                    input(&state.title_font, inner),
+                    Box::new(title_input(
+                        &state.title_font,
+                        inner,
+                        state,
+                        apply_title_style,
+                    )),
                     text("Font size (px)", muted(), 11.0),
-                    input(&state.title_size, inner),
+                    Box::new(title_input(
+                        &state.title_size,
+                        inner,
+                        state,
+                        apply_title_style,
+                    )),
                     text("Color (#RRGGBB or #RRGGBBAA)", muted(), 11.0),
                     Box::new(
                         ColorPicker::controlled(
@@ -1631,7 +1661,12 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         )
                         .width(inner),
                     ),
-                    input(&state.title_color, inner),
+                    Box::new(title_input(
+                        &state.title_color,
+                        inner,
+                        state,
+                        apply_title_style,
+                    )),
                     inline(secondary_button(
                         None,
                         "Apply style",
@@ -1983,35 +2018,37 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 property("Sources", project.media().len().to_string()),
             ],
         ));
-        rows.push(section(
-            "Shortcuts",
-            [
-                ("Space", "Play / pause"),
-                ("← →", "Step a frame (Shift: 1 s)"),
-                ("Ctrl Z / Ctrl Shift Z", "Undo / redo"),
-                ("Delete", "Remove (Shift: ripple)"),
-                ("Ctrl C / X / V / D", "Copy, cut, paste, duplicate"),
-                ("S · Ctrl K", "Split at playhead"),
-                ("Ctrl A · Esc", "Select all · clear"),
-                ("Alt ← →", "Nudge selection"),
-                ("Ctrl + wheel · + −", "Zoom timeline"),
-            ]
+        let groups = super::interaction::shortcut_help()
             .into_iter()
-            .map(|(keys, action)| {
-                Box::new(
-                    Flex::row()
-                        .gap(8.0)
-                        .align(Align::Center)
-                        .child(Box::new(Flex::row().width(112.0).child(text(
-                            keys,
-                            text_color(),
-                            10.0,
-                        ))))
-                        .child(text(action, muted(), 10.0)),
-                ) as BoxedWidget
+            .map(|group| {
+                let mut bindings = group.bindings;
+                if group.title == "Timeline" {
+                    bindings.push(("Ctrl + wheel".into(), "Zoom timeline"));
+                }
+                Box::new(append(
+                    Flex::column()
+                        .gap(5.0)
+                        .child(heading(group.title, muted(), 10.0)),
+                    bindings
+                        .into_iter()
+                        .map(|(keys, action)| {
+                            Box::new(
+                                Flex::row()
+                                    .gap(8.0)
+                                    .align(Align::Center)
+                                    .child(Box::new(Flex::row().width(112.0).child(text(
+                                        keys,
+                                        text_color(),
+                                        10.0,
+                                    ))))
+                                    .child(text(action, muted(), 10.0)),
+                            ) as BoxedWidget
+                        })
+                        .collect(),
+                )) as BoxedWidget
             })
-            .collect(),
-        ));
+            .collect();
+        rows.push(section("Shortcuts", groups));
     }
     Box::new(
         Flex::column()
@@ -4265,6 +4302,67 @@ mod tests {
             .iter()
             .any(|clip| matches!(&clip.content, ClipContent::Title(title) if title.parse_markdown)));
         assert_eq!(state.title_size.peek(), "92");
+    }
+
+    #[test]
+    fn title_inputs_submit_one_undoable_edit_and_reject_invalid_values() {
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
+                creamui::Theme::dark(),
+            ));
+            let state = UiState::new();
+            assert!(state.add_title());
+            for (controller, value, invalid, apply) in [
+                (
+                    &state.title_duration,
+                    "5",
+                    "",
+                    set_title_duration as fn(&UiState),
+                ),
+                (
+                    &state.title_font,
+                    "Serif",
+                    "",
+                    apply_title_style as fn(&UiState),
+                ),
+                (
+                    &state.title_size,
+                    "180",
+                    "-1",
+                    apply_title_style as fn(&UiState),
+                ),
+                (
+                    &state.title_color,
+                    "#FF0000",
+                    "invalid",
+                    apply_title_style as fn(&UiState),
+                ),
+            ] {
+                let before = selected_clip(&state).unwrap().1;
+                controller.set_value(value);
+                let field = title_input(controller, 180.0, &state, apply);
+                let submit = field.on_key().unwrap();
+                let enter = creamui::core::KeyInput {
+                    key: creamui::core::Key::Enter,
+                    modifiers: Default::default(),
+                };
+                submit(enter);
+                assert_ne!(selected_clip(&state).unwrap().1, before);
+                controller.set_value(invalid);
+                submit(enter);
+                state.undo();
+                assert_eq!(selected_clip(&state).unwrap().1, before);
+            }
+            state.undo();
+            assert!(selected_clip(&state).is_none());
+            state.title_size.set_value("180");
+            let field = title_input(&state.title_size, 180.0, &state, apply_title_style);
+            field.on_key().unwrap()(creamui::core::KeyInput {
+                key: creamui::core::Key::Enter,
+                modifiers: Default::default(),
+            });
+            assert!(selected_clip(&state).is_none());
+        });
     }
 
     #[test]

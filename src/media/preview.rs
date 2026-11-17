@@ -263,6 +263,7 @@ struct FrameReader {
     input: ffmpeg::format::context::Input,
     decoder: ffmpeg::decoder::Video,
     scaler: ffmpeg::software::scaling::context::Context,
+    rotation: super::Rotation,
     stream_index: usize,
     time_base: ffmpeg::Rational,
     first_pts: i64,
@@ -299,21 +300,23 @@ impl FrameReader {
         let stream_index = stream.index();
         let time_base = stream.time_base();
         let first_pts = stream.start_time();
+        let rotation = super::Rotation::from_stream(&stream);
         let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
             .and_then(|context| context.decoder().video())
             .map_err(|error| error.to_string())?;
         if decoder.format() == ffmpeg::format::Pixel::None || decoder.width() == 0 {
             return Err("Preview source has an unknown pixel format".into());
         }
-        let picture =
-            super::fitted_dimensions(decoder.width(), decoder.height(), output.0, output.1);
+        let display = rotation.dimensions(decoder.width(), decoder.height());
+        let picture = super::fitted_dimensions(display.0, display.1, output.0, output.1);
+        let coded = rotation.dimensions(picture.0, picture.1);
         let scaler = ffmpeg::software::scaling::context::Context::get(
             decoder.format(),
             decoder.width(),
             decoder.height(),
             ffmpeg::format::Pixel::RGBA,
-            picture.0,
-            picture.1,
+            coded.0,
+            coded.1,
             ffmpeg::software::scaling::flag::Flags::BILINEAR,
         )
         .map_err(|error| error.to_string())?;
@@ -329,6 +332,7 @@ impl FrameReader {
             input,
             decoder,
             scaler,
+            rotation,
             stream_index,
             time_base,
             first_pts,
@@ -362,16 +366,17 @@ impl FrameReader {
         self.scaler
             .run(&frame.1, &mut scaled)
             .map_err(|error| error.to_string())?;
-        let row_size = scaled.width() as usize * 4;
+        let scaled = self.rotation.orient(&scaled);
+        let row_size = scaled.width as usize * 4;
         let stride = self.output.0 as usize * 4;
-        let left = (self.output.0 - scaled.width()) as usize / 2;
-        let top = (self.output.1 - scaled.height()) as usize / 2;
+        let left = (self.output.0 - scaled.width) as usize / 2;
+        let top = (self.output.1 - scaled.height) as usize / 2;
         let mut pixels = vec![0; stride * self.output.1 as usize];
-        for row in 0..scaled.height() as usize {
-            let start = row * scaled.stride(0);
+        for row in 0..scaled.height as usize {
+            let start = row * row_size;
             let destination = (top + row) * stride + left * 4;
             pixels[destination..destination + row_size]
-                .copy_from_slice(&scaled.data(0)[start..start + row_size]);
+                .copy_from_slice(&scaled.pixels[start..start + row_size]);
         }
         Ok(FrameImage {
             width: self.output.0,
@@ -439,6 +444,92 @@ impl FrameReader {
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::Command;
+
+    #[test]
+    fn rotation_metadata_orients_frames_and_thumbnails() {
+        ffmpeg::init().unwrap();
+        let root = std::env::temp_dir().join(format!("ocus-rotation-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let base = root.join("base.mp4");
+        assert!(
+            Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc=size=320x180:rate=1",
+                    "-t",
+                    "1",
+                    "-pix_fmt",
+                    "yuv420p"
+                ])
+                .arg(&base)
+                .status()
+                .unwrap()
+                .success()
+        );
+        for angle in [0, 90, 180, 270] {
+            let path = root.join(format!("{angle}.mp4"));
+            assert!(
+                Command::new("ffmpeg")
+                    .args(["-v", "error", "-y", "-i"])
+                    .arg(&base)
+                    .args(["-c", "copy", "-metadata:s:v", &format!("rotate={angle}")])
+                    .arg(&path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let output = if angle % 180 == 0 {
+                (320, 180)
+            } else {
+                (180, 320)
+            };
+            let source = FrameSource {
+                clip_id: 1,
+                path: path.clone(),
+                kind: MediaKind::Video,
+                start: 0,
+                source_start: 0,
+                duration: 1,
+            };
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let image = FrameReader::open(&source, 0, (1, 1), output, cancelled.clone())
+                .unwrap()
+                .frame_at(0, &cancelled)
+                .unwrap();
+            let reference = Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(&path)
+                .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+                .output()
+                .unwrap();
+            assert!(reference.status.success());
+            assert_eq!(image.pixels.len(), reference.stdout.len());
+            let difference: usize = image
+                .pixels
+                .iter()
+                .zip(&reference.stdout)
+                .map(|(a, b)| a.abs_diff(*b) as usize)
+                .sum();
+            assert!(
+                difference < image.pixels.len() * 2,
+                "rotation {angle}: mean pixel error {}",
+                difference as f64 / image.pixels.len() as f64
+            );
+            let thumbnail = crate::media::thumbnail(&path).unwrap();
+            assert_eq!(
+                thumbnail.width > thumbnail.height,
+                angle % 180 == 0,
+                "rotation {angle}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn sources_are_fitted_and_centered() {

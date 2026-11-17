@@ -1525,6 +1525,55 @@ mod tests {
     }
 
     #[test]
+    fn insert_at_playhead_uses_the_next_free_compatible_track() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(crate::media::Media {
+            id: 1,
+            path: "/tmp/footage.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(3_000_000),
+            has_audio: true,
+        })));
+        assert!(state.edit(Command::InsertClip {
+            track_id: 0,
+            clip: Clip {
+                id: 1,
+                start_frame: 45,
+                source_start_frame: 0,
+                duration_frames: 90,
+                content: ClipContent::Media { media_id: 1 },
+                volume: 1.0,
+                muted: false,
+                linked_audio: true,
+            },
+        }));
+
+        state.run_menu(MenuCommand::InsertMediaAt(1, 45));
+        assert_eq!(starts(&state, 0), vec![45]);
+        assert_eq!(starts(&state, 1), vec![45]);
+        {
+            let editor = state.editor.borrow();
+            let clip = &editor.project().tracks()[1].clips[0];
+            assert_eq!(clip.content, ClipContent::Media { media_id: 1 });
+            assert_eq!(clip.duration_frames, 90);
+            assert!(clip.linked_audio);
+            assert!(editor.project().tracks()[2].clips.is_empty());
+        }
+
+        state.run_menu(MenuCommand::InsertMediaAt(1, 45));
+        assert_eq!(
+            state.status.peek(),
+            "That spot on the track is already taken"
+        );
+        assert_eq!(starts(&state, 0), vec![45]);
+        assert_eq!(starts(&state, 1), vec![45]);
+
+        state.run_menu(MenuCommand::InsertMediaAt(1, 135));
+        assert_eq!(starts(&state, 0), vec![45, 135]);
+        assert_eq!(starts(&state, 1), vec![45]);
+    }
+
+    #[test]
     fn inspector_help_covers_every_registered_shortcut() {
         let help = shortcut_help();
         assert!(help.iter().all(|group| !group.bindings.is_empty()));

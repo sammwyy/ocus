@@ -683,29 +683,6 @@ mod tests {
     }
 
     #[test]
-    fn playhead_insertion_uses_the_next_free_compatible_track() {
-        let mut editor = Editor::new(project_with(&[(0, title(1, 0))]));
-        assert!(editor.apply(Command::ImportMedia(Media {
-            id: 1,
-            path: "scene.mp4".into(),
-            kind: MediaKind::Video,
-            duration_us: Some(3_000_000),
-            has_audio: true,
-        })));
-        let track = compatible_track_at(editor.project(), 1, 0).unwrap();
-        assert_eq!(track, 1);
-        let insertion = insert_media(editor.project(), 1, Some((track, 0))).unwrap();
-        assert!(editor.apply(insertion.command));
-        assert!(editor.project().tracks()[1].clips[0].linked_audio);
-        assert_eq!(
-            compatible_track_at(editor.project(), 1, 0).unwrap_err(),
-            "That spot on the track is already taken"
-        );
-        assert_eq!(compatible_track_at(editor.project(), 1, 90).unwrap(), 0);
-        assert!(compatible_track_at(editor.project(), 999, 0).is_err());
-    }
-
-    #[test]
     fn video_with_sound_inserts_one_linked_clip_that_detaches_and_relinks() {
         let mut editor = Editor::new(Project::new("Film"));
         assert!(editor.apply(Command::ImportMedia(Media {

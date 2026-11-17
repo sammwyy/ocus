@@ -198,6 +198,11 @@ impl Geometry {
         self.top
     }
 
+    pub(super) fn lane_visible(&self, index: usize) -> bool {
+        let lane = self.lanes[index];
+        lane.y < self.bottom && lane.y + lane.height > self.top
+    }
+
     fn x(&self, frame: u64) -> f32 {
         let offset = frame as f64 - self.start as f64;
         self.left + (offset * f64::from(self.width) / self.span as f64) as f32
@@ -1166,7 +1171,9 @@ impl Widget for TimelineView {
     }
 
     fn on_layout(&self, rect: Rect) -> bool {
-        self.state.timeline_rect.set(rect);
+        if self.state.timeline_rect.replace(rect) != rect {
+            self.state.queue_storyboards();
+        }
         false
     }
 
@@ -1376,6 +1383,7 @@ impl Widget for TimelineView {
                 state
                     .track_scroll
                     .set((scroll + vertical).clamp(0.0, geometry.overflow));
+                state.queue_storyboards();
             }
             if horizontal != 0.0 {
                 let frames = f64::from(horizontal / geometry.pixels_per_frame());

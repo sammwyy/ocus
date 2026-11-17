@@ -30,6 +30,7 @@ use creamui::widgets::{
     TextController, TextInput,
 };
 use creamui::{BoxedWidget, Color, GpuFrameSlot, GpuViewport, ImageData, Size, StateStyle, Styled};
+use std::collections::HashSet;
 use std::process::Command as ProcessCommand;
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -448,10 +449,18 @@ fn monitor_viewport(slot: &GpuFrameSlot, aspect: f32) -> BoxedWidget {
     Box::new(GpuViewport::new(fill_style(), slot.clone()).aspect_ratio(aspect))
 }
 
-fn program_layers(project: &Project, frame: u64) -> (bool, bool, Vec<(ClipRef, Title)>) {
+/// What plays at `frame`: picture, sound, titles, and the first missing
+/// source that would have shown there, if any.
+fn program_layers<'a>(
+    project: &'a Project,
+    missing: &HashSet<u64>,
+    frame: u64,
+) -> (bool, bool, Vec<(ClipRef, Title)>, Option<&'a Media>) {
     let mut picture = false;
     let mut audio = false;
     let mut titles = Vec::new();
+    let mut lost_picture = None;
+    let mut lost_sound = None;
     for track in project.tracks() {
         for clip in &track.clips {
             if clip.start_frame > frame || frame - clip.start_frame >= clip.duration_frames {
@@ -464,16 +473,26 @@ fn program_layers(project: &Project, frame: u64) -> (bool, bool, Vec<(ClipRef, T
                 ClipContent::Media { media_id } => {
                     if let Some(media) = project.media().iter().find(|media| media.id == *media_id)
                     {
-                        picture |= track.kind == TrackKind::Video && media.kind != MediaKind::Audio;
-                        audio |= track.kind == TrackKind::Audio
+                        let shows =
+                            track.kind == TrackKind::Video && media.kind != MediaKind::Audio;
+                        let sounds = track.kind == TrackKind::Audio
                             && (media.kind == MediaKind::Audio || media.has_audio);
+                        if !missing.contains(media_id) {
+                            picture |= shows;
+                            audio |= sounds;
+                        } else if shows {
+                            lost_picture = lost_picture.or(Some(media));
+                        } else if sounds {
+                            lost_sound = lost_sound.or(Some(media));
+                        }
                     }
                 }
                 ClipContent::Title(_) => {}
             }
         }
     }
-    (picture, audio, titles)
+    let lost = lost_picture.or(lost_sound.filter(|_| !picture && titles.is_empty()));
+    (picture, audio, titles, lost)
 }
 
 struct ProgramCanvas {
@@ -2371,7 +2390,8 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
 
     let frame = state.program.position.get();
     let timeline_end = state.sequence_end();
-    let (picture, audio, mut titles) = program_layers(project, frame);
+    let missing = state.missing_media.get();
+    let (picture, audio, mut titles, lost) = program_layers(project, &missing, frame);
     if let Some((key, draft)) = state.title_preview.get()
         && let Some((_, title)) = titles.iter_mut().find(|(clip, _)| *clip == key)
     {
@@ -2379,17 +2399,18 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
     }
     let empty_timeline = project.tracks().iter().all(|track| track.clips.is_empty());
     let first_media = project.media().first();
-    let program_stage: BoxedWidget = if state.has_missing_timeline_media() {
+    let program_stage: BoxedWidget = if let Some(media) = lost {
+        let id = media.id;
         stage_message(
             Glyph::Film,
             "Missing source",
-            "Relink missing media to restore your preview.",
+            &format!("{} is missing at this frame.", media_name(media)),
             Some(accent_button(
                 Some(Glyph::Locate),
                 "Relink media…",
                 !busy,
                 state,
-                |s| s.relink_dialog(None),
+                move |s| s.relink_dialog(Some(id)),
             )),
         )
     } else if picture && !gpu_preview && titles.is_empty() {
@@ -4146,6 +4167,40 @@ mod tests {
                 .any(|label| label == "No clip at this frame")
         );
         assert!(!painter.labels.iter().any(|label| label == "Audio only"));
+    }
+
+    #[test]
+    fn program_monitor_marks_only_frames_whose_media_is_missing() {
+        let state = UiState::new();
+        for (id, name) in [(1, "/tmp/lost.mp4"), (2, "/tmp/kept.mp4")] {
+            assert!(state.edit(Command::ImportMedia(Media {
+                id,
+                path: name.into(),
+                kind: MediaKind::Video,
+                duration_us: Some(2_000_000),
+                has_audio: false,
+            })));
+            state.insert_media(id);
+        }
+        state.missing_media.set(HashSet::from([1]));
+        state.select_clips(Vec::new());
+        state.focus_frame(70);
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(
+            painter
+                .labels
+                .iter()
+                .any(|label| label == "Video preview unavailable")
+        );
+        assert!(!painter.labels.iter().any(|label| label == "Missing source"));
+        state.focus_frame(10);
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(
+            painter
+                .labels
+                .iter()
+                .any(|label| label == "lost.mp4 is missing at this frame.")
+        );
     }
 
     #[test]

@@ -21,7 +21,9 @@ across all tracks; a clip spanning a removed range keeps its surviving source
 frames as two clips, and the whole edit is one undo step. **Open** and
 **Save as…** use native file dialogs instead of requiring typed paths;
 **Save** reuses the chosen path. **New** asks before discarding unsaved
-changes. Saves are atomic and file operations run in the background.
+changes. Undoing or redoing back to the last saved version clears the edited
+indicator; undoing all edits in a new project clears it too. Saves are atomic
+and file operations run in the background.
 **Import** accepts multiple
 files from the native picker and probes video, audio, and images with FFmpeg
 on a worker thread. Video and still-image sources get small, regenerable

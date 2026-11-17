@@ -413,8 +413,20 @@ impl UiState {
             );
         }
         self.revision.update(|revision| *revision += 1);
-        self.dirty.set(true);
-        self.status.set(status.into());
+        let dirty = self.editor.borrow().is_dirty();
+        self.dirty.set(dirty);
+        let checkpoint = if dirty {
+            "Unsaved changes"
+        } else if self.project_path.peek().is_some() {
+            "Project saved"
+        } else {
+            "No changes · Project not saved"
+        };
+        self.status.set(if status.is_empty() {
+            checkpoint.into()
+        } else {
+            format!("{status} · {checkpoint}")
+        });
         self.request_preview();
         self.request_source_preview();
         self.queue_storyboards();
@@ -423,7 +435,7 @@ impl UiState {
     pub fn edit(&self, command: Command) -> bool {
         let changed = self.editor.borrow_mut().apply(command);
         if changed {
-            self.refresh_after_edit("Unsaved changes");
+            self.refresh_after_edit("");
         } else {
             self.status
                 .set("Edit rejected: check range, track and clip".into());
@@ -433,14 +445,14 @@ impl UiState {
 
     pub fn undo(&self) {
         if self.editor.borrow_mut().undo() {
-            self.refresh_after_edit("Undid edit · Unsaved changes");
+            self.refresh_after_edit("Undid edit");
             self.sync_title_controllers();
         }
     }
 
     pub fn redo(&self) {
         if self.editor.borrow_mut().redo() {
-            self.refresh_after_edit("Redid edit · Unsaved changes");
+            self.refresh_after_edit("Redid edit");
             self.sync_title_controllers();
         }
     }
@@ -1350,7 +1362,7 @@ impl UiState {
             return;
         }
         let project = self.editor.borrow().project().clone();
-        let revision = self.revision.peek();
+        let revision = self.editor.borrow().revision();
         self.busy.set(true);
         self.status.set("Saving project…".into());
         let state = self.clone();
@@ -1361,28 +1373,43 @@ impl UiState {
             },
             move |result| {
                 state.busy.set(false);
-                state.status.set(match result {
-                    Ok(()) if state.revision.peek() == revision => {
-                        state.project_path.set(Some(path));
-                        state.dirty.set(false);
-                        exported.map_or_else(
-                            || "Project saved".into(),
-                            |path| format!("Exported: {} · project saved", path.display()),
-                        )
-                    }
-                    Ok(()) => "Saved previous version · Unsaved changes".into(),
-                    Err(error) => exported.map_or_else(
-                        || format!("Save failed: {error}"),
-                        |path| {
-                            format!(
-                                "Exported: {} · project save failed: {error}",
-                                path.display()
-                            )
-                        },
-                    ),
-                });
+                state.finish_save(path, revision, exported, result);
             },
         );
+    }
+
+    fn finish_save(
+        &self,
+        path: PathBuf,
+        revision: u64,
+        exported: Option<PathBuf>,
+        result: std::io::Result<()>,
+    ) {
+        self.status.set(match result {
+            Ok(()) => {
+                self.editor.borrow_mut().mark_saved(revision);
+                self.project_path.set(Some(path));
+                let dirty = self.editor.borrow().is_dirty();
+                self.dirty.set(dirty);
+                if dirty {
+                    "Saved previous version · Unsaved changes".into()
+                } else {
+                    exported.map_or_else(
+                        || "Project saved".into(),
+                        |path| format!("Exported: {} · project saved", path.display()),
+                    )
+                }
+            }
+            Err(error) => exported.map_or_else(
+                || format!("Save failed: {error}"),
+                |path| {
+                    format!(
+                        "Exported: {} · project save failed: {error}",
+                        path.display()
+                    )
+                },
+            ),
+        });
     }
 
     pub fn import_dialog(&self) {
@@ -2140,6 +2167,104 @@ fn inspect_source(path: &Path) -> Result<(PathBuf, MediaProbe, Option<Thumbnail>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn undoing_all_edits_clears_dirty_state_and_discard_warning() {
+        let state = UiState::new();
+        assert!(!state.dirty.peek());
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 4,
+            path: "scene.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: true,
+        })));
+        state.insert_media(4);
+        state.add_title();
+        assert!(state.dirty.peek());
+
+        state.undo();
+        state.undo();
+        state.undo();
+
+        let editor = state.editor.borrow();
+        assert!(editor.project().media().is_empty());
+        assert!(
+            editor
+                .project()
+                .tracks()
+                .iter()
+                .all(|track| track.clips.is_empty())
+        );
+        assert!(!state.dirty.peek());
+        assert!(!state.status.peek().contains("Unsaved changes"));
+        assert!(state.confirm_discard());
+        drop(editor);
+
+        state.redo();
+        assert!(state.dirty.peek());
+        assert!(state.status.peek().contains("Unsaved changes"));
+        state.undo();
+        assert!(!state.dirty.peek());
+    }
+
+    #[test]
+    fn saving_an_older_snapshot_marks_only_that_history_revision_clean() {
+        let state = UiState::new();
+        assert!(state.edit(Command::RenameProject("Saved".into())));
+        let saved = state.editor.borrow().revision();
+        assert!(state.edit(Command::RenameProject("Later".into())));
+        let path = PathBuf::from("cut.ocus");
+        state.finish_save(path.clone(), saved, None, Ok(()));
+        assert_eq!(state.project_path.peek(), Some(path));
+        assert!(state.dirty.peek());
+
+        state.undo();
+        assert!(!state.dirty.peek());
+        assert_eq!(state.status.peek(), "Undid edit · Project saved");
+        assert!(state.confirm_discard());
+        state.undo();
+        assert!(state.dirty.peek());
+        state.redo();
+        assert!(!state.dirty.peek());
+        assert_eq!(state.status.peek(), "Redid edit · Project saved");
+        state.redo();
+        assert!(state.dirty.peek());
+    }
+
+    #[test]
+    fn returning_to_an_in_flight_save_clears_dirty_state_on_completion() {
+        let state = UiState::new();
+        assert!(state.edit(Command::RenameProject("Saved".into())));
+        let saved = state.editor.borrow().revision();
+        state.undo();
+        state.redo();
+        state.finish_save("cut.ocus".into(), saved, None, Ok(()));
+        assert!(!state.dirty.peek());
+        assert_eq!(state.status.peek(), "Project saved");
+    }
+
+    #[test]
+    fn failed_save_preserves_the_previous_path_and_clean_checkpoint() {
+        let state = UiState::new();
+        let saved = state.editor.borrow().revision();
+        state.finish_save("original.ocus".into(), saved, None, Ok(()));
+        assert!(state.edit(Command::RenameProject("Unsaved".into())));
+        let failed = state.editor.borrow().revision();
+        state.finish_save(
+            "failed.ocus".into(),
+            failed,
+            None,
+            Err(std::io::Error::other("disk full")),
+        );
+        assert_eq!(state.project_path.peek(), Some("original.ocus".into()));
+        assert_eq!(state.status.peek(), "Save failed: disk full");
+        assert!(state.dirty.peek());
+        state.undo();
+        assert!(!state.dirty.peek());
+        state.redo();
+        assert!(state.dirty.peek());
+    }
 
     #[test]
     fn quick_exports_get_new_numbered_names_without_file_access() {

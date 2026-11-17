@@ -110,7 +110,7 @@ fn scale_thumbnail(
     for row in 0..height as usize {
         pixels.extend_from_slice(&frame.data(0)[row * stride..row * stride + row_size]);
     }
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         for channel in 0..3 {
             pixel[channel] = ((u16::from(pixel[channel]) * u16::from(pixel[3]) + 127) / 255) as u8;
         }

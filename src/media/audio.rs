@@ -159,6 +159,7 @@ pub fn feed(
             })
         })
         .collect();
+    // Errors raised after a cancel come from the interrupted I/O itself.
     let mut first_error = None;
     let end = to_samples(plan.end);
     let mut position = to_samples(start);
@@ -181,7 +182,9 @@ pub fn feed(
                             continue;
                         }
                         Err(error) => {
-                            first_error.get_or_insert(error);
+                            if !cancelled.load(Ordering::Relaxed) {
+                                first_error.get_or_insert(error);
+                            }
                             slot.end = from;
                             continue;
                         }
@@ -198,7 +201,9 @@ pub fn feed(
                     }
                 }
                 Err(error) => {
-                    first_error.get_or_insert(error);
+                    if !cancelled.load(Ordering::Relaxed) {
+                        first_error.get_or_insert(error);
+                    }
                     slot.end = from;
                 }
             }
@@ -1070,6 +1075,40 @@ mod tests {
             assert_eq!(mismatch, None, "cancel after {cancel_after}");
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelling_while_a_source_opens_is_not_an_error() {
+        let path = std::env::temp_dir().join(format!("ocus-opening-{}.wav", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let made = std::process::Command::new("mkfifo").arg(&path).status();
+        assert!(made.unwrap().success());
+        let plan = AudioPlan {
+            sources: vec![AudioSource {
+                path: path.clone(),
+                start: 0,
+                source_start: 0,
+                duration: 6,
+                volume: 1.0,
+            }],
+            end: 6,
+            fps: (30, 1),
+        };
+        let queue = Arc::new(AudioQueue::new());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker = {
+            let (queue, cancelled) = (queue.clone(), cancelled.clone());
+            std::thread::spawn(move || feed(&plan, 0, queue, cancelled))
+        };
+        // Opening a pipe for writing waits until the feed opens it to read,
+        // so the cancel lands while the source is being opened.
+        let writer = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        cancelled.store(true, Ordering::Relaxed);
+        drop(writer);
+        assert_eq!(worker.join().unwrap(), Ok(()));
+        assert!(queue.is_done());
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

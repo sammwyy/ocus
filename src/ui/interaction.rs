@@ -378,7 +378,9 @@ impl UiState {
             Action::Escape => {
                 if self.menu.peek().is_some() {
                     self.close_menu();
-                } else if self.drag.peek().is_some() {
+                } else if self.drag.peek().is_some()
+                    || matches!(*self.gesture.borrow(), Gesture::Trim { .. })
+                {
                     self.cancel_drag();
                 } else if self.title_gesture.borrow().is_some() {
                     self.clear_title_gesture();

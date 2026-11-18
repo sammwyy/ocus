@@ -1,4 +1,4 @@
-use super::edits::{self, ClipRef};
+use super::edits::{self, ClipRef, CopiedClip};
 use super::interaction::{DragState, Gesture, MenuState};
 use crate::export::{self, ExportControl, presets};
 use crate::media::audio::{self, AudioPlan, AudioSource, Clock};
@@ -288,7 +288,7 @@ pub(crate) struct UiState {
     pub marquee: Signal<Option<Rect>>,
     pub timeline_rect: Rc<Cell<Rect>>,
     pub modifiers: Rc<Cell<Modifiers>>,
-    pub clipboard: Rc<RefCell<Vec<(u64, Clip)>>>,
+    pub clipboard: Rc<RefCell<Vec<CopiedClip>>>,
     pub menu: Signal<Option<MenuState>>,
     pub pointer: Rc<Cell<Point>>,
     pub sidebar: Signal<Sidebar>,
@@ -650,7 +650,7 @@ impl UiState {
             let editor = self.editor.borrow();
             self.clipboard
                 .borrow_mut()
-                .retain(|(_, clip)| match clip.content {
+                .retain(|copied| match copied.clip.content {
                     ClipContent::Media { media_id } => editor
                         .project()
                         .media()
@@ -3678,9 +3678,9 @@ mod tests {
         }
         let other = state.clipboard.borrow()[0].clone();
         let mut removed = other.clone();
-        removed.1.content = ClipContent::Media { media_id: 1 };
+        removed.clip.content = ClipContent::Media { media_id: 1 };
         let mut title = other.clone();
-        title.1.content = ClipContent::Title(Title::default());
+        title.clip.content = ClipContent::Title(Title::default());
         *state.clipboard.borrow_mut() = vec![removed, other.clone(), title.clone()];
 
         assert!(!state.edit(Command::RemoveMedia(2)));

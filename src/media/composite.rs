@@ -6,8 +6,8 @@ use creamui::fonts::{FontWeight, HorizontalAlign, LayoutSettings, cached_layout,
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use swash::scale::{Render, ScaleContext, Source};
-use swash::zeno::Format;
+use swash::scale::{Render, ScaleContext, Source, image::Image};
+use swash::zeno::{Format, Join, Stroke};
 
 #[derive(Clone)]
 pub struct VisualPlan {
@@ -198,15 +198,16 @@ impl Compositor {
 #[derive(Default)]
 struct Glyphs {
     scaler: ScaleContext,
-    cache: HashMap<(u64, u16, u32), GlyphMask>,
+    cache: HashMap<(u64, u16, u32, bool), GlyphMasks>,
 }
 
-struct GlyphMask {
-    width: u32,
-    height: u32,
-    left: i32,
-    top: i32,
-    coverage: Vec<u8>,
+struct GlyphMasks {
+    fill: Option<Image>,
+    outline: Option<Image>,
+}
+
+pub(crate) fn title_outline_radius(scaled_font_size: f32) -> f32 {
+    scaled_font_size * 0.02
 }
 
 impl Glyphs {
@@ -279,59 +280,53 @@ impl Glyphs {
                     } else {
                         &layout.fallback_faces[glyph.face - 1]
                     };
-                    let key = (face.id(), glyph.id, size.to_bits());
+                    let key = (face.id(), glyph.id, size.to_bits(), title.outline);
                     if self.cache.len() >= 4096 && !self.cache.contains_key(&key) {
                         self.cache.clear();
                     }
-                    let mask = self.cache.entry(key).or_insert_with(|| {
+                    let masks = self.cache.entry(key).or_insert_with(|| {
                         let mut scaler = self
                             .scaler
                             .builder(face.font_ref())
                             .size(size)
                             .hint(false)
                             .build();
-                        let image = Render::new(&[Source::Outline])
-                            .format(Format::Alpha)
-                            .render(&mut scaler, glyph.id);
-                        match image {
-                            Some(image) => GlyphMask {
-                                width: image.placement.width,
-                                height: image.placement.height,
-                                left: image.placement.left,
-                                top: image.placement.top,
-                                coverage: image.data,
-                            },
-                            None => GlyphMask {
-                                width: 0,
-                                height: 0,
-                                left: 0,
-                                top: 0,
-                                coverage: Vec::new(),
-                            },
-                        }
+                        let mut render = Render::new(&[Source::Outline]);
+                        render.format(Format::Alpha);
+                        let fill = render.render(&mut scaler, glyph.id);
+                        let outline = if title.outline && fill.is_some() {
+                            let mut stroke = Stroke::new(2.0 * title_outline_radius(size));
+                            stroke.join(Join::Round);
+                            render.style(stroke).render(&mut scaler, glyph.id)
+                        } else {
+                            None
+                        };
+                        GlyphMasks { fill, outline }
                     });
-                    let gx = (x + glyph.x).round() as i32 + mask.left;
-                    let gy = (start_y + line_index as f32 * line_height + glyph.y).round() as i32
-                        - mask.top;
-                    if title.outline {
-                        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                            paint(
-                                mask,
-                                gx + dx,
-                                gy + dy,
-                                &mut canvas,
-                                [0, 0, 0, run.color.a],
-                                run.italic,
-                            );
-                        }
+                    let Some(fill) = &masks.fill else {
+                        continue;
+                    };
+                    let gx = (x + glyph.x).round() as i32;
+                    let gy = (start_y + line_index as f32 * line_height + glyph.y).round() as i32;
+                    // Use the same shear origin for both masks, even when the outline is taller.
+                    let italic_bottom = run
+                        .italic
+                        .then(|| gy - fill.placement.top + fill.placement.height as i32 - 1);
+                    if let Some(outline) = &masks.outline {
+                        paint(
+                            outline,
+                            (gx, gy),
+                            &mut canvas,
+                            [0, 0, 0, run.color.a],
+                            italic_bottom,
+                        );
                     }
                     paint(
-                        mask,
-                        gx,
-                        gy,
+                        fill,
+                        (gx, gy),
                         &mut canvas,
                         [run.color.r, run.color.g, run.color.b, run.color.a],
-                        run.italic,
+                        italic_bottom,
                     );
                 }
                 x += run_width;
@@ -347,23 +342,30 @@ struct Canvas<'a> {
     pixels: &'a mut [u8],
 }
 
-fn paint(mask: &GlyphMask, x: i32, y: i32, canvas: &mut Canvas<'_>, color: [u8; 4], italic: bool) {
-    for row in 0..mask.height {
+fn paint(
+    mask: &Image,
+    origin: (i32, i32),
+    canvas: &mut Canvas<'_>,
+    color: [u8; 4],
+    italic_bottom: Option<i32>,
+) {
+    let (x, y) = (
+        origin.0 + mask.placement.left,
+        origin.1 - mask.placement.top,
+    );
+    let width = mask.placement.width;
+    for row in 0..mask.placement.height {
         let py = y + row as i32;
         if py < 0 || py >= canvas.height as i32 {
             continue;
         }
-        for col in 0..mask.width {
-            let shear = if italic {
-                ((mask.height.saturating_sub(1 + row)) as f32 * 0.22).round() as i32
-            } else {
-                0
-            };
+        let shear = italic_bottom.map_or(0, |bottom| ((bottom - py) as f32 * 0.22).round() as i32);
+        for col in 0..width {
             let px = x + col as i32 + shear;
             if px < 0 || px >= canvas.width as i32 {
                 continue;
             }
-            let coverage = u32::from(mask.coverage[(row * mask.width + col) as usize]);
+            let coverage = u32::from(mask.data[(row * width + col) as usize]);
             let offset = py as usize * canvas.stride + px as usize * 4;
             let mut rgba = color;
             rgba[3] = ((u32::from(color[3]) * coverage + 127) / 255) as u8;
@@ -610,6 +612,54 @@ mod tests {
         assert!(
             render("Serif") == serif,
             "the generic Serif title should render like its concrete serif family"
+        );
+    }
+
+    #[test]
+    fn title_outline_keeps_its_weight_relative_to_the_fill() {
+        let mut title = Title {
+            text: "Outline".into(),
+            font_size: 96.0,
+            ..Title::default()
+        };
+        let mut glyphs = Glyphs::default();
+        let mut weights = Vec::new();
+        for (width, height) in [(640, 360), (1280, 720), (1920, 1080), (3840, 2160)] {
+            let mut pixels = vec![128; width as usize * height as usize * 4];
+            for pixel in pixels.as_chunks_mut::<4>().0 {
+                pixel[3] = 255;
+            }
+            title.outline = false;
+            glyphs.draw(&title, width, height, 1920, width as usize * 4, &mut pixels);
+            let fill: u32 = pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| u32::from(pixel[0] - 128))
+                .sum();
+
+            for pixel in pixels.as_chunks_mut::<4>().0 {
+                *pixel = [128, 128, 128, 255];
+            }
+            title.outline = true;
+            glyphs.draw(&title, width, height, 1920, width as usize * 4, &mut pixels);
+            let outline: u32 = pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| u32::from(128_u8.saturating_sub(pixel[0])))
+                .sum();
+            assert!(outline > 0 && fill > 0);
+            weights.push(outline as f32 / fill as f32);
+        }
+
+        let reference = weights[2];
+        // At monitor size, subpixel coverage varies more around the antialiased fill.
+        assert!(
+            weights
+                .iter()
+                .all(|weight| (0.70..=1.30).contains(&(weight / reference))),
+            "outline-to-fill weights at preview, 720p, 1080p and 4K: {weights:?}"
         );
     }
 

@@ -590,6 +590,9 @@ impl UiState {
     }
 
     pub fn edit(&self, command: Command) -> bool {
+        if self.busy.peek() {
+            return false;
+        }
         let changed = self.editor.borrow_mut().apply(command);
         if changed {
             self.refresh_after_edit("");
@@ -627,6 +630,9 @@ impl UiState {
     }
 
     pub fn undo(&self) {
+        if self.busy.peek() {
+            return;
+        }
         if self.editor.borrow_mut().undo() {
             self.refresh_after_edit("Undid edit");
             self.sync_title_controllers();
@@ -634,6 +640,9 @@ impl UiState {
     }
 
     pub fn redo(&self) {
+        if self.busy.peek() {
+            return;
+        }
         if self.editor.borrow_mut().redo() {
             self.refresh_after_edit("Redid edit");
             self.sync_title_controllers();

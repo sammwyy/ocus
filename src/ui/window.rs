@@ -2668,21 +2668,21 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 .child(tool_button(
                     Some(Glyph::Split),
                     "Split",
-                    splittable,
+                    splittable && !busy,
                     state,
                     UiState::split_at_playhead,
                 ))
                 .child(tool_button(
                     Some(Glyph::Trash),
                     "Delete",
-                    selected,
+                    selected && !busy,
                     state,
                     |s| s.delete_selection(false),
                 ))
                 .child(tool_button(
                     Some(Glyph::Ripple),
                     "Ripple",
-                    selected,
+                    selected && !busy,
                     state,
                     |s| s.delete_selection(true),
                 ))

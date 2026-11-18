@@ -1776,6 +1776,45 @@ mod tests {
     }
 
     #[test]
+    fn busy_blocks_commands_and_history_without_losing_undo_or_redo() {
+        let state = UiState::new();
+        assert!(state.add_title());
+        let before = state.editor.borrow().project().clone();
+        state.busy.set(true);
+        assert!(!state.edit(Command::RenameProject("Blocked".into())));
+        state.undo();
+        state.run_menu(MenuCommand::RemoveTrack(0));
+        assert_eq!(state.editor.borrow().project(), &before);
+
+        state.busy.set(false);
+        state.undo();
+        assert!(starts(&state, 0).is_empty());
+        state.busy.set(true);
+        state.redo();
+        assert!(starts(&state, 0).is_empty());
+        state.delete_selection(false);
+        state.busy.set(false);
+        state.redo();
+        assert_eq!(state.editor.borrow().project(), &before);
+        assert!(state.edit(Command::RenameProject("Allowed".into())));
+    }
+
+    #[test]
+    fn busy_export_blocks_toolbar_delete() {
+        let state = UiState::new();
+        assert!(state.add_title());
+        state.select_clip(Some((0, 1)));
+        let before = state.editor.borrow().project().clone();
+        state.exporting.set(true);
+        state.busy.set(true);
+
+        state.delete_selection(false);
+
+        assert_eq!(state.editor.borrow().project(), &before);
+        assert_eq!(state.selected.peek(), vec![(0, 1)]);
+    }
+
+    #[test]
     fn busy_export_blocks_destructive_keyboard_actions() {
         for action in [
             Action::Cut,

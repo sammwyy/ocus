@@ -373,8 +373,8 @@ impl UiState {
         match action {
             Action::Undo if !busy => self.undo(),
             Action::Redo if !busy => self.redo(),
-            Action::Delete => self.delete_selection(false),
-            Action::RippleDelete => self.delete_selection(true),
+            Action::Delete if !busy => self.delete_selection(false),
+            Action::RippleDelete if !busy => self.delete_selection(true),
             Action::SelectAll => self.select_all(),
             Action::Escape => {
                 if self.menu.peek().is_some() {
@@ -390,14 +390,14 @@ impl UiState {
             Action::Copy => {
                 self.copy_selection();
             }
-            Action::Cut => {
+            Action::Cut if !busy => {
                 if self.copy_selection() {
                     self.delete_selection(false);
                 }
             }
-            Action::Paste => self.paste(None),
-            Action::Duplicate => self.duplicate_selection(),
-            Action::Split => self.split_at_playhead(),
+            Action::Paste if !busy => self.paste(None),
+            Action::Duplicate if !busy => self.duplicate_selection(),
+            Action::Split if !busy => self.split_at_playhead(),
             Action::PlayPause => {
                 if self.source.playing.peek() {
                     self.pause_source();
@@ -413,8 +413,8 @@ impl UiState {
             Action::SecondForward => self.seek((frame + second).min(last)),
             Action::ToStart => self.seek(0),
             Action::ToEnd => self.seek(last),
-            Action::NudgeLeft => self.nudge_selection(-1),
-            Action::NudgeRight => self.nudge_selection(1),
+            Action::NudgeLeft if !busy => self.nudge_selection(-1),
+            Action::NudgeRight if !busy => self.nudge_selection(1),
             Action::ZoomIn => self.zoom_timeline(self.timeline_zoom.peek().saturating_sub(1)),
             Action::ZoomOut => self.zoom_timeline(self.timeline_zoom.peek() + 1),
             Action::AddTitle if !busy => {
@@ -1773,6 +1773,85 @@ mod tests {
         assert_eq!(plan.ghosts[0].start, 0);
         state.finish_drag();
         assert_eq!(starts(&state, 1), vec![0]);
+    }
+
+    #[test]
+    fn busy_blocks_commands_and_history_without_losing_undo_or_redo() {
+        let state = UiState::new();
+        assert!(state.add_title());
+        let before = state.editor.borrow().project().clone();
+        state.busy.set(true);
+        assert!(!state.edit(Command::RenameProject("Blocked".into())));
+        state.undo();
+        state.run_menu(MenuCommand::RemoveTrack(0));
+        assert_eq!(state.editor.borrow().project(), &before);
+
+        state.busy.set(false);
+        state.undo();
+        assert!(starts(&state, 0).is_empty());
+        state.busy.set(true);
+        state.redo();
+        assert!(starts(&state, 0).is_empty());
+        state.delete_selection(false);
+        state.busy.set(false);
+        state.redo();
+        assert_eq!(state.editor.borrow().project(), &before);
+        assert!(state.edit(Command::RenameProject("Allowed".into())));
+    }
+
+    #[test]
+    fn busy_export_blocks_toolbar_delete() {
+        let state = UiState::new();
+        assert!(state.add_title());
+        state.select_clip(Some((0, 1)));
+        let before = state.editor.borrow().project().clone();
+        state.exporting.set(true);
+        state.busy.set(true);
+
+        state.delete_selection(false);
+
+        assert_eq!(state.editor.borrow().project(), &before);
+        assert_eq!(state.selected.peek(), vec![(0, 1)]);
+    }
+
+    #[test]
+    fn busy_export_blocks_destructive_keyboard_actions() {
+        for action in [
+            Action::Cut,
+            Action::Paste,
+            Action::Duplicate,
+            Action::Split,
+            Action::NudgeLeft,
+            Action::NudgeRight,
+        ] {
+            assert_busy_export_blocks(action);
+        }
+    }
+
+    #[test]
+    fn busy_export_blocks_delete_shortcut() {
+        assert_busy_export_blocks(Action::Delete);
+    }
+
+    #[test]
+    fn busy_export_blocks_shift_delete_shortcut() {
+        assert_busy_export_blocks(Action::RippleDelete);
+    }
+
+    fn assert_busy_export_blocks(action: Action) {
+        let state = UiState::new();
+        assert!(state.add_title());
+        state.select_clip(Some((0, 1)));
+        state.run(Action::Copy);
+        state.seek(if action == Action::Paste { 180 } else { 45 });
+        let before = state.editor.borrow().project().clone();
+        state.exporting.set(true);
+        state.busy.set(true);
+
+        state.run(action);
+
+        assert_eq!(state.editor.borrow().project(), &before, "{action:?}");
+        assert_eq!(state.selected.peek(), vec![(0, 1)], "{action:?}");
     }
 
     #[test]

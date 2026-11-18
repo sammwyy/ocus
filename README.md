@@ -75,6 +75,8 @@ the media bin onto a track, or drop files from the desktop anywhere on the
 window to import them (over a track they are also placed there). Ctrl+click
 and Shift+click add to the selection and dragging over empty track space draws
 a selection rectangle; a multi-selection moves, copies and deletes together.
+If a copied clip's track was deleted, paste uses the first track of the same
+kind with room at the destination.
 Keyboard shortcuts work whenever a text field is not focused: Ctrl+Z /
 Ctrl+Shift+Z (or Ctrl+Y) undo and redo, Delete or Backspace removes the
 selection (Shift ripple-deletes), Ctrl+C/X/V/D copy, cut, paste at the playhead

@@ -11,6 +11,13 @@ use std::collections::HashSet;
 /// A clip identity: `(track_id, clip_id)`.
 pub(crate) type ClipRef = (u64, u64);
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CopiedClip {
+    pub track_id: u64,
+    pub track_kind: TrackKind,
+    pub clip: Clip,
+}
+
 pub(crate) struct Planned {
     pub tracks: Vec<Track>,
     pub selection: Vec<ClipRef>,
@@ -269,22 +276,48 @@ pub(crate) fn ripple_remove_clips(project: &Project, selection: &[ClipRef]) -> O
 }
 
 /// Places copies of `clips` with fresh IDs so the earliest starts at `at`,
-/// keeping their relative timing and tracks.
-pub(crate) fn paste_clips(project: &Project, clips: &[(u64, Clip)], at: u64) -> Option<Planned> {
-    let first = clips.iter().map(|(_, clip)| clip.start_frame).min()?;
+/// keeping relative timing and using the first free same-kind track when
+/// the original track is gone.
+pub(crate) fn paste_clips(project: &Project, clips: &[CopiedClip], at: u64) -> Option<Planned> {
+    let first = clips.iter().map(|copied| copied.clip.start_frame).min()?;
     let mut id = next_clip_id(project)?;
     let mut tracks = project.tracks().to_vec();
-    let mut selection = Vec::new();
-    for (track_id, clip) in clips {
-        let track = tracks.iter_mut().find(|track| track.id == *track_id)?;
-        track.clips.push(Clip {
-            id,
-            start_frame: at.checked_add(clip.start_frame - first)?,
-            ..clip.clone()
-        });
-        selection.push((*track_id, id));
+    let mut pending = Vec::with_capacity(clips.len());
+    for copied in clips {
+        let preferred = tracks
+            .iter()
+            .position(|track| track.id == copied.track_id && track.kind == copied.track_kind);
+        pending.push((
+            preferred,
+            copied.track_kind,
+            Clip {
+                id,
+                start_frame: at.checked_add(copied.clip.start_frame - first)?,
+                ..copied.clip.clone()
+            },
+        ));
         id = id.checked_add(1)?;
     }
+    // Reserve surviving destinations before placing clips from deleted tracks.
+    pending.sort_by_key(|(preferred, _, _)| preferred.is_none());
+    let mut selection = Vec::with_capacity(clips.len());
+    for (preferred, kind, clip) in pending {
+        let track = match preferred {
+            Some(index) => &mut tracks[index],
+            None => {
+                let end = clip.start_frame.checked_add(clip.duration_frames)?;
+                tracks.iter_mut().find(|track| {
+                    track.kind == kind
+                        && track.clips.iter().all(|existing| {
+                            end <= existing.start_frame || clip_end(existing) <= clip.start_frame
+                        })
+                })?
+            }
+        };
+        selection.push((track.id, clip.id));
+        track.clips.push(clip);
+    }
+    selection.sort_unstable_by_key(|&(_, id)| id);
     Some(Planned {
         tracks: sorted_without_overlap(tracks)?,
         selection,
@@ -613,7 +646,11 @@ mod tests {
         let rippled = ripple_remove_clips(&project, &[(0, 1), (0, 2)]).unwrap();
         assert!(rippled[0].clips.is_empty());
         assert_eq!(rippled[1].clips[0].start_frame, 0);
-        let copied = vec![(0, title(1, 0)), (1, title(3, 60))];
+        let copied = [(0, title(1, 0)), (1, title(3, 60))].map(|(track_id, clip)| CopiedClip {
+            track_id,
+            track_kind: TrackKind::Video,
+            clip,
+        });
         let pasted = paste_clips(&project, &copied, 90).unwrap();
         assert_eq!(pasted.selection, vec![(0, 4), (1, 5)]);
         assert_eq!(pasted.tracks[1].clips[1].start_frame, 150);

@@ -625,6 +625,74 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     #[test]
+    #[ignore = "manual real-export audio measurement; set OCUS_DOWNMIX_EVIDENCE"]
+    fn exports_center_only_surround_audio() {
+        let dir = std::path::PathBuf::from(std::env::var("OCUS_DOWNMIX_EVIDENCE").unwrap());
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("center.wav");
+        assert!(
+            std::process::Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "aevalsrc=0|0|0.5*sin(2*PI*440*t)|0|0|0:s=48000:d=1:c=5.1",
+                    "-c:a",
+                    "pcm_f32le"
+                ])
+                .arg(&source)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut document: serde_json::Value =
+            serde_json::from_str(&format::to_json(&Project::new("Downmix")).unwrap()).unwrap();
+        document["settings"]["width"] = 160.into();
+        document["settings"]["height"] = 90.into();
+        let mut editor = Editor::new(format::from_json(&document.to_string()).unwrap());
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: source,
+            kind: MediaKind::Audio,
+            duration_us: Some(1_000_000),
+            has_audio: true,
+        })));
+        let track_id = editor
+            .project()
+            .tracks()
+            .iter()
+            .find(|track| track.kind == TrackKind::Audio)
+            .unwrap()
+            .id;
+        assert!(editor.apply(Command::InsertClip {
+            track_id,
+            clip: Clip {
+                id: 1,
+                start_frame: 0,
+                source_start_frame: 0,
+                duration_frames: 30,
+                content: ClipContent::Media { media_id: 1 },
+                volume: 1.0,
+                muted: false,
+                linked_audio: false,
+            }
+        }));
+        let target = dir.join("export.mp4");
+        super::render(editor.project(), &target).unwrap();
+        let output = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-i"])
+            .arg(&target)
+            .args(["-vn", "-af", "volumedetect", "-f", "null", "-"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        println!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[test]
     fn output_frame_mapping_and_aspect_fit_are_bounded() {
         assert_eq!(super::output_frames(7, (30, 1), (24, 1)), Ok(6));
         assert_eq!(super::output_frames(7, (30, 1), (60, 1)), Ok(14));

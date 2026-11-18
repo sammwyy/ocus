@@ -2544,18 +2544,8 @@ impl UiState {
                         Err(error) => errors.push((source_path, error)),
                     }
                 }
-                if let Some((track_id, mut frame)) = placement {
-                    for id in ready {
-                        let track =
-                            edits::compatible_track(state.editor.borrow().project(), id, track_id);
-                        let Some(track) = track else {
-                            continue;
-                        };
-                        match state.insert_media_at(id, Some((track, frame))) {
-                            Some(next) => frame = next,
-                            None => break,
-                        }
-                    }
+                if let Some(placement) = placement {
+                    errors.extend(state.place_imported_media(ready, placement));
                 }
                 let summary = import_summary(imported, total, &errors);
                 if errors.is_empty() {
@@ -2579,6 +2569,38 @@ impl UiState {
                 }
             },
         );
+    }
+
+    fn place_imported_media(
+        &self,
+        ready: Vec<u64>,
+        (track_id, mut frame): (u64, u64),
+    ) -> Vec<(PathBuf, String)> {
+        let mut errors = Vec::new();
+        for id in ready {
+            let path = self
+                .editor
+                .borrow()
+                .project()
+                .media()
+                .iter()
+                .find(|media| media.id == id)
+                .map(|media| media.path.clone())
+                .unwrap_or_default();
+            let track = edits::compatible_track(self.editor.borrow().project(), id, track_id);
+            let Some(track) = track else {
+                errors.push((path, "No compatible timeline track".into()));
+                continue;
+            };
+            match self.insert_media_at(id, Some((track, frame))) {
+                Some(next) => frame = next,
+                None => errors.push((
+                    path,
+                    format!("Could not place on timeline: {}", self.status.peek()),
+                )),
+            }
+        }
+        errors
     }
 
     fn load_thumbnails(&self, sources: Vec<PathBuf>) {
@@ -3364,6 +3386,67 @@ mod tests {
             PathBuf::from(state.export_path.peek()),
             root.join("chosen/output-2.mp4")
         );
+    }
+
+    #[test]
+    fn occupied_drop_reports_each_unplaced_file() {
+        let state = UiState::new();
+        for id in 1..=3 {
+            assert!(state.edit(Command::ImportMedia(Media {
+                id,
+                path: format!("source-{id}.mp4").into(),
+                kind: MediaKind::Video,
+                duration_us: Some(1_000_000),
+                has_audio: false,
+            })));
+        }
+        state.insert_media(1);
+        let track = state.editor.borrow().project().tracks()[0].id;
+        let errors = state.place_imported_media(vec![2, 3], (track, 0));
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].0, PathBuf::from("source-2.mp4"));
+        assert_eq!(
+            errors[0].1,
+            "Could not place on timeline: That spot on the track is already taken"
+        );
+        assert_eq!(errors[1].0, PathBuf::from("source-3.mp4"));
+        assert!(import_summary(2, 2, &errors).contains("source-2.mp4"));
+        assert_eq!(state.editor.borrow().project().tracks()[0].clips.len(), 1);
+    }
+
+    #[test]
+    fn dropped_batch_places_later_files_when_they_fit() {
+        let state = UiState::new();
+        for (id, kind) in [(1, MediaKind::Video), (2, MediaKind::Audio)] {
+            assert!(state.edit(Command::ImportMedia(Media {
+                id,
+                path: format!("source-{id}.mp4").into(),
+                kind,
+                duration_us: Some(1_000_000),
+                has_audio: false,
+            })));
+        }
+        state.insert_media(1);
+        let track = state.editor.borrow().project().tracks()[0].id;
+        assert!(state.place_imported_media(vec![], (track, 0)).is_empty());
+        let errors = state.place_imported_media(vec![1, 2], (track, 0));
+        assert_eq!(errors.len(), 1);
+        let editor = state.editor.borrow();
+        let audio = editor
+            .project()
+            .tracks()
+            .iter()
+            .find(|track| track.kind == TrackKind::Audio)
+            .unwrap();
+        assert_eq!(audio.clips.len(), 1);
+        assert_eq!(audio.clips[0].start_frame, 0);
+        drop(editor);
+        assert!(
+            state
+                .place_imported_media(vec![1, 1], (track, 30))
+                .is_empty()
+        );
+        assert_eq!(state.editor.borrow().project().tracks()[0].clips.len(), 3);
     }
 
     #[test]

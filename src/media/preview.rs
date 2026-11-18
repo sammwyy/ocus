@@ -352,7 +352,9 @@ impl FrameReader {
     }
 
     fn frame_at(&mut self, target: u64, cancelled: &AtomicBool) -> Result<Arc<FrameImage>, String> {
-        if let Some(image) = &self.fitted {
+        if self.still
+            && let Some(image) = &self.fitted
+        {
             return Ok(image.clone());
         }
         if self.future.is_none() && self.current.is_none() {
@@ -364,7 +366,11 @@ impl FrameReader {
             .is_some_and(|(position, _)| *position <= target)
         {
             self.current = self.future.take();
+            self.fitted = None;
             self.future = self.next_decoded(cancelled)?;
+        }
+        if let Some(image) = &self.fitted {
+            return Ok(image.clone());
         }
         let frame = self
             .current
@@ -392,9 +398,7 @@ impl FrameReader {
             height: self.output.1,
             pixels,
         });
-        if self.still {
-            self.fitted = Some(image.clone());
-        }
+        self.fitted = Some(image.clone());
         Ok(image)
     }
 
@@ -487,6 +491,58 @@ mod tests {
             .unwrap();
         assert_eq!(first.pixels, fresh.pixels);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn held_video_frames_reuse_fitted_pixels() {
+        ffmpeg::init().unwrap();
+        let root = std::env::temp_dir().join(format!("ocus-held-frames-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        for (rate, fps) in [(5, (30, 1)), (24, (60, 1)), (30, (30, 1))] {
+            let path = root.join(format!("{rate}fps.mp4"));
+            assert!(
+                Command::new("ffmpeg")
+                    .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+                    .arg(format!(
+                        "nullsrc=size=64x36:rate={rate}:duration=1,geq=lum=16+N*7:cb=128:cr=128"
+                    ))
+                    .args(["-pix_fmt", "yuv420p"])
+                    .arg(&path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let frames = u64::from(fps.0 / fps.1);
+            let source = FrameSource {
+                clip_id: 1,
+                path,
+                kind: MediaKind::Video,
+                start: 0,
+                source_start: 0,
+                duration: frames,
+            };
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let mut reader =
+                FrameReader::open(&source, 0, fps, (32, 18), cancelled.clone()).unwrap();
+            let mut previous: Option<Arc<FrameImage>> = None;
+            for position in 0..frames {
+                let image = reader.frame_at(position, &cancelled).unwrap();
+                let fresh = FrameReader::open(&source, 0, fps, (32, 18), cancelled.clone())
+                    .unwrap()
+                    .frame_at(position, &cancelled)
+                    .unwrap();
+                assert_eq!(image.pixels, fresh.pixels, "{rate} fps at frame {position}");
+                if let Some(last) = &previous {
+                    assert_eq!(
+                        last.pixels == image.pixels,
+                        Arc::ptr_eq(last, &image),
+                        "{rate} fps reuse at frame {position}"
+                    );
+                }
+                previous = Some(image);
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -140,8 +140,8 @@ video composited from every video track (V1 is the base; V2 and lower rows are
 drawn above it), transparent
 still images and all title overlays, plus AAC stereo audio from audio tracks and
 linked clip sound. Titles honor font, size, position, color, transparency,
-bold/italic, outline and enabled HTML/Markdown styling. Cuts, trims, gaps
-(black video/silent audio), per-clip volume and mute are honored. Audio-only
+bold/italic, outline (scaled with text size) and enabled HTML/Markdown styling.
+Cuts, trims, gaps (black video/silent audio), per-clip volume and mute are honored. Audio-only
 timelines export with black video. Export runs in the background, shows
 progress, can be cancelled, and publishes a completed file atomically.
 Available H.264 and AAC encoders are required in FFmpeg for the default MP4.

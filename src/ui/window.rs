@@ -14,6 +14,7 @@ use super::state::{
 use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
 use super::{MediaFilter, Sidebar, UiState};
 use super::{title_fonts, title_markup};
+use crate::media::composite::title_outline_radius;
 use crate::media::preview::StoryboardKey;
 use crate::media::{Media, MediaKind};
 use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, VideoCodec};
@@ -635,7 +636,10 @@ impl Widget for ProgramCanvas {
                     };
                     if !run.text.trim().is_empty() && run.color.a > 0 {
                         if title.outline {
-                            for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                            let radius = title_outline_radius(size);
+                            for (dx, dy) in
+                                [(-radius, 0.0), (radius, 0.0), (0.0, -radius), (0.0, radius)]
+                            {
                                 painter.fill_text_font(
                                     Rect {
                                         x: line_rect.x + dx,

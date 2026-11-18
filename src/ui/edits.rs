@@ -3,6 +3,7 @@
 
 use super::state::media_frames;
 use crate::media::MediaKind;
+use crate::project::edit::split_tracks;
 use crate::project::{Command, Editor, Project};
 use crate::timeline::{Clip, ClipContent, Track, TrackKind};
 use std::collections::HashSet;
@@ -152,33 +153,7 @@ pub(crate) fn selection_edges(project: &Project, selection: &[ClipRef]) -> Vec<i
 
 /// Splits each target clip that spans `at` into two adjacent clips.
 pub(crate) fn split_clips(project: &Project, targets: &[ClipRef], at: u64) -> Option<Vec<Track>> {
-    let mut id = next_clip_id(project)?;
-    let mut tracks = project.tracks().to_vec();
-    let mut changed = false;
-    for &(track_id, clip_id) in targets {
-        let track = tracks.iter_mut().find(|track| track.id == track_id)?;
-        let Some(clip) = track.clips.iter_mut().find(|clip| clip.id == clip_id) else {
-            continue;
-        };
-        let Some(offset) = at.checked_sub(clip.start_frame) else {
-            continue;
-        };
-        if offset == 0 || offset >= clip.duration_frames {
-            continue;
-        }
-        let right = Clip {
-            id,
-            start_frame: at,
-            source_start_frame: clip.source_start_frame.checked_add(offset)?,
-            duration_frames: clip.duration_frames - offset,
-            ..clip.clone()
-        };
-        clip.duration_frames = offset;
-        track.clips.push(right);
-        id = id.checked_add(1)?;
-        changed = true;
-    }
-    changed.then(|| sorted_without_overlap(tracks)).flatten()
+    split_tracks(project.tracks(), targets, at, next_clip_id(project)?)
 }
 
 /// The clips under `frame`, on every track.

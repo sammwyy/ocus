@@ -154,6 +154,75 @@ pub struct Thumbnail {
     pub pixels: Vec<u8>,
 }
 
+fn rgba_scaler(
+    decoder: &ffmpeg::decoder::Video,
+    width: u32,
+    height: u32,
+) -> Result<ffmpeg::software::scaling::Context, String> {
+    use ffmpeg::color::{Range, Space};
+    use ffmpeg::ffi;
+
+    let mut scaler = ffmpeg::software::scaling::Context::get(
+        decoder.format(),
+        decoder.width(),
+        decoder.height(),
+        ffmpeg::format::Pixel::RGBA,
+        width,
+        height,
+        ffmpeg::software::scaling::Flags::BILINEAR,
+    )
+    .map_err(|error| error.to_string())?;
+    let matrix = match decoder.color_space() {
+        Space::BT709 => ffi::SWS_CS_ITU709,
+        Space::FCC => ffi::SWS_CS_FCC,
+        Space::SMPTE240M => ffi::SWS_CS_SMPTE240M,
+        Space::BT2020NCL => ffi::SWS_CS_BT2020,
+        _ => ffi::SWS_CS_DEFAULT,
+    };
+    let range = decoder.color_range();
+    if matrix == ffi::SWS_CS_DEFAULT && range == Range::Unspecified {
+        return Ok(scaler);
+    }
+    unsafe {
+        let context = scaler.as_mut_ptr();
+        let (mut input_table, mut output_table) = (std::ptr::null_mut(), std::ptr::null_mut());
+        let (mut input_range, mut output_range) = (0, 0);
+        let (mut brightness, mut contrast, mut saturation) = (0, 0, 0);
+        if ffi::sws_getColorspaceDetails(
+            context,
+            &mut input_table,
+            &mut input_range,
+            &mut output_table,
+            &mut output_range,
+            &mut brightness,
+            &mut contrast,
+            &mut saturation,
+        ) < 0
+        {
+            return Err("Cannot read video scaler colorspace".into());
+        }
+        let input_range = match range {
+            Range::JPEG => 1,
+            Range::MPEG => 0,
+            Range::Unspecified => input_range,
+        };
+        if ffi::sws_setColorspaceDetails(
+            context,
+            ffi::sws_getCoefficients(matrix),
+            input_range,
+            output_table,
+            output_range,
+            brightness,
+            contrast,
+            saturation,
+        ) < 0
+        {
+            return Err("Cannot configure video scaler colorspace".into());
+        }
+    }
+    Ok(scaler)
+}
+
 pub fn thumbnail(path: &Path) -> Result<Thumbnail, String> {
     ffmpeg::init().map_err(|error| error.to_string())?;
     let started = Instant::now();
@@ -180,16 +249,7 @@ pub fn thumbnail(path: &Path) -> Result<Thumbnail, String> {
         .min(1.0);
     let width = (square.0 as f32 * scale).round().max(1.0) as u32;
     let height = (square.1 as f32 * scale).round().max(1.0) as u32;
-    let mut scaler = ffmpeg::software::scaling::context::Context::get(
-        decoder.format(),
-        decoder.width(),
-        decoder.height(),
-        ffmpeg::format::Pixel::RGBA,
-        width,
-        height,
-        ffmpeg::software::scaling::flag::Flags::BILINEAR,
-    )
-    .map_err(|error| error.to_string())?;
+    let mut scaler = rgba_scaler(&decoder, width, height)?;
     for (stream, packet) in input.packets() {
         if stream.index() != index {
             continue;

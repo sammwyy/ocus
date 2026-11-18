@@ -314,16 +314,7 @@ impl FrameReader {
         let display = rotation.dimensions(square.0, square.1);
         let picture = super::fitted_dimensions(display.0, display.1, output.0, output.1);
         let coded = rotation.dimensions(picture.0, picture.1);
-        let scaler = ffmpeg::software::scaling::context::Context::get(
-            decoder.format(),
-            decoder.width(),
-            decoder.height(),
-            ffmpeg::format::Pixel::RGBA,
-            coded.0,
-            coded.1,
-            ffmpeg::software::scaling::flag::Flags::BILINEAR,
-        )
-        .map_err(|error| error.to_string())?;
+        let scaler = super::rgba_scaler(&decoder, coded.0, coded.1)?;
         if source.kind == MediaKind::Video && target > 0 {
             let micros = u128::from(target) * u128::from(fps.1) * 1_000_000 / u128::from(fps.0);
             if let Ok(timestamp) = i64::try_from(micros)
@@ -458,6 +449,92 @@ mod tests {
     use super::*;
     use std::fs;
     use std::process::Command;
+
+    #[test]
+    fn decoded_colors_match_ffmpeg() {
+        ffmpeg::init().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("red.mkv");
+        for (matrix, range, tags) in [
+            ("bt601", "limited", &[][..]),
+            (
+                "bt709",
+                "limited",
+                &[
+                    "-colorspace",
+                    "bt709",
+                    "-color_primaries",
+                    "bt709",
+                    "-color_trc",
+                    "bt709",
+                ][..],
+            ),
+            (
+                "bt709",
+                "full",
+                &["-colorspace", "bt709", "-color_range", "pc"][..],
+            ),
+        ] {
+            assert!(
+                Command::new("ffmpeg")
+                    .args([
+                        "-v",
+                        "error",
+                        "-y",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "color=red:size=64x64:rate=30:duration=1",
+                        "-vf",
+                    ])
+                    .arg(format!(
+                        "scale=in_color_matrix=bt601:out_color_matrix={matrix}:out_range={range}"
+                    ))
+                    .args(tags)
+                    .args(["-c:v", "ffv1"])
+                    .arg(&path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let reference = Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(&path)
+                .arg("-vf")
+                .arg(format!("scale=in_color_matrix={matrix}:in_range={range}"))
+                .args(["-frames:v", "1", "-pix_fmt", "rgba", "-f", "rawvideo", "-"])
+                .output()
+                .unwrap();
+            assert!(reference.status.success());
+            let source = FrameSource {
+                clip_id: 1,
+                path: path.clone(),
+                kind: MediaKind::Video,
+                start: 0,
+                source_start: 0,
+                duration: 30,
+            };
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let frame = FrameReader::open(&source, 0, (30, 1), (64, 64), cancelled.clone())
+                .unwrap()
+                .frame_at(0, &cancelled)
+                .unwrap();
+            let thumbnail = crate::media::thumbnail(&path).unwrap();
+            let expected = &reference.stdout[..4];
+            for (name, actual) in [
+                ("preview", &frame.pixels[..4]),
+                ("thumbnail", &thumbnail.pixels[..4]),
+            ] {
+                assert!(
+                    actual
+                        .iter()
+                        .zip(expected)
+                        .all(|(a, b)| a.abs_diff(*b) <= 2),
+                    "{name} {matrix} {range}: got {actual:?}, FFmpeg reference {expected:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn still_frames_reuse_fitted_pixels() {

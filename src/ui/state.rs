@@ -646,6 +646,19 @@ impl UiState {
     }
 
     fn refresh_after_edit(&self, status: &str) {
+        {
+            let editor = self.editor.borrow();
+            self.clipboard
+                .borrow_mut()
+                .retain(|(_, clip)| match clip.content {
+                    ClipContent::Media { media_id } => editor
+                        .project()
+                        .media()
+                        .iter()
+                        .any(|media| media.id == media_id),
+                    ClipContent::Title(_) => true,
+                });
+        }
         let existing: HashSet<_> = self
             .editor
             .borrow()
@@ -3611,6 +3624,101 @@ mod tests {
         assert_eq!(state.project_path.peek(), None);
         assert_eq!(state.timeline_start.peek(), 0);
         assert_eq!(state.status.peek(), "New project · Not saved");
+    }
+
+    #[test]
+    fn removed_source_does_not_paste_reimported_footage() {
+        use super::super::interaction::Action;
+
+        let state = UiState::new();
+        let media = |path: &str| Media {
+            id: 1,
+            path: path.into(),
+            kind: MediaKind::Video,
+            duration_us: Some(1_000_000),
+            has_audio: false,
+        };
+        assert!(state.edit(Command::ImportMedia(media("red.mp4"))));
+        state.insert_media(1);
+        state.run(Action::Cut);
+        assert_eq!(state.clipboard.borrow().len(), 1);
+        assert!(state.edit(Command::RemoveMedia(1)));
+        assert!(state.edit(Command::ImportMedia(media("blue.mp4"))));
+        state.run(Action::Paste);
+        assert!(
+            state
+                .editor
+                .borrow()
+                .project()
+                .tracks()
+                .iter()
+                .all(|track| track.clips.is_empty())
+        );
+        assert!(state.clipboard.borrow().is_empty());
+    }
+
+    #[test]
+    fn source_removal_prunes_only_matching_clipboard_entries() {
+        use super::super::interaction::Action;
+
+        let state = UiState::new();
+        for id in 1..=2 {
+            assert!(state.edit(Command::ImportMedia(Media {
+                id,
+                path: format!("source-{id}.mp4").into(),
+                kind: MediaKind::Video,
+                duration_us: Some(1_000_000),
+                has_audio: false,
+            })));
+            state.insert_media(id);
+            state.run(Action::Copy);
+            if id == 1 {
+                state.run(Action::Cut);
+            }
+        }
+        let other = state.clipboard.borrow()[0].clone();
+        let mut removed = other.clone();
+        removed.1.content = ClipContent::Media { media_id: 1 };
+        let mut title = other.clone();
+        title.1.content = ClipContent::Title(Title::default());
+        *state.clipboard.borrow_mut() = vec![removed, other.clone(), title.clone()];
+
+        assert!(!state.edit(Command::RemoveMedia(2)));
+        assert_eq!(state.clipboard.borrow().len(), 3);
+        assert!(state.edit(Command::RemoveMedia(1)));
+        assert_eq!(
+            *state.clipboard.borrow(),
+            vec![other.clone(), title.clone()]
+        );
+        state.undo();
+        assert_eq!(
+            *state.clipboard.borrow(),
+            vec![other.clone(), title.clone()]
+        );
+        state.redo();
+        assert_eq!(*state.clipboard.borrow(), vec![other, title]);
+    }
+
+    #[test]
+    fn undo_import_prunes_copied_clips() {
+        use super::super::interaction::Action;
+
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "red.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(1_000_000),
+            has_audio: false,
+        })));
+        state.insert_media(1);
+        state.run(Action::Copy);
+        state.undo();
+        assert_eq!(state.clipboard.borrow().len(), 1);
+        state.undo();
+        assert!(state.clipboard.borrow().is_empty());
+        state.redo();
+        assert!(state.clipboard.borrow().is_empty());
     }
 
     #[test]

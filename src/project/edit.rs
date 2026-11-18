@@ -239,7 +239,14 @@ pub(crate) fn trim_edge(
         _ => None,
     };
     let (start_frame, source_start_frame, duration_frames) = if left {
-        let minimum = if matches!(clip.content, ClipContent::Media { .. }) {
+        let timed_media = match clip.content {
+            ClipContent::Media { media_id } => project
+                .media()
+                .iter()
+                .any(|media| media.id == media_id && media.kind != MediaKind::Image),
+            _ => false,
+        };
+        let minimum = if timed_media {
             clip.start_frame.saturating_sub(clip.source_start_frame)
         } else {
             0
@@ -740,6 +747,79 @@ mod tests {
         assert!(!editor.apply(Command::RenameProject("   ".into())));
         assert!(editor.undo());
         assert!(!editor.undo());
+    }
+
+    #[test]
+    fn left_trim_images_extend_into_gaps_but_timed_media_keep_source_start() {
+        for kind in [MediaKind::Image, MediaKind::Video, MediaKind::Audio] {
+            let mut editor = Editor::new(Project::new("Trim"));
+            assert!(editor.apply(Command::ImportMedia(Media {
+                id: 1,
+                path: "/source".into(),
+                kind,
+                duration_us: Some(10_000_000),
+                has_audio: false,
+            })));
+            let track_id = if kind == MediaKind::Audio { 2 } else { 0 };
+            let clip = Clip {
+                id: 1,
+                start_frame: 100,
+                source_start_frame: 0,
+                duration_frames: 30,
+                content: ClipContent::Media { media_id: 1 },
+                volume: 1.0,
+                muted: false,
+                linked_audio: false,
+            };
+            assert!(editor.apply(Command::InsertClip {
+                track_id,
+                clip: clip.clone(),
+            }));
+            for target in [75, 0] {
+                let start = if kind == MediaKind::Image {
+                    target
+                } else {
+                    100
+                };
+                let command =
+                    super::trim_edge(editor.project(), track_id, 1, true, target).unwrap();
+                assert_eq!(
+                    command,
+                    Command::Trim {
+                        track_id,
+                        clip_id: 1,
+                        start_frame: start,
+                        source_start_frame: 0,
+                        duration_frames: 130 - start,
+                    }
+                );
+                if kind == MediaKind::Image {
+                    assert!(editor.apply(command));
+                    assert!(editor.undo());
+                    assert_eq!(editor.project().tracks()[0].clips[0], clip);
+                }
+            }
+            assert!(editor.apply(Command::InsertClip {
+                track_id,
+                clip: Clip {
+                    id: 2,
+                    start_frame: 20,
+                    duration_frames: 30,
+                    ..clip
+                },
+            }));
+            let command = super::trim_edge(editor.project(), track_id, 1, true, 0).unwrap();
+            assert_eq!(
+                command,
+                Command::Trim {
+                    track_id,
+                    clip_id: 1,
+                    start_frame: if kind == MediaKind::Image { 50 } else { 100 },
+                    source_start_frame: 0,
+                    duration_frames: if kind == MediaKind::Image { 80 } else { 30 },
+                }
+            );
+        }
     }
 
     #[test]

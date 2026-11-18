@@ -326,7 +326,7 @@ impl FrameReader {
         .map_err(|error| error.to_string())?;
         if source.kind == MediaKind::Video && target > 0 {
             let micros = u128::from(target) * u128::from(fps.1) * 1_000_000 / u128::from(fps.0);
-            if let Ok(timestamp) = i64::try_from(micros)
+            if let Some(timestamp) = super::seek_timestamp(&input, micros)
                 && input.seek(timestamp, ..timestamp).is_ok()
             {
                 decoder.flush();
@@ -458,6 +458,51 @@ mod tests {
     use super::*;
     use std::fs;
     use std::process::Command;
+
+    #[test]
+    #[ignore = "release-mode seek benchmark; requires OCUS_SEEK_FIXTURES"]
+    fn benchmark_seek_startup() {
+        ffmpeg::init().unwrap();
+        let root = PathBuf::from(std::env::var("OCUS_SEEK_FIXTURES").unwrap());
+        for name in ["late", "zero"] {
+            let source = FrameSource {
+                clip_id: 1,
+                path: root.join(format!("{name}.mp4")),
+                kind: MediaKind::Video,
+                start: 0,
+                source_start: 0,
+                duration: 1800,
+            };
+            for target in [0, 300, 901, 1500, 1790] {
+                let mut runs = Vec::new();
+                let mut hashes = Vec::new();
+                for _ in 0..3 {
+                    let cancelled = Arc::new(AtomicBool::new(false));
+                    let started = Instant::now();
+                    let mut reader =
+                        FrameReader::open(&source, target, (30, 1), (1280, 720), cancelled.clone())
+                            .unwrap();
+                    let image = reader.frame_at(target, &cancelled).unwrap();
+                    runs.push(started.elapsed());
+                    hashes.push(
+                        image
+                            .pixels
+                            .iter()
+                            .fold(0xcbf29ce484222325_u64, |hash, byte| {
+                                (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+                            }),
+                    );
+                }
+                assert!(hashes.iter().all(|hash| *hash == hashes[0]));
+                runs.sort();
+                println!(
+                    "{name} target={target} median_ms={:.3} hash={:016x}",
+                    runs[1].as_secs_f64() * 1000.0,
+                    hashes[0]
+                );
+            }
+        }
+    }
 
     #[test]
     fn still_frames_reuse_fitted_pixels() {

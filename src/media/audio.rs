@@ -270,7 +270,7 @@ impl AudioReader {
         }
         if offset > 0 {
             let micros = u128::from(offset) * u128::from(fps.1) * 1_000_000 / u128::from(fps.0);
-            if let Ok(timestamp) = i64::try_from(micros)
+            if let Some(timestamp) = super::seek_timestamp(&input, micros)
                 && input.seek(timestamp, ..timestamp).is_ok()
             {
                 decoder.flush();

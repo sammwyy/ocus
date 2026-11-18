@@ -228,6 +228,7 @@ pub(crate) struct UiState {
     pub project_path: Signal<Option<PathBuf>>,
     pub title_text: TextController,
     pub title_duration: TextController,
+    title_duration_synced: Rc<RefCell<String>>,
     pub title_font: TextController,
     pub title_size: TextController,
     pub title_color: TextController,
@@ -368,6 +369,7 @@ impl UiState {
             project_path: Signal::new(None),
             title_text: TextController::default(),
             title_duration: TextController::default(),
+            title_duration_synced: Rc::new(RefCell::new(String::new())),
             title_font: TextController::default(),
             title_size: TextController::default(),
             title_color: TextController::default(),
@@ -571,6 +573,7 @@ impl UiState {
                     .collect(),
             );
         }
+        self.sync_title_duration(false);
         self.revision.update(|revision| *revision += 1);
         let dirty = self.editor.borrow().is_dirty();
         self.dirty.set(dirty);
@@ -850,16 +853,13 @@ impl UiState {
             .find(|track| track.id == track_id)
             .and_then(|track| track.clips.iter().find(|clip| clip.id == clip_id))
             .and_then(|clip| match &clip.content {
-                ClipContent::Title(title) => Some((title.clone(), clip.duration_frames)),
+                ClipContent::Title(title) => Some(title.clone()),
                 ClipContent::Media { .. } => None,
             });
         drop(editor);
-        let Some((title, duration)) = title else {
+        let Some(title) = title else {
             return;
         };
-        let fps = self.frame_rate();
-        self.title_duration
-            .set_value((duration as f64 * f64::from(fps.1) / f64::from(fps.0)).to_string());
         self.title_text.set_value(title.text);
         self.title_font.set_value(title.font_family);
         self.title_size.set_value(title.font_size.to_string());
@@ -867,6 +867,35 @@ impl UiState {
             "#{:02X}{:02X}{:02X}{:02X}",
             title.color[0], title.color[1], title.color[2], title.color[3]
         ));
+    }
+
+    pub(super) fn sync_title_duration(&self, force: bool) {
+        if !force && self.title_duration.peek() != *self.title_duration_synced.borrow() {
+            return;
+        }
+        let Some((track_id, clip_id)) = self.primary_clip() else {
+            return;
+        };
+        let editor = self.editor.borrow();
+        let Some(clip) = editor
+            .project()
+            .tracks()
+            .iter()
+            .find(|track| track.id == track_id)
+            .and_then(|track| track.clips.iter().find(|clip| clip.id == clip_id))
+            .filter(|clip| matches!(clip.content, ClipContent::Title(_)))
+        else {
+            return;
+        };
+        let fps = &editor.project().settings().frame_rate;
+        let value = (clip.duration_frames as f64 * f64::from(fps.denominator)
+            / f64::from(fps.numerator))
+        .to_string();
+        drop(editor);
+        *self.title_duration_synced.borrow_mut() = value.clone();
+        if self.title_duration.peek() != value {
+            self.title_duration.set_value(value);
+        }
     }
 
     pub(super) fn clear_title_gesture(&self) {
@@ -895,6 +924,7 @@ impl UiState {
             self.selected_media.set(None);
             self.sidebar.set(Sidebar::Inspector);
             self.sync_title_controllers();
+            self.sync_title_duration(true);
         }
         if previous.map(|(_, clip)| clip) != primary.map(|(_, clip)| clip) {
             self.reset_source();

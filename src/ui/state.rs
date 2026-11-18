@@ -505,28 +505,24 @@ impl UiState {
             move || {
                 let snapshot = recovery::read(&dir)?;
                 let missing = missing_sources(&snapshot.project);
-                let restore = MessageDialog::new()
-                    .set_level(MessageLevel::Warning)
-                    .set_title("Recover unsaved work?")
-                    .set_description(format!(
-                        "Ocus closed before your changes to “{}” were saved. Restore them now?",
-                        snapshot.project.name()
-                    ))
-                    .set_buttons(MessageButtons::OkCancelCustom(
-                        "Restore".into(),
-                        "Discard".into(),
-                    ))
-                    .show();
-                Some((
-                    snapshot,
-                    missing,
-                    matches!(restore, MessageDialogResult::Ok)
-                        || restore == MessageDialogResult::Custom("Restore".into()),
-                ))
+                Some((snapshot, missing))
             },
             move |result| {
-                state.busy.set(false);
-                if let Some((snapshot, missing, restore)) = result {
+                if let Some((snapshot, missing)) = result {
+                    let result = MessageDialog::new()
+                        .set_level(MessageLevel::Warning)
+                        .set_title("Recover unsaved work?")
+                        .set_description(format!(
+                            "Ocus closed before your changes to “{}” were saved. Restore them now?",
+                            snapshot.project.name()
+                        ))
+                        .set_buttons(MessageButtons::OkCancelCustom(
+                            "Restore".into(),
+                            "Discard".into(),
+                        ))
+                        .show();
+                    let restore = matches!(result, MessageDialogResult::Ok)
+                        || result == MessageDialogResult::Custom("Restore".into());
                     if restore {
                         state.install_project(
                             snapshot.project,
@@ -538,6 +534,7 @@ impl UiState {
                         state.clear_recovery();
                     }
                 }
+                state.busy.set(false);
             },
         );
     }

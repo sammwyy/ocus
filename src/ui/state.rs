@@ -1,8 +1,7 @@
 use super::edits::{self, ClipRef, CopiedClip};
 use super::interaction::{DragState, Gesture, MenuState};
 use crate::export::{self, ExportControl, presets};
-use crate::media::audio::carries_sound;
-use crate::media::audio::{self, AudioPlan, AudioSource, Clock};
+use crate::media::audio::{self, AudioPlan, AudioSource, Clock, carries_sound};
 use crate::media::composite::VisualPlan;
 use crate::media::preview::{
     FrameImage, FrameSource, PreviewEvent, PreviewPlan, StoryboardKey, decode_sequence, storyboard,

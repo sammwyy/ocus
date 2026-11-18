@@ -215,8 +215,7 @@ struct AudioReader {
     first_pts: i64,
     skip_until: u64,
     pending: VecDeque<f32>,
-    position: f64,
-    ratio: f64,
+    resampler: Option<ffmpeg::software::resampling::Context>,
     eof: bool,
     exhausted: bool,
 }
@@ -268,8 +267,21 @@ impl AudioReader {
             )
             .unwrap_or(u64::MAX),
             pending: VecDeque::new(),
-            position: 0.0,
-            ratio: f64::from(rate) / f64::from(RATE),
+            resampler: if rate == RATE {
+                None
+            } else {
+                Some(
+                    ffmpeg::software::resampling::Context::get(
+                        ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
+                        ffmpeg::ChannelLayout::STEREO,
+                        rate,
+                        ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
+                        ffmpeg::ChannelLayout::STEREO,
+                        RATE,
+                    )
+                    .map_err(|error| error.to_string())?,
+                )
+            },
             eof: false,
             exhausted: false,
         }))
@@ -284,35 +296,11 @@ impl AudioReader {
     ) -> Result<usize, String> {
         let mut read = 0;
         while read < frames {
-            let index = self.position as usize;
             let available = self.pending.len() / CHANNELS;
-            if index < available && (index + 1 < available || self.exhausted) {
-                let fraction = (self.position - index as f64) as f32;
-                let (left, right) = if index + 1 < available {
-                    (
-                        self.pending[index * CHANNELS]
-                            + (self.pending[index * CHANNELS + 2] - self.pending[index * CHANNELS])
-                                * fraction,
-                        self.pending[index * CHANNELS + 1]
-                            + (self.pending[index * CHANNELS + 3]
-                                - self.pending[index * CHANNELS + 1])
-                                * fraction,
-                    )
-                } else {
-                    (
-                        self.pending[index * CHANNELS],
-                        self.pending[index * CHANNELS + 1],
-                    )
-                };
-                out.push(left);
-                out.push(right);
-                read += 1;
-                self.position += self.ratio;
-                let used = (self.position as usize).min(available);
-                if used > 0 {
-                    self.pending.drain(..used * CHANNELS);
-                    self.position -= used as f64;
-                }
+            if available > 0 {
+                let count = available.min(frames - read);
+                out.extend(self.pending.drain(..count * CHANNELS));
+                read += count;
             } else if !self.pull(cancelled)? {
                 break;
             }
@@ -347,10 +335,58 @@ impl AudioReader {
                     let skip = self.skip_until.saturating_sub(start).min(frames as u64) as usize;
                     stereo.drain(..skip * CHANNELS);
                 }
-                self.pending.extend(stereo);
+                if stereo.is_empty() {
+                    continue;
+                }
+                if let Some(resampler) = &mut self.resampler {
+                    let mut input = ffmpeg::frame::Audio::new(
+                        resampler.input().format,
+                        stereo.len() / CHANNELS,
+                        ffmpeg::ChannelLayout::STEREO,
+                    );
+                    input.set_rate(resampler.input().rate);
+                    for (frame, samples) in input
+                        .plane_mut::<(f32, f32)>(0)
+                        .iter_mut()
+                        .zip(stereo.as_chunks::<CHANNELS>().0)
+                    {
+                        *frame = (samples[0], samples[1]);
+                    }
+                    let mut output = ffmpeg::frame::Audio::empty();
+                    resampler
+                        .run(&input, &mut output)
+                        .map_err(|error| error.to_string())?;
+                    self.pending.extend(
+                        output
+                            .plane::<(f32, f32)>(0)
+                            .iter()
+                            .flat_map(|&(left, right)| [left, right]),
+                    );
+                } else {
+                    self.pending.extend(stereo);
+                }
                 return Ok(true);
             }
             if self.eof {
+                if let Some(resampler) = &mut self.resampler {
+                    let mut output = ffmpeg::frame::Audio::new(
+                        resampler.output().format,
+                        CHUNK,
+                        ffmpeg::ChannelLayout::STEREO,
+                    );
+                    resampler
+                        .flush(&mut output)
+                        .map_err(|error| error.to_string())?;
+                    if output.samples() > 0 {
+                        self.pending.extend(
+                            output
+                                .plane::<(f32, f32)>(0)
+                                .iter()
+                                .flat_map(|&(left, right)| [left, right]),
+                        );
+                        return Ok(true);
+                    }
+                }
                 self.exhausted = true;
                 return Ok(false);
             }
@@ -631,6 +667,102 @@ mod tests {
         assert_eq!(heard, 19_200);
         assert!(loud > 8_000, "{loud}");
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn drains_resampled_audio_once_including_the_tail() {
+        ffmpeg::init().unwrap();
+        for rate in [24_000, 96_000, 176_400] {
+            let path = std::env::temp_dir()
+                .join(format!("ocus-audio-tail-{}-{rate}.wav", std::process::id()));
+            write_wav(&path, rate, 2, &vec![8_000; rate as usize / 5 * CHANNELS]);
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let mut reader = AudioReader::open(&path, 0, (30, 1), cancelled.clone())
+                .unwrap()
+                .unwrap();
+            let mut samples = Vec::new();
+            assert_eq!(
+                reader.read(&mut samples, 10_000, &cancelled).unwrap(),
+                9_600
+            );
+            assert_eq!(samples.len(), 19_200);
+            assert!(samples[samples.len() - 1] > 0.1);
+            assert_eq!(reader.read(&mut samples, 1, &cancelled).unwrap(), 0);
+            let mut trimmed = AudioReader::open(&path, 6, (30, 1), cancelled.clone())
+                .unwrap()
+                .unwrap();
+            assert_eq!(trimmed.read(&mut Vec::new(), 1, &cancelled).unwrap(), 0);
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn resampling_rejects_aliases_and_preserves_the_passband() {
+        let mut amplitudes = Vec::new();
+        for frequency in [30_000, 1_000] {
+            let path = std::env::temp_dir().join(format!(
+                "ocus-spectrum-{}-{frequency}.wav",
+                std::process::id()
+            ));
+            let samples: Vec<i16> = (0..19_200)
+                .flat_map(|index| {
+                    let phase =
+                        std::f64::consts::TAU * f64::from(frequency) * f64::from(index) / 96_000.0;
+                    [(phase.sin() * 16_384.0) as i16; CHANNELS]
+                })
+                .collect();
+            write_wav(&path, 96_000, 2, &samples);
+            let queue = Arc::new(AudioQueue::new());
+            let plan = AudioPlan {
+                sources: vec![AudioSource {
+                    path: path.clone(),
+                    start: 0,
+                    source_start: 0,
+                    duration: 6,
+                    volume: 1.0,
+                }],
+                end: 6,
+                fps: (30, 1),
+            };
+            let worker = {
+                let queue = queue.clone();
+                std::thread::spawn(move || feed(&plan, 0, queue, Arc::new(AtomicBool::new(false))))
+            };
+            worker.join().unwrap().unwrap();
+            let mut output = Vec::new();
+            while let Some(sample) = queue.pop() {
+                output.push(sample);
+            }
+            assert_eq!(output.len(), 19_200);
+            // Exclude filter startup and EOF transients; retain whole tone periods.
+            let frames = &output.as_chunks::<CHANNELS>().0[480..9_120];
+            let bin = if frequency == 30_000 {
+                18_000
+            } else {
+                frequency
+            };
+            let (real, imaginary) =
+                frames
+                    .iter()
+                    .enumerate()
+                    .fold((0.0, 0.0), |(real, imaginary), (index, frame)| {
+                        let phase =
+                            std::f64::consts::TAU * f64::from(bin) * index as f64 / f64::from(RATE);
+                        (
+                            real + f64::from(frame[0]) * phase.cos(),
+                            imaginary + f64::from(frame[0]) * phase.sin(),
+                        )
+                    });
+            let amplitude = 2.0 * real.hypot(imaginary) / frames.len() as f64;
+            println!(
+                "{frequency} Hz input: output amplitude {amplitude:.9}, gain {:.2} dB",
+                20.0 * (amplitude / 0.5).log10()
+            );
+            amplitudes.push(amplitude);
+            fs::remove_file(path).unwrap();
+        }
+        assert!(amplitudes[0] < 0.0005, "alias amplitude: {}", amplitudes[0]);
+        assert!((amplitudes[1] / 0.5 - 1.0).abs() < 0.01);
     }
 
     #[test]

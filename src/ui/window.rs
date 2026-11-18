@@ -116,7 +116,7 @@ fn adjust_timing(state: &UiState, source: bool, seconds: bool, increase: bool) {
     };
     let fps = state.frame_rate();
     let step = if seconds {
-        (f64::from(fps.0) / f64::from(fps.1)).round().max(1.0) as u64
+        state.frames_per_second_step()
     } else {
         1
     };

@@ -1,12 +1,9 @@
 use crate::project::Project;
 use crate::project::export_settings::{AudioCodec, Container, ExportSettings, VideoCodec};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
 const MAX_PRESET_BYTES: u64 = 64 * 1024;
 const BUILTIN_NAMES: [&str; 8] = [
     "Project original",
@@ -151,45 +148,48 @@ pub fn save(path: &Path, library: &PresetLibrary) -> Result<(), String> {
     let parent = path.parent().ok_or("Invalid preset path")?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let name = path.file_name().ok_or("Invalid preset filename")?;
-    for _ in 0..8 {
-        let temporary = parent.join(format!(
-            ".{}.{}.{}.tmp",
-            name.to_string_lossy(),
-            std::process::id(),
-            NEXT_FILE.fetch_add(1, Ordering::Relaxed)
-        ));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-        {
-            Ok(mut file) => {
-                let result = (|| {
-                    file.write_all(&bytes).map_err(|error| error.to_string())?;
-                    file.sync_all().map_err(|error| error.to_string())?;
-                    drop(file);
-                    fs::rename(&temporary, path).map_err(|error| error.to_string())?;
-                    #[cfg(unix)]
-                    fs::File::open(parent)
-                        .and_then(|directory| directory.sync_all())
-                        .map_err(|error| error.to_string())?;
-                    Ok(())
-                })();
-                if result.is_err() {
-                    let _ = fs::remove_file(&temporary);
-                }
-                return result;
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-    Err("Could not allocate preset file".into())
+    crate::atomic_file::write(path, parent, name, &bytes, "Could not allocate preset file")
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn save_preserves_atomic_write_behavior() {
+        let directory = std::env::temp_dir().join(format!(
+            "ocus-presets-atomic-{}-{}",
+            std::process::id(),
+            NEXT_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let parent = directory.join("nested");
+        let path = parent.join("presets.json");
+        let mut library = PresetLibrary::default();
+        save(&path, &library).unwrap();
+        assert!(load(&path).unwrap().presets.is_empty());
+        library
+            .insert(
+                "Custom".into(),
+                builtins(&Project::new("Test"))[0].settings.clone(),
+            )
+            .unwrap();
+        save(&path, &library).unwrap();
+        assert_eq!(load(&path).unwrap().presets, library.presets);
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 1);
+        let original = fs::read(&path).unwrap();
+        let target = parent.join("directory.json");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("keep"), b"untouched").unwrap();
+        assert!(save(&target, &library).is_err());
+        assert_eq!(fs::read(target.join("keep")).unwrap(), b"untouched");
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 2);
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn builtin_presets_cover_landscape_portrait_and_alternate_formats() {

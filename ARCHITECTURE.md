@@ -11,6 +11,7 @@ justify a separate crate. The v0.1 scope is in [ROADMAP.md](ROADMAP.md).
 src/
   main.rs           executable entry point
   app.rs            starts CreamUI and connects the project to the window
+  atomic_file.rs    shared same-directory atomic writes for project and preset storage
   settings.rs       editor appearance preferences in the platform config directory
   project/
     mod.rs          saved project and video settings

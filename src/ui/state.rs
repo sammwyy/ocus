@@ -11,7 +11,7 @@ use crate::playback::{self, Session};
 use crate::project::export_settings::{
     AudioCodec, Container, EncodingSpeed, ExportSettings, LastExport, VideoCodec,
 };
-use crate::project::{Command, Editor, Project, store};
+use crate::project::{Command, Editor, Project, recovery, store};
 use crate::settings::{self, Settings, ThemeMode};
 use crate::timeline::{Clip, ClipContent, Title, TrackKind};
 use creamui::core::{Modifiers, Point, Rect, RgbaImage};
@@ -75,6 +75,15 @@ const SAVE_CHOICE: &str = "Save";
 const DISCARD_CHOICE: &str = "Don't Save";
 const CANCEL_CHOICE: &str = "Cancel";
 const MAX_THUMBNAILS: usize = 256;
+
+fn missing_sources(project: &Project) -> HashSet<u64> {
+    project
+        .media()
+        .iter()
+        .filter(|media| !media.path.is_file())
+        .map(|media| media.id)
+        .collect()
+}
 
 fn folder_matches(
     sources: &[Media],
@@ -213,6 +222,8 @@ pub(super) struct TooltipState {
 
 #[derive(Clone)]
 pub(crate) struct UiState {
+    autosaver: Option<Rc<recovery::Autosaver>>,
+    recovery_dir: Option<PathBuf>,
     pub editor: Rc<RefCell<Editor>>,
     pub revision: Signal<u64>,
     pub ui_revision: Signal<u64>,
@@ -348,12 +359,25 @@ impl UiState {
     }
 
     pub fn new() -> Self {
+        Self::with_recovery_dir(if cfg!(test) {
+            None
+        } else {
+            recovery::directory()
+        })
+    }
+
+    fn with_recovery_dir(recovery_dir: Option<PathBuf>) -> Self {
         let settings = settings::path()
             .and_then(|path| settings::load(&path).ok())
             .unwrap_or_default();
         let export_directory =
             settings::export_directory(settings.last_export_directory.as_deref());
         Self {
+            autosaver: recovery_dir
+                .clone()
+                .map(recovery::Autosaver::new)
+                .map(Rc::new),
+            recovery_dir,
             editor: Rc::new(RefCell::new(Editor::new(Project::new("Untitled")))),
             revision: Signal::new(0),
             ui_revision: Signal::new(0),
@@ -470,6 +494,72 @@ impl UiState {
         *self.window.borrow_mut() = Some(window);
         self.request_preview();
         self.request_source_preview();
+        self.offer_recovery();
+    }
+
+    fn offer_recovery(&self) {
+        let (Some(app), Some(dir)) = (self.app.borrow().clone(), self.recovery_dir.clone()) else {
+            return;
+        };
+        let revision = self.revision.peek();
+        let state = self.clone();
+        app.spawn_background(
+            move || {
+                let snapshot = recovery::read(&dir)?;
+                let missing = missing_sources(&snapshot.project);
+                Some((snapshot, missing))
+            },
+            move |result| {
+                state.finish_recovery(revision, result);
+            },
+        );
+    }
+
+    fn finish_recovery(&self, revision: u64, result: Option<(recovery::Snapshot, HashSet<u64>)>) {
+        if self.busy.peek() || self.revision.peek() != revision {
+            return;
+        }
+        if let Some((snapshot, missing)) = result {
+            let result = MessageDialog::new()
+                .set_level(MessageLevel::Warning)
+                .set_title("Recover unsaved work?")
+                .set_description(format!(
+                    "Ocus closed before your changes to “{}” were saved. Restore them now?",
+                    snapshot.project.name()
+                ))
+                .set_buttons(MessageButtons::OkCancelCustom(
+                    "Restore".into(),
+                    "Discard".into(),
+                ))
+                .show();
+            let restore = matches!(result, MessageDialogResult::Ok)
+                || result == MessageDialogResult::Custom("Restore".into());
+            if restore {
+                self.install_project(snapshot.project, snapshot.original_path, true, missing);
+            } else {
+                self.clear_recovery();
+            }
+        }
+    }
+
+    fn clear_recovery(&self) {
+        if let Some(saver) = &self.autosaver {
+            saver.clear();
+        }
+    }
+
+    fn update_recovery(&self) {
+        if let Some(saver) = &self.autosaver {
+            let editor = self.editor.borrow();
+            if editor.is_dirty() {
+                saver.write(recovery::Snapshot {
+                    project: editor.project().clone(),
+                    original_path: self.project_path.peek(),
+                });
+            } else {
+                saver.clear();
+            }
+        }
     }
 
     fn update_settings(&self, settings: Settings) {
@@ -577,6 +667,7 @@ impl UiState {
         self.revision.update(|revision| *revision += 1);
         let dirty = self.editor.borrow().is_dirty();
         self.dirty.set(dirty);
+        self.update_recovery();
         self.refresh_missing_media();
         let checkpoint = if dirty {
             "Unsaved changes"
@@ -1477,7 +1568,10 @@ impl UiState {
         after_save: impl FnOnce(&Self) + 'static,
     ) -> bool {
         match choice {
-            UnsavedChoice::Discard => true,
+            UnsavedChoice::Discard => {
+                self.clear_recovery();
+                true
+            }
             UnsavedChoice::Cancel => false,
             UnsavedChoice::Save => {
                 self.save_then(Some(Box::new(after_save)));
@@ -1493,6 +1587,7 @@ impl UiState {
     }
 
     fn replace_project(&self, project: Project) {
+        self.clear_recovery();
         *self.editor.borrow_mut() = Editor::new(project);
         self.clipboard.borrow_mut().clear();
     }
@@ -1549,12 +1644,7 @@ impl UiState {
                 let path = path.clone();
                 move || {
                     store::load(&path).map(|project| {
-                        let missing = project
-                            .media()
-                            .iter()
-                            .filter(|media| !media.path.is_file())
-                            .map(|media| media.id)
-                            .collect::<HashSet<_>>();
+                        let missing = missing_sources(&project);
                         (project, missing)
                     })
                 }
@@ -1563,36 +1653,7 @@ impl UiState {
                 state.busy.set(false);
                 match result {
                     Ok((project, missing)) if state.revision.peek() == revision => {
-                        let sources: Vec<_> = project
-                            .media()
-                            .iter()
-                            .filter(|media| {
-                                media.kind != MediaKind::Audio && !missing.contains(&media.id)
-                            })
-                            .map(|media| media.path.clone())
-                            .take(MAX_THUMBNAILS)
-                            .collect();
-                        state.replace_project(project);
-                        state.export_modal.set(false);
-                        state.thumbnails.borrow_mut().clear();
-                        state.cancel_storyboards();
-                        state.storyboards.borrow_mut().clear();
-                        state.project_path.set(Some(path));
-                        state.reset_monitors();
-                        state.media_query.set_value(String::new());
-                        state.media_filter.set(MediaFilter::All);
-                        state.revision.update(|revision| *revision += 1);
-                        state.dirty.set(false);
-                        state.sidebar.set(Sidebar::Media);
-                        state.status.set(if missing.is_empty() {
-                            "Project opened".into()
-                        } else {
-                            format!("Project opened · {} media files missing", missing.len())
-                        });
-                        state.missing_media.set(missing);
-                        state.load_thumbnails(sources);
-                        state.queue_storyboards();
-                        state.request_preview();
+                        state.install_project(project, Some(path), false, missing);
                     }
                     Ok(_) => state
                         .status
@@ -1605,6 +1666,53 @@ impl UiState {
 
     pub fn save(&self) {
         self.save_then(None);
+    }
+
+    fn install_project(
+        &self,
+        project: Project,
+        path: Option<PathBuf>,
+        recovered: bool,
+        missing: HashSet<u64>,
+    ) {
+        let sources = project
+            .media()
+            .iter()
+            .filter(|media| media.kind != MediaKind::Audio && !missing.contains(&media.id))
+            .map(|media| media.path.clone())
+            .take(MAX_THUMBNAILS)
+            .collect();
+        if recovered {
+            *self.editor.borrow_mut() = Editor::recovered(project);
+            self.clipboard.borrow_mut().clear();
+        } else {
+            self.replace_project(project);
+        }
+        self.export_modal.set(false);
+        self.thumbnails.borrow_mut().clear();
+        self.cancel_storyboards();
+        self.storyboards.borrow_mut().clear();
+        self.project_path.set(path);
+        self.reset_monitors();
+        self.media_query.set_value(String::new());
+        self.media_filter.set(MediaFilter::All);
+        self.revision.update(|revision| *revision += 1);
+        self.dirty.set(recovered);
+        self.sidebar.set(Sidebar::Media);
+        self.missing_media.set(missing);
+        self.status.set(if recovered {
+            "Restored unsaved work · Save to keep it".into()
+        } else if self.missing_media.peek().is_empty() {
+            "Project opened".into()
+        } else {
+            format!(
+                "Project opened · {} media files missing",
+                self.missing_media.peek().len()
+            )
+        });
+        self.load_thumbnails(sources);
+        self.queue_storyboards();
+        self.request_preview();
     }
 
     fn save_then(&self, after_save: Option<AfterSave>) {
@@ -1725,6 +1833,7 @@ impl UiState {
                 self.project_path.set(Some(path));
                 let dirty = self.editor.borrow().is_dirty();
                 self.dirty.set(dirty);
+                self.update_recovery();
                 if dirty {
                     "Saved previous version · Unsaved changes".into()
                 } else {
@@ -2739,6 +2848,79 @@ fn import_summary(imported: usize, total: usize, errors: &[(PathBuf, String)]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_recovery_check_leaves_editor_available_and_does_not_finish_other_work() {
+        let state = UiState::new();
+        state.finish_recovery(state.revision.peek(), None);
+        assert!(!state.busy.peek());
+        assert!(state.add_title());
+        state.busy.set(true);
+        state.finish_recovery(state.revision.peek(), None);
+        assert!(state.busy.peek());
+    }
+
+    #[test]
+    fn late_recovery_does_not_replace_work_started_during_startup() {
+        let state = UiState::new();
+        let revision = state.revision.peek();
+        assert!(state.add_title());
+        state.finish_recovery(
+            revision,
+            Some((
+                recovery::Snapshot {
+                    original_path: Some("previous.ocus".into()),
+                    project: Project::new("Previous"),
+                },
+                HashSet::new(),
+            )),
+        );
+        assert_eq!(state.editor.borrow().project().name(), "Untitled");
+        assert_eq!(state.editor.borrow().project().tracks()[0].clips.len(), 1);
+        assert!(state.project_path.peek().is_none());
+        assert!(!state.busy.peek());
+    }
+
+    #[test]
+    fn recovery_tracks_edits_save_discard_and_restore() {
+        let dir = std::env::temp_dir().join(format!("ocus-ui-recovery-{}", std::process::id()));
+        let mut state = UiState::with_recovery_dir(Some(dir.clone()));
+        assert!(state.edit(Command::RenameProject("Recovered film".into())));
+        drop(state.autosaver.take());
+        let snapshot = recovery::read(&dir).unwrap();
+        assert_eq!(snapshot.project.name(), "Recovered film");
+
+        state.autosaver = Some(Rc::new(recovery::Autosaver::new(dir.clone())));
+        let revision = state.editor.borrow().revision();
+        state.finish_save("film.ocus".into(), revision, None, None, Ok(()));
+        drop(state.autosaver.take());
+        assert!(recovery::read(&dir).is_none());
+
+        state.autosaver = Some(Rc::new(recovery::Autosaver::new(dir.clone())));
+        assert!(state.edit(Command::RenameProject("Discard me".into())));
+        assert!(state.apply_unsaved_choice(UnsavedChoice::Discard, |_| {}));
+        drop(state.autosaver.take());
+        assert!(recovery::read(&dir).is_none());
+
+        let original = PathBuf::from("original.ocus");
+        state.install_project(
+            snapshot.project,
+            Some(original.clone()),
+            true,
+            HashSet::new(),
+        );
+        assert!(state.editor.borrow().is_dirty());
+        assert!(state.dirty.peek());
+        assert_eq!(state.project_path.peek(), Some(original));
+        assert_eq!(
+            state.status.peek(),
+            "Restored unsaved work · Save to keep it"
+        );
+        let revision = state.editor.borrow().revision();
+        state.finish_save("original.ocus".into(), revision, None, None, Ok(()));
+        assert!(!state.editor.borrow().is_dirty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn tooltip_resources_are_released_with_removed_controls_and_projects() {

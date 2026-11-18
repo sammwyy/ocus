@@ -17,6 +17,7 @@ src/
     export_settings.rs  version-compatible per-project export settings
     edit.rs         project commands and undo/redo history
     format.rs       versioned JSON string format
+    recovery.rs     ordered background autosave in the app data directory, with startup restore
   media.rs          source references, probing and thumbnail decoding
   media/preview.rs  background video decoding and frame-accurate seek
   media/composite.rs  shared preview/export visual composition

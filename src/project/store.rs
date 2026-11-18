@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
-const MAX_PROJECT_BYTES: u64 = 16 * 1024 * 1024;
+pub(super) const MAX_PROJECT_BYTES: u64 = 16 * 1024 * 1024;
 
 pub fn load(path: &Path) -> io::Result<Project> {
     let mut bytes = Vec::new();
@@ -36,6 +36,10 @@ pub fn save(path: &Path, project: &Project) -> io::Result<()> {
             "Project file is too large",
         ));
     }
+    atomic_write(path, data.as_bytes())
+}
+
+pub(super) fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -71,7 +75,7 @@ pub fn save(path: &Path, project: &Project) -> io::Result<()> {
         )
     })?;
     let result = (|| {
-        file.write_all(data.as_bytes())?;
+        file.write_all(data)?;
         file.sync_all()?;
         drop(file);
         fs::rename(&temporary, path)?;

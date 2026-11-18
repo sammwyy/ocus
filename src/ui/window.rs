@@ -511,11 +511,24 @@ fn run_width(value: &str, size: f32, family: &str, bold: bool) -> f32 {
     .map_or(0.0, |line| line.width)
 }
 
-fn title_box(title: &Title, rect: Rect, aspect: f32, resolution: (u32, u32)) -> Rect {
+fn program_frame(rect: Rect, aspect: f32) -> Rect {
     let width = rect.width.min(rect.height * aspect);
     let height = rect.height.min(rect.width / aspect);
-    let origin_x = rect.x + (rect.width - width) / 2.0;
-    let origin_y = rect.y + (rect.height - height) / 2.0;
+    Rect {
+        x: rect.x + (rect.width - width) / 2.0,
+        y: rect.y + (rect.height - height) / 2.0,
+        width,
+        height,
+    }
+}
+
+fn title_box(title: &Title, bounds: Rect, resolution: (u32, u32)) -> Rect {
+    let Rect {
+        x,
+        y,
+        width,
+        height,
+    } = bounds;
     let size = (title.font_size * width / resolution.0.max(1) as f32)
         .max(1.0)
         .min(height * 2.0);
@@ -533,26 +546,32 @@ fn title_box(title: &Title, rect: Rect, aspect: f32, resolution: (u32, u32)) -> 
             line_width += run_width(part, size, &family, run.bold);
         }
     }
-    let box_width = (longest.max(line_width) + 16.0).clamp(32.0, width.max(32.0));
-    let box_height = (lines as f32 * size * 1.35 + 10.0).min(height);
+    let box_width = (longest.max(line_width) + 16.0).max(32.0);
+    let box_height = lines as f32 * size * 1.35 + 10.0;
     Rect {
-        x: (origin_x + width * title.x - box_width / 2.0)
-            .clamp(origin_x, origin_x + (width - box_width).max(0.0)),
-        y: (origin_y + height * title.y - box_height / 2.0)
-            .clamp(origin_y, origin_y + (height - box_height).max(0.0)),
+        x: x + width * title.x - box_width / 2.0,
+        y: y + height * title.y - box_height / 2.0,
         width: box_width,
         height: box_height,
     }
 }
 
+fn title_resize_handle(selection: Rect, bounds: Rect) -> Rect {
+    // Keep the handle reachable when the selection corner is clipped.
+    let size = 10.0_f32.min(bounds.height);
+    Rect {
+        x: (selection.x + selection.width + size / 2.0).min(bounds.x + bounds.width) - size,
+        y: (selection.y + selection.height + size / 2.0).min(bounds.y + bounds.height) - size,
+        width: size,
+        height: size,
+    }
+}
+
 impl ProgramCanvas {
-    fn title_box(&self, rect: Rect) -> Option<Rect> {
-        if rect.width.min(rect.height * self.aspect) <= 16.0 || rect.height <= 0.0 {
-            return None;
-        }
+    fn selected_title_box(&self, bounds: Rect) -> Option<Rect> {
         let selected = self.selected?;
         let title = &self.titles.iter().find(|(key, _)| *key == selected)?.1;
-        Some(title_box(title, rect, self.aspect, self.resolution))
+        Some(title_box(title, bounds, self.resolution))
     }
 }
 
@@ -567,14 +586,8 @@ impl Widget for ProgramCanvas {
                 .aspect_ratio(self.aspect)
                 .paint(painter, rect);
         }
-        let width = rect.width.min(rect.height * self.aspect);
-        let height = rect.height.min(rect.width / self.aspect);
-        let bounds = Rect {
-            x: rect.x + (rect.width - width) / 2.0,
-            y: rect.y + (rect.height - height) / 2.0,
-            width,
-            height,
-        };
+        let bounds = program_frame(rect, self.aspect);
+        let (width, height) = (bounds.width, bounds.height);
         if width <= 16.0 || height <= 0.0 {
             return;
         }
@@ -674,18 +687,11 @@ impl Widget for ProgramCanvas {
                 TextAlign::Center,
             );
         }
-        if let Some(box_rect) = self.title_box(rect) {
+        if let Some(box_rect) = self.selected_title_box(bounds) {
+            painter.push_clip_rounded(bounds, 0.0);
             painter.stroke_rect(box_rect, accent(), 1.5, 0.0);
-            painter.fill_rect(
-                Rect {
-                    x: box_rect.x + box_rect.width - 5.0,
-                    y: box_rect.y + box_rect.height - 5.0,
-                    width: 10.0,
-                    height: 10.0,
-                },
-                accent(),
-                2.0,
-            );
+            painter.fill_rect(title_resize_handle(box_rect, bounds), accent(), 2.0);
+            painter.pop_clip();
         }
     }
 
@@ -701,19 +707,16 @@ impl Widget for ProgramCanvas {
         let aspect = self.aspect;
         let resolution = self.resolution;
         Some(Rc::new(move |pointer, rect| {
-            if rect.width.min(rect.height * aspect) <= 16.0 || rect.height <= 0.0 {
+            let bounds = program_frame(rect, aspect);
+            if bounds.width <= 16.0 || bounds.height <= 0.0 {
                 return;
             }
-            let box_rect = title_box(&title, rect, aspect, resolution);
+            let box_rect = title_box(&title, bounds, resolution);
             let position = Point {
                 x: pointer.x + rect.x,
                 y: pointer.y + rect.y,
             };
-            if position.x < box_rect.x - 5.0
-                || position.x > box_rect.x + box_rect.width + 5.0
-                || position.y < box_rect.y - 5.0
-                || position.y > box_rect.y + box_rect.height + 5.0
-            {
+            if !bounds.contains(position) || !box_rect.inflate(5.0).contains(position) {
                 return;
             }
             state.pause();
@@ -721,8 +724,9 @@ impl Widget for ProgramCanvas {
                 clip: selected,
                 title: title.clone(),
                 pointer,
-                resize: position.x > box_rect.x + box_rect.width - 12.0
-                    && position.y > box_rect.y + box_rect.height - 12.0,
+                resize: title_resize_handle(box_rect, bounds)
+                    .inflate(7.0)
+                    .contains(position),
             });
         }))
     }
@@ -4491,7 +4495,7 @@ mod tests {
             painter
                 .strokes
                 .iter()
-                .any(|(drawn, _)| *drawn == canvas.title_box(rect).unwrap())
+                .any(|(drawn, _)| *drawn == canvas.selected_title_box(rect).unwrap())
         );
         let program_x = |painter: &TestPainter| {
             painter
@@ -4530,7 +4534,7 @@ mod tests {
             titles: vec![((0, 1), resized.clone())],
             ..canvas
         };
-        let box_rect = canvas.title_box(rect).unwrap();
+        let box_rect = canvas.selected_title_box(rect).unwrap();
         let handle = at(box_rect.x + box_rect.width, box_rect.y + box_rect.height);
         canvas.on_drag_start().unwrap()(handle, rect);
         canvas.on_drag().unwrap()(at(handle.x + 32.0, handle.y), rect);
@@ -4550,6 +4554,95 @@ mod tests {
         canvas.on_drag().unwrap()(at(handle.x, handle.y + 18.0), rect);
         canvas.on_drag_end().unwrap()();
         assert!(current().font_size > resized.font_size);
+    }
+
+    #[test]
+    fn preview_title_selection_follows_text_at_frame_edges() {
+        let state = UiState::new();
+        let frame = Rect {
+            x: 40.0,
+            y: 100.0,
+            width: 640.0,
+            height: 360.0,
+        };
+        let canvas_rect = Rect {
+            y: 40.0,
+            height: 480.0,
+            ..frame
+        };
+        for (x, y) in [(0.0, 0.5), (1.0, 0.5), (0.5, 0.0), (0.5, 1.0), (1.0, 1.0)] {
+            let canvas = ProgramCanvas {
+                slot: GpuFrameSlot::new(),
+                picture: false,
+                picture_unavailable: false,
+                titles: vec![(
+                    (0, 1),
+                    Title {
+                        text: "Title at frame edge".into(),
+                        font_size: 192.0,
+                        x,
+                        y,
+                        ..Title::default()
+                    },
+                )],
+                selected: Some((0, 1)),
+                state: state.clone(),
+                aspect: 16.0 / 9.0,
+                resolution: (1920, 1080),
+            };
+            let mut painter = TestPainter::default();
+            creamui::reactive::with_context_scope(|| {
+                creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
+                    creamui::Theme::dark(),
+                ));
+                canvas.paint(&mut painter, canvas_rect);
+            });
+            let (_, text) = painter.bounds[0];
+            let (selection, _) = painter.strokes[0];
+            assert_eq!(
+                selection,
+                Rect {
+                    x: text.x - 8.0,
+                    y: text.y - 5.0,
+                    width: text.width + 16.0,
+                    height: text.height + 10.0,
+                }
+            );
+
+            let drag = canvas.on_drag_start().unwrap();
+            let drag_at = |x, y| {
+                drag(
+                    Point {
+                        x: x - canvas_rect.x,
+                        y: y - canvas_rect.y,
+                    },
+                    canvas_rect,
+                )
+            };
+            let visible = text.intersect(frame).unwrap();
+            drag_at(
+                visible.x + visible.width / 2.0,
+                visible.y + visible.height / 2.0,
+            );
+            assert!(!state.title_gesture.borrow_mut().take().unwrap().resize);
+
+            let (handle, _) = painter.fills[0];
+            assert_eq!(handle.intersect(frame), Some(handle));
+            drag_at(
+                handle.x + handle.width / 2.0,
+                handle.y + handle.height / 2.0,
+            );
+            assert!(state.title_gesture.borrow_mut().take().unwrap().resize);
+
+            if x == 0.0 {
+                drag_at(text.x + text.width + 24.0, text.y + text.height / 2.0);
+                assert!(state.title_gesture.borrow().is_none());
+            }
+            if y == 0.0 {
+                drag_at(text.x + text.width / 2.0, frame.y - 8.0);
+                assert!(state.title_gesture.borrow().is_none());
+            }
+        }
     }
 
     #[test]

@@ -113,9 +113,11 @@ impl Default for AudioQueue {
     }
 }
 
-/// Decodes every source overlapping `start`, mixes them to 48 kHz stereo and
-/// feeds the queue a little ahead of playback until the sequence ends. Gaps
-/// and exhausted sources contribute silence so output stays timeline-aligned.
+/// Mixes every source overlapping `start` to 48 kHz stereo and feeds the
+/// queue a little ahead of playback until the sequence ends. Each source is
+/// opened when its first chunk is mixed and released after its last, so only
+/// audible clips hold decoders. Gaps and exhausted sources contribute silence
+/// so output stays timeline-aligned.
 pub fn feed(
     plan: &AudioPlan,
     start: u64,
@@ -133,34 +135,31 @@ pub fn feed(
         )
         .unwrap_or(u64::MAX)
     };
-    struct Slot {
-        reader: AudioReader,
+    struct Slot<'a> {
+        path: &'a Path,
+        offset: u64,
+        reader: Option<AudioReader>,
         begin: u64,
         end: u64,
         volume: f32,
     }
-    let mut slots = Vec::new();
-    let mut first_error = None;
-    for source in &plan.sources {
-        let from = source.start.max(start);
-        let until = source.start.saturating_add(source.duration).min(plan.end);
-        if from >= until {
-            continue;
-        }
-        let offset = source.source_start + from - source.start;
-        match AudioReader::open(&source.path, offset, plan.fps, cancelled.clone()) {
-            Ok(Some(reader)) => slots.push(Slot {
-                reader,
+    let mut slots: Vec<Slot> = plan
+        .sources
+        .iter()
+        .filter_map(|source| {
+            let from = source.start.max(start);
+            let until = source.start.saturating_add(source.duration).min(plan.end);
+            (from < until).then(|| Slot {
+                path: &source.path,
+                offset: source.source_start + from - source.start,
+                reader: None,
                 begin: to_samples(from),
                 end: to_samples(until),
                 volume: source.volume,
-            }),
-            Ok(None) => {}
-            Err(error) => {
-                first_error.get_or_insert(error);
-            }
-        }
-    }
+            })
+        })
+        .collect();
+    let mut first_error = None;
     let end = to_samples(plan.end);
     let mut position = to_samples(start);
     while position < end && !cancelled.load(Ordering::Relaxed) {
@@ -172,11 +171,25 @@ pub fn feed(
             if from >= until {
                 continue;
             }
+            let reader = match &mut slot.reader {
+                Some(reader) => reader,
+                None => {
+                    match AudioReader::open(slot.path, slot.offset, plan.fps, cancelled.clone()) {
+                        Ok(Some(reader)) => slot.reader.insert(reader),
+                        Ok(None) => {
+                            slot.end = from;
+                            continue;
+                        }
+                        Err(error) => {
+                            first_error.get_or_insert(error);
+                            slot.end = from;
+                            continue;
+                        }
+                    }
+                }
+            };
             let mut sound = Vec::with_capacity((until - from) as usize * CHANNELS);
-            match slot
-                .reader
-                .read(&mut sound, (until - from) as usize, &cancelled)
-            {
+            match reader.read(&mut sound, (until - from) as usize, &cancelled) {
                 Ok(_) => {
                     for (index, frame) in sound.as_chunks::<CHANNELS>().0.iter().enumerate() {
                         let offset = (from - position) as usize * CHANNELS + index * CHANNELS;
@@ -190,6 +203,7 @@ pub fn feed(
                 }
             }
         }
+        slots.retain(|slot| slot.end > position + count as u64);
         for sample in &mut mix {
             *sample = sample.clamp(-1.0, 1.0);
         }
@@ -520,6 +534,60 @@ mod tests {
         (heard, loud)
     }
 
+    fn open_descriptors() -> usize {
+        fs::read_dir("/proc/self/fd").unwrap().count()
+    }
+
+    #[test]
+    #[ignore = "release-mode playback startup benchmark; requires Linux /proc"]
+    fn benchmark_playback_startup() {
+        let path =
+            std::env::temp_dir().join(format!("ocus-startup-bench-{}.wav", std::process::id()));
+        write_wav(&path, 44_100, 2, &vec![8_000; 44_100 * 8 * CHANNELS]);
+        for clips in [1, 128] {
+            let plan = Arc::new(AudioPlan {
+                sources: (0..clips)
+                    .map(|index| AudioSource {
+                        path: path.clone(),
+                        start: index * 240,
+                        source_start: 0,
+                        duration: 240,
+                        volume: 1.0,
+                    })
+                    .collect(),
+                end: clips * 240,
+                fps: (30, 1),
+            });
+            let mut runs = Vec::new();
+            for _ in 0..5 {
+                let baseline = open_descriptors();
+                let queue = Arc::new(AudioQueue::new());
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let started = std::time::Instant::now();
+                let worker = {
+                    let (plan, queue, cancelled) = (plan.clone(), queue.clone(), cancelled.clone());
+                    std::thread::spawn(move || feed(&plan, 0, queue, cancelled))
+                };
+                while queue.pop().is_none() {
+                    std::thread::yield_now();
+                }
+                let first_sample = started.elapsed();
+                let open = open_descriptors() - baseline;
+                cancelled.store(true, Ordering::Relaxed);
+                worker.join().unwrap().unwrap();
+                runs.push((first_sample, open, open_descriptors() - baseline));
+            }
+            runs.sort();
+            let (first_sample, open, after_cancel) = runs[runs.len() / 2];
+            println!(
+                "clips={clips} median_of={} first_sample_ms={:.1} open_descriptors={open} after_cancel={after_cancel}",
+                runs.len(),
+                first_sample.as_secs_f64() * 1_000.0
+            );
+        }
+        fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn decodes_resamples_and_mixes_clip_audio_on_the_output_clock() {
         let root = std::env::temp_dir().join(format!("ocus-audio-{}", std::process::id()));
@@ -765,6 +833,130 @@ mod tests {
         assert!((amplitudes[1] / 0.5 - 1.0).abs() < 0.01);
     }
 
+    /// The mix every reader opened up front produces, summed in plan order.
+    fn eager_mix(plan: &AudioPlan, start: u64) -> Vec<f32> {
+        let to_samples =
+            |frame: u64| frame * u64::from(RATE) * u64::from(plan.fps.1) / u64::from(plan.fps.0);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let first = to_samples(start);
+        let mut mix = vec![0.0; (to_samples(plan.end) - first) as usize * CHANNELS];
+        for source in &plan.sources {
+            let from = source.start.max(start);
+            let until = (source.start + source.duration).min(plan.end);
+            if from >= until {
+                continue;
+            }
+            let offset = source.source_start + from - source.start;
+            let mut reader = AudioReader::open(&source.path, offset, plan.fps, cancelled.clone())
+                .unwrap()
+                .unwrap();
+            let mut sound = Vec::new();
+            let frames = (to_samples(until) - to_samples(from)) as usize;
+            reader.read(&mut sound, frames, &cancelled).unwrap();
+            let base = (to_samples(from) - first) as usize * CHANNELS;
+            for (index, sample) in sound.iter().enumerate() {
+                mix[base + index] += sample * source.volume;
+            }
+        }
+        mix.iter().map(|sample| sample.clamp(-1.0, 1.0)).collect()
+    }
+
+    /// Feeds `plan` from `start`, cancelling once `cancel_after` samples were
+    /// heard; returns every sample the queue delivered. Samples after the
+    /// cancellation may be cut short and are never played.
+    fn play(plan: &Arc<AudioPlan>, start: u64, cancel_after: Option<usize>) -> Vec<f32> {
+        let queue = Arc::new(AudioQueue::new());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker = {
+            let (plan, queue, cancelled) = (plan.clone(), queue.clone(), cancelled.clone());
+            std::thread::spawn(move || feed(&plan, start, queue, cancelled))
+        };
+        let mut heard = Vec::new();
+        loop {
+            match queue.pop() {
+                Some(sample) => {
+                    heard.push(sample);
+                    if cancel_after == Some(heard.len()) {
+                        cancelled.store(true, Ordering::Relaxed);
+                    }
+                }
+                None if queue.is_done() => break,
+                None => std::thread::yield_now(),
+            }
+        }
+        worker.join().unwrap().unwrap();
+        heard
+    }
+
+    fn mixing_plan(root: &Path) -> Arc<AudioPlan> {
+        let ramp = root.join("ramp-44k.wav");
+        let ramp_samples: Vec<i16> = (0..44_100 * 2_i32)
+            .map(|index| (index * 29 % 30_000 - 15_000) as i16)
+            .collect();
+        write_wav(&ramp, 44_100, 1, &ramp_samples);
+        let stereo = root.join("stereo-48k.wav");
+        let stereo_samples: Vec<i16> = (0..48_000 * 2 * 2_i32)
+            .map(|index| (index * 41 % 26_000 - 13_000) as i16)
+            .collect();
+        write_wav(&stereo, 48_000, 2, &stereo_samples);
+        let source = |path: &PathBuf, start, source_start, duration, volume| AudioSource {
+            path: path.clone(),
+            start,
+            source_start,
+            duration,
+            volume,
+        };
+        // Overlap at 10..20, a gap at 30..40, a second overlap at 45..55.
+        Arc::new(AudioPlan {
+            sources: vec![
+                source(&ramp, 0, 0, 20, 1.0),
+                source(&stereo, 10, 5, 20, 0.5),
+                source(&ramp, 40, 3, 15, 0.8),
+                source(&stereo, 45, 0, 15, 1.0),
+            ],
+            end: 60,
+            fps: (30, 1),
+        })
+    }
+
+    #[test]
+    fn mixes_identically_across_overlaps_gaps_and_seeks() {
+        let root = std::env::temp_dir().join(format!("ocus-audio-mix-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let plan = mixing_plan(&root);
+        for start in [0, 15, 25, 33, 40, 50] {
+            let expected = eager_mix(&plan, start);
+            assert!(expected.iter().any(|sample| sample.abs() > 0.1));
+            let heard = play(&plan, start, None);
+            assert_eq!(heard.len(), expected.len(), "start {start}");
+            let mismatch = heard
+                .iter()
+                .zip(&expected)
+                .position(|(heard, expected)| heard.to_bits() != expected.to_bits());
+            assert_eq!(mismatch, None, "start {start}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancelling_mid_playback_keeps_the_mixed_prefix() {
+        let root = std::env::temp_dir().join(format!("ocus-audio-cancel-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let plan = mixing_plan(&root);
+        let expected = eager_mix(&plan, 0);
+        // During the first overlap and inside the gap.
+        for cancel_after in [60_000, 112_000] {
+            let heard = play(&plan, 0, Some(cancel_after));
+            assert!(heard.len() >= cancel_after && heard.len() < expected.len());
+            let mismatch = heard[..cancel_after]
+                .iter()
+                .zip(&expected)
+                .position(|(heard, expected)| heard.to_bits() != expected.to_bits());
+            assert_eq!(mismatch, None, "cancel after {cancel_after}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn cancelling_stops_feeding_the_queue() {
         let queue = Arc::new(AudioQueue::new());
@@ -774,12 +966,21 @@ mod tests {
                 path: PathBuf::from("missing.wav"),
                 start: 0,
                 source_start: 0,
-                duration: 15,
+                duration: 6,
                 volume: 1.0,
             }],
-            end: 15,
+            end: 6,
             fps: (30, 1),
         };
-        assert!(feed(&plan, 0, queue, cancelled).is_err());
+        assert_eq!(feed(&plan, 0, queue.clone(), cancelled), Ok(()));
+        assert!(queue.is_done() && queue.pop().is_none());
+        // Six frames fit in the queue, so the uncancelled feed never blocks.
+        let reached = feed(
+            &plan,
+            0,
+            Arc::new(AudioQueue::new()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(reached.is_err());
     }
 }

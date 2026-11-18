@@ -87,23 +87,7 @@ fn edit_selection(state: &UiState, edit: impl FnOnce(&Clip, u64, u64) -> Command
         .unwrap_or(0)
         .saturating_add(1);
     let command = edit(&clip, track_id, next_id);
-    let title_duration = match (&clip.content, &command) {
-        (
-            ClipContent::Title(_),
-            Command::Trim {
-                duration_frames, ..
-            },
-        ) => Some(*duration_frames),
-        _ => None,
-    };
-    if state.edit(command)
-        && let Some(frames) = title_duration
-    {
-        let fps = state.frame_rate();
-        state
-            .title_duration
-            .set_value((frames as f64 * f64::from(fps.1) / f64::from(fps.0)).to_string());
-    }
+    state.edit(command);
 }
 
 fn set_title_text(state: &UiState) {
@@ -209,9 +193,7 @@ fn set_title_duration(state: &UiState) {
             duration_frames: frames,
         })
     {
-        state
-            .title_duration
-            .set_value((frames as f64 * f64::from(fps.1) / f64::from(fps.0)).to_string());
+        state.sync_title_duration(true);
     }
 }
 
@@ -4688,6 +4670,42 @@ mod tests {
     }
 
     #[test]
+    fn title_duration_follows_length_buttons() {
+        let state = UiState::new();
+        assert!(state.add_title());
+        adjust_timing(&state, false, true, true);
+        assert_eq!(selected_clip(&state).unwrap().1.duration_frames, 120);
+        assert_eq!(state.title_duration.peek(), "4");
+        set_title_duration(&state);
+        assert_eq!(selected_clip(&state).unwrap().1.duration_frames, 120);
+        state.undo();
+        assert_eq!(state.title_duration.peek(), "3");
+        state.redo();
+        assert_eq!(state.title_duration.peek(), "4");
+        adjust_timing(&state, false, false, true);
+        assert_eq!(state.title_duration.peek(), (121.0_f64 / 30.0).to_string());
+        adjust_timing(&state, false, false, false);
+        assert_eq!(state.title_duration.peek(), "4");
+        adjust_timing(&state, false, true, false);
+        assert_eq!(state.title_duration.peek(), "3");
+    }
+
+    #[test]
+    fn title_duration_preserves_user_draft_during_external_edits() {
+        let state = UiState::new();
+        assert!(state.add_title());
+        for draft in ["5.5", "", "invalid"] {
+            state.title_duration.set_value(draft);
+            adjust_timing(&state, false, true, true);
+            assert_eq!(state.title_duration.peek(), draft);
+            state.undo();
+            assert_eq!(state.title_duration.peek(), draft);
+            state.redo();
+            assert_eq!(state.title_duration.peek(), draft);
+        }
+    }
+
+    #[test]
     fn title_duration_is_editable_in_seconds_and_undoable() {
         let state = UiState::new();
         assert!(state.add_title());
@@ -4707,7 +4725,7 @@ mod tests {
         assert_eq!(selected_clip(&state).unwrap().1.duration_frames, 165);
         state.undo();
         assert_eq!(selected_clip(&state).unwrap().1.duration_frames, 90);
-        assert_eq!(state.title_duration.peek(), "3");
+        assert_eq!(state.title_duration.peek(), "-1");
     }
 
     #[test]

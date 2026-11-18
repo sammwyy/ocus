@@ -4,6 +4,43 @@ use crate::media::{Media, MediaKind};
 use crate::timeline::{Clip, ClipContent, Title, Track, TrackKind};
 use std::collections::HashSet;
 
+pub(crate) fn split_tracks(
+    tracks: &[Track],
+    targets: &[(u64, u64)],
+    at_frame: u64,
+    first_new_id: u64,
+) -> Option<Vec<Track>> {
+    let mut tracks = tracks.to_vec();
+    let mut next_id = first_new_id;
+    let mut changed = false;
+    for &(track_id, clip_id) in targets {
+        let track = tracks.iter_mut().find(|track| track.id == track_id)?;
+        let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) else {
+            continue;
+        };
+        let clip = &mut track.clips[index];
+        clip.start_frame.checked_add(clip.duration_frames)?;
+        let Some(offset) = at_frame.checked_sub(clip.start_frame) else {
+            continue;
+        };
+        if offset == 0 || offset >= clip.duration_frames {
+            continue;
+        }
+        let right = Clip {
+            id: next_id,
+            start_frame: at_frame,
+            source_start_frame: clip.source_start_frame.checked_add(offset)?,
+            duration_frames: clip.duration_frames - offset,
+            ..clip.clone()
+        };
+        next_id = next_id.checked_add(1)?;
+        clip.duration_frames = offset;
+        track.clips.insert(index + 1, right);
+        changed = true;
+    }
+    changed.then_some(tracks)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     RenameProject(String),
@@ -444,23 +481,12 @@ impl Editor {
                 at_frame,
                 new_id,
             } => {
-                let mut tracks = self.project.tracks.clone();
-                let track = tracks.iter_mut().find(|t| t.id == track_id)?;
-                let index = track.clips.iter().position(|c| c.id == clip_id)?;
-                let clip = &mut track.clips[index];
-                let offset = at_frame.checked_sub(clip.start_frame)?;
-                if offset == 0 || offset >= clip.duration_frames {
-                    return None;
-                }
-                let right = Clip {
-                    id: new_id,
-                    start_frame: at_frame,
-                    source_start_frame: clip.source_start_frame.checked_add(offset)?,
-                    duration_frames: clip.duration_frames - offset,
-                    ..clip.clone()
-                };
-                clip.duration_frames = offset;
-                track.clips.insert(index + 1, right);
+                let tracks = split_tracks(
+                    &self.project.tracks,
+                    &[(track_id, clip_id)],
+                    at_frame,
+                    new_id,
+                )?;
                 self.execute(Command::ReplaceTracks(tracks))
             }
             Command::Move {
@@ -952,6 +978,119 @@ mod tests {
             }
         ));
         assert_eq!(editor.project().tracks()[0].clips.len(), 2);
+    }
+
+    #[test]
+    fn split_tracks_preserves_trimmed_source_offsets_and_clip_fields() {
+        let tracks = split_fixture();
+        let split = split_tracks(&tracks, &[(0, 1)], 20, 5).unwrap();
+        let original = &tracks[0].clips[0];
+        assert_eq!(
+            split[0].clips[0],
+            Clip {
+                duration_frames: 10,
+                ..original.clone()
+            }
+        );
+        assert_eq!(
+            split[0].clips[1],
+            Clip {
+                id: 5,
+                start_frame: 20,
+                source_start_frame: 50,
+                duration_frames: 20,
+                ..original.clone()
+            }
+        );
+    }
+
+    fn split_fixture() -> Vec<Track> {
+        let mut project = Project::new("Split");
+        let clip = Clip {
+            id: 1,
+            start_frame: 10,
+            source_start_frame: 40,
+            duration_frames: 30,
+            content: ClipContent::Title(Title::default()),
+            volume: 0.75,
+            muted: true,
+            linked_audio: false,
+        };
+        project.tracks[0].clips = vec![
+            clip.clone(),
+            Clip {
+                id: 2,
+                start_frame: 60,
+                ..clip.clone()
+            },
+        ];
+        project.tracks[1].clips = vec![Clip { id: 3, ..clip }];
+        project.tracks
+    }
+
+    #[test]
+    fn split_tracks_requires_a_strictly_interior_frame() {
+        let tracks = split_fixture();
+        for at in [0, 9, 10, 40, 41, u64::MAX] {
+            assert!(split_tracks(&tracks, &[(0, 1)], at, 4).is_none());
+        }
+        for at in [11, 39] {
+            let split = split_tracks(&tracks, &[(0, 1)], at, 4).unwrap();
+            assert_eq!(split[0].clips[0].duration_frames, at - 10);
+            assert_eq!(split[0].clips[1].duration_frames, 40 - at);
+        }
+    }
+
+    #[test]
+    fn split_tracks_handles_multiple_tracks_and_skips_non_overlapping_targets() {
+        let tracks = split_fixture();
+        let split = split_tracks(&tracks, &[(0, 2), (0, 1), (1, 3)], 20, 4).unwrap();
+        assert_eq!(split[0].clips[1].id, 4);
+        assert_eq!(split[1].clips[1].id, 5);
+        assert_eq!(split[0].clips[2], tracks[0].clips[1]);
+        assert_eq!(split[1].clips[0].duration_frames, 10);
+        assert_eq!(&split[2..], &tracks[2..]);
+        for track in &split {
+            assert!(track.clips.windows(2).all(|pair| {
+                pair[0].start_frame + pair[0].duration_frames <= pair[1].start_frame
+            }));
+        }
+    }
+
+    #[test]
+    fn split_tracks_rejects_empty_missing_and_overflowing_plans() {
+        let tracks = split_fixture();
+        assert!(split_tracks(&tracks, &[], 20, 4).is_none());
+        assert!(split_tracks(&[], &[(0, 1)], 20, 4).is_none());
+        assert!(split_tracks(&tracks, &[(0, 99)], 20, 4).is_none());
+        assert!(split_tracks(&tracks, &[(0, 1), (99, 1)], 20, 4).is_none());
+        assert!(split_tracks(&tracks, &[(0, 1)], 20, u64::MAX).is_none());
+        assert!(split_tracks(&tracks, &[(0, 1), (1, 3)], 20, u64::MAX - 1).is_none());
+        let mut overflowing = tracks.clone();
+        overflowing[0].clips[0].source_start_frame = u64::MAX;
+        assert!(split_tracks(&overflowing, &[(0, 1)], 20, 4).is_none());
+        overflowing[0].clips[0] = Clip {
+            start_frame: u64::MAX - 10,
+            duration_frames: 30,
+            ..tracks[0].clips[0].clone()
+        };
+        assert!(split_tracks(&overflowing, &[(0, 1)], u64::MAX - 5, 4).is_none());
+    }
+
+    #[test]
+    fn multi_track_split_replace_tracks_undoes_in_one_step() {
+        let original = split_fixture();
+        let mut project = Project::new("Split");
+        project.tracks = original.clone();
+        let mut editor = Editor::new(project);
+        let split = split_tracks(editor.project().tracks(), &[(0, 1), (1, 3)], 20, 4).unwrap();
+        assert!(editor.apply(Command::ReplaceTracks(split.clone())));
+        assert_eq!(editor.project().tracks(), split);
+        assert!(editor.undo());
+        assert_eq!(editor.project().tracks(), original);
+        assert!(!editor.undo());
+        assert!(editor.redo());
+        assert_eq!(editor.project().tracks(), split);
     }
 
     #[test]

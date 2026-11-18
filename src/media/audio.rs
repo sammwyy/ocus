@@ -229,6 +229,7 @@ struct AudioReader {
     first_pts: i64,
     skip_until: u64,
     pending: VecDeque<f32>,
+    downmixer: Option<ffmpeg::software::resampling::Context>,
     resampler: Option<ffmpeg::software::resampling::Context>,
     eof: bool,
     exhausted: bool,
@@ -270,6 +271,28 @@ impl AudioReader {
                 decoder.flush();
             }
         }
+        let downmixer = if decoder.channels() > 2 {
+            let mut layout = decoder.channel_layout();
+            if layout.is_empty() {
+                layout = ffmpeg::ChannelLayout::default(i32::from(decoder.channels()));
+            }
+            let mut options = ffmpeg::Dictionary::new();
+            options.set("rematrix_maxval", "1");
+            Some(
+                ffmpeg::software::resampling::Context::get_with(
+                    decoder.format(),
+                    layout,
+                    rate,
+                    ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
+                    ffmpeg::ChannelLayout::STEREO,
+                    rate,
+                    options,
+                )
+                .map_err(|error| error.to_string())?,
+            )
+        } else {
+            None
+        };
         Ok(Some(Self {
             input,
             decoder,
@@ -281,6 +304,7 @@ impl AudioReader {
             )
             .unwrap_or(u64::MAX),
             pending: VecDeque::new(),
+            downmixer,
             resampler: if rate == RATE {
                 None
             } else {
@@ -330,6 +354,17 @@ impl AudioReader {
             }
             let mut decoded = ffmpeg::frame::Audio::empty();
             if self.decoder.receive_frame(&mut decoded).is_ok() {
+                let timestamp = decoded.timestamp();
+                if let Some(downmixer) = &mut self.downmixer {
+                    if decoded.channel_layout().is_empty() {
+                        decoded.set_channel_layout(downmixer.input().channel_layout);
+                    }
+                    let mut output = ffmpeg::frame::Audio::empty();
+                    downmixer
+                        .run(&decoded, &mut output)
+                        .map_err(|error| error.to_string())?;
+                    decoded = output;
+                }
                 // Some decoders leave the frame layout unset; the codec
                 // context knows it, and packed buffers keep one interleaved
                 // element per channel as a last resort.
@@ -344,7 +379,7 @@ impl AudioReader {
                         .max(1);
                 }
                 let mut stereo = stereo_samples(&decoded, channels);
-                if let Some(start) = decoded.timestamp().map(|pts| self.sample_index(pts)) {
+                if let Some(start) = timestamp.map(|pts| self.sample_index(pts)) {
                     let frames = stereo.len() / CHANNELS;
                     let skip = self.skip_until.saturating_sub(start).min(frames as u64) as usize;
                     stereo.drain(..skip * CHANNELS);
@@ -438,8 +473,7 @@ impl AudioReader {
     }
 }
 
-/// Interleaved stereo f32 at the frame's own rate; mono duplicates, wider
-/// layouts keep their first two channels.
+/// Interleaved stereo f32 at the frame's own rate; mono duplicates.
 fn stereo_samples(frame: &ffmpeg::frame::Audio, channels: u16) -> Vec<f32> {
     let format = frame.format();
     let width = format.bytes().max(1);
@@ -494,6 +528,87 @@ fn stereo_samples(frame: &ffmpeg::frame::Audio, channels: u16) -> Vec<f32> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn downmixes_center_channel_through_feed() {
+        let root = std::env::temp_dir().join(format!("ocus-downmix-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        for (name, layout, signal) in [
+            ("mono", "mono", "0.5*sin(2*PI*440*t)"),
+            (
+                "stereo",
+                "stereo",
+                "0.5*sin(2*PI*440*t)|-0.25*sin(2*PI*440*t)",
+            ),
+            ("center", "5.1", "0|0|0.5*sin(2*PI*440*t)|0|0|0"),
+            ("center-7.1", "7.1", "0|0|0.5*sin(2*PI*440*t)|0|0|0|0|0"),
+            (
+                "surround",
+                "5.1(side)",
+                "0|0|0|0|0.5*sin(2*PI*440*t)|0.5*sin(2*PI*440*t)",
+            ),
+            ("lfe", "5.1", "0|0|0|0.5*sin(2*PI*440*t)|0|0"),
+            ("full-scale", "5.1", "1|1|1|1|1|1"),
+        ] {
+            let path = root.join(format!("{name}.wav"));
+            assert!(
+                std::process::Command::new("ffmpeg")
+                    .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+                    .arg(format!("aevalsrc={signal}:s=48000:d=0.2:c={layout}"))
+                    .args(["-c:a", "pcm_f32le"])
+                    .arg(&path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let queue = Arc::new(AudioQueue::new());
+            let plan = AudioPlan {
+                sources: vec![AudioSource {
+                    path,
+                    start: 0,
+                    source_start: 0,
+                    duration: 6,
+                    volume: 1.0,
+                }],
+                end: 6,
+                fps: (30, 1),
+            };
+            feed(&plan, 0, queue.clone(), Arc::new(AtomicBool::new(false))).unwrap();
+            let samples: Vec<_> = std::iter::from_fn(|| queue.pop()).collect();
+            assert_eq!(samples.len(), 19_200);
+            let rms = |channel| {
+                (samples
+                    .iter()
+                    .skip(channel)
+                    .step_by(2)
+                    .map(|&v| f64::from(v).powi(2))
+                    .sum::<f64>()
+                    / 9600.0)
+                    .sqrt()
+            };
+            let (left, right) = (rms(0), rms(1));
+            println!("{name} ({layout}): RMS L={left:.6} R={right:.6}");
+            if name == "lfe" {
+                assert_eq!((left, right), (0.0, 0.0));
+            } else {
+                assert!(left > 0.05 && right > 0.05, "{layout}: silent downmix");
+            }
+            if name == "full-scale" {
+                assert!(samples.iter().all(|&sample| (sample - 1.0).abs() < 0.00001));
+            }
+            if layout == "stereo" {
+                for (index, pair) in samples.as_chunks::<2>().0.iter().enumerate() {
+                    let sine =
+                        (2.0 * std::f32::consts::PI * 440.0 * index as f32 / RATE as f32).sin();
+                    assert!((pair[0] - 0.5 * sine).abs() < 0.0001);
+                    assert!((pair[1] + 0.25 * sine).abs() < 0.0001);
+                }
+            } else {
+                assert!((left - right).abs() < 0.00001);
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn write_wav(path: &Path, rate: u32, channels: u16, samples: &[i16]) {
         let mut bytes = Vec::new();

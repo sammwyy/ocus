@@ -499,7 +499,7 @@ impl UiState {
         let (Some(app), Some(dir)) = (self.app.borrow().clone(), self.recovery_dir.clone()) else {
             return;
         };
-        self.busy.set(true);
+        let revision = self.revision.peek();
         let state = self.clone();
         app.spawn_background(
             move || {
@@ -508,35 +508,36 @@ impl UiState {
                 Some((snapshot, missing))
             },
             move |result| {
-                if let Some((snapshot, missing)) = result {
-                    let result = MessageDialog::new()
-                        .set_level(MessageLevel::Warning)
-                        .set_title("Recover unsaved work?")
-                        .set_description(format!(
-                            "Ocus closed before your changes to “{}” were saved. Restore them now?",
-                            snapshot.project.name()
-                        ))
-                        .set_buttons(MessageButtons::OkCancelCustom(
-                            "Restore".into(),
-                            "Discard".into(),
-                        ))
-                        .show();
-                    let restore = matches!(result, MessageDialogResult::Ok)
-                        || result == MessageDialogResult::Custom("Restore".into());
-                    if restore {
-                        state.install_project(
-                            snapshot.project,
-                            snapshot.original_path,
-                            true,
-                            missing,
-                        );
-                    } else {
-                        state.clear_recovery();
-                    }
-                }
-                state.busy.set(false);
+                state.finish_recovery(revision, result);
             },
         );
+    }
+
+    fn finish_recovery(&self, revision: u64, result: Option<(recovery::Snapshot, HashSet<u64>)>) {
+        if self.busy.peek() || self.revision.peek() != revision {
+            return;
+        }
+        if let Some((snapshot, missing)) = result {
+            let result = MessageDialog::new()
+                .set_level(MessageLevel::Warning)
+                .set_title("Recover unsaved work?")
+                .set_description(format!(
+                    "Ocus closed before your changes to “{}” were saved. Restore them now?",
+                    snapshot.project.name()
+                ))
+                .set_buttons(MessageButtons::OkCancelCustom(
+                    "Restore".into(),
+                    "Discard".into(),
+                ))
+                .show();
+            let restore = matches!(result, MessageDialogResult::Ok)
+                || result == MessageDialogResult::Custom("Restore".into());
+            if restore {
+                self.install_project(snapshot.project, snapshot.original_path, true, missing);
+            } else {
+                self.clear_recovery();
+            }
+        }
     }
 
     fn clear_recovery(&self) {
@@ -2810,6 +2811,38 @@ fn import_summary(imported: usize, total: usize, errors: &[(PathBuf, String)]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_recovery_check_leaves_editor_available_and_does_not_finish_other_work() {
+        let state = UiState::new();
+        state.finish_recovery(state.revision.peek(), None);
+        assert!(!state.busy.peek());
+        assert!(state.add_title());
+        state.busy.set(true);
+        state.finish_recovery(state.revision.peek(), None);
+        assert!(state.busy.peek());
+    }
+
+    #[test]
+    fn late_recovery_does_not_replace_work_started_during_startup() {
+        let state = UiState::new();
+        let revision = state.revision.peek();
+        assert!(state.add_title());
+        state.finish_recovery(
+            revision,
+            Some((
+                recovery::Snapshot {
+                    original_path: Some("previous.ocus".into()),
+                    project: Project::new("Previous"),
+                },
+                HashSet::new(),
+            )),
+        );
+        assert_eq!(state.editor.borrow().project().name(), "Untitled");
+        assert_eq!(state.editor.borrow().project().tracks()[0].clips.len(), 1);
+        assert!(state.project_path.peek().is_none());
+        assert!(!state.busy.peek());
+    }
 
     #[test]
     fn recovery_tracks_edits_save_discard_and_restore() {

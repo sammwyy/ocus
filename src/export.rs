@@ -7,13 +7,11 @@ use crate::project::Project;
 use crate::project::export_settings::{AudioCodec, EncodingSpeed, ExportSettings, VideoCodec};
 use crate::timeline::{ClipContent, TrackKind};
 use ffmpeg_next as ffmpeg;
-use std::fs::{self, OpenOptions};
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
-
-static NEXT_EXPORT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Default)]
 pub struct ExportControl {
@@ -87,46 +85,34 @@ pub fn render_with_settings(
         }
         return Err("Export destination already exists. Choose a different filename.".into());
     }
+    write_export(path, settings.container.extension(), |temporary| {
+        render_to(project, temporary, settings, control.clone())?;
+        control.check()
+    })
+}
+
+fn write_export(
+    path: &Path,
+    extension: &str,
+    encode: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), String> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let name = path
-        .file_name()
-        .ok_or("Missing export filename")?
-        .to_string_lossy();
-    let mut temporary: Option<PathBuf> = None;
-    for _ in 0..8 {
-        let candidate = parent.join(format!(
-            ".{name}.{}.{}.{}",
-            std::process::id(),
-            NEXT_EXPORT.fetch_add(1, Ordering::Relaxed),
-            settings.container.extension()
-        ));
-        match OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&candidate)
-        {
-            Ok(file) => {
-                drop(file);
-                temporary = Some(candidate);
-                break;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-    let temporary = temporary.ok_or("Cannot create temporary export file")?;
-    let result = render_to(project, &temporary, settings, control.clone()).and_then(|()| {
-        control.check()?;
-        fs::hard_link(&temporary, path).map_err(|error| error.to_string())?;
-        fs::remove_file(&temporary).map_err(|error| error.to_string())
-    });
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    let suffix = format!(".{extension}");
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".ocus-export-").suffix(&suffix);
+    #[cfg(unix)]
+    builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o666));
+    let temporary = builder
+        .tempfile_in(parent)
+        .map_err(|error| error.to_string())?
+        .into_temp_path();
+    encode(&temporary)?;
+    temporary
+        .persist_noclobber(path)
+        .map_err(|error| error.error.to_string())
 }
 
 fn render_to(
@@ -621,8 +607,15 @@ mod tests {
     use crate::timeline::{Clip, ClipContent, Title, Track, TrackKind};
     use ffmpeg_next as ffmpeg;
     use std::fs;
+    use std::path::PathBuf;
     use std::sync::Arc;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
+
+    fn export_test_base() -> PathBuf {
+        std::env::var_os("OCUS_TEST_EXPORT_DIR").map_or_else(std::env::temp_dir, PathBuf::from)
+    }
 
     #[test]
     #[ignore = "manual real-export audio measurement; set OCUS_DOWNMIX_EVIDENCE"]
@@ -712,7 +705,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "ocus-export-collision-{}-{}",
             std::process::id(),
-            super::NEXT_EXPORT.fetch_add(1, Ordering::Relaxed)
+            NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&dir).unwrap();
         let target = dir.join("export.mp4");
@@ -753,8 +746,22 @@ mod tests {
     }
 
     #[test]
+    fn destination_created_during_encoding_is_not_overwritten() {
+        let dir = tempfile::tempdir_in(export_test_base()).unwrap();
+        let target = dir.path().join("export.mp4");
+        let result = super::write_export(&target, "mp4", |temporary| {
+            fs::write(temporary, b"new export").unwrap();
+            fs::write(&target, b"existing export").unwrap();
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"existing export");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
     fn exports_a_video_clip_as_playable_h264_mp4() {
-        let dir = std::env::temp_dir().join(format!("ocus-export-test-{}", std::process::id()));
+        let dir = export_test_base().join(format!("ocus-export-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let source = dir.join("source.y4m");
         let target = dir.join("result.mp4");
@@ -791,7 +798,14 @@ mod tests {
             },
         }));
         let progress = std::sync::Arc::new(super::ExportControl::default());
-        super::render_with_control(editor.project(), &target, progress.clone()).unwrap();
+        super::render_with_control(editor.project(), &target, progress.clone()).unwrap_or_else(
+            |error| {
+                panic!(
+                    "Export failed after {} frames: {error}",
+                    progress.frames_done()
+                )
+            },
+        );
         assert_eq!(progress.frames_done(), 30);
         let cancelled = std::sync::Arc::new(super::ExportControl::default());
         cancelled.cancel();
@@ -1061,7 +1075,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "ocus-image-export-test-{}-{}",
             std::process::id(),
-            super::NEXT_EXPORT.fetch_add(1, Ordering::Relaxed)
+            NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&dir).unwrap();
         let source = dir.join("still.ppm");
@@ -1148,7 +1162,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "ocus-title-export-{}-{}",
             std::process::id(),
-            super::NEXT_EXPORT.fetch_add(1, Ordering::Relaxed)
+            NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&dir).unwrap();
         let target = dir.join("title.mp4");
@@ -1216,7 +1230,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "ocus-custom-export-{}-{}",
             std::process::id(),
-            super::NEXT_EXPORT.fetch_add(1, Ordering::Relaxed)
+            NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&dir).unwrap();
         let wav_path = dir.join("audio.wav");

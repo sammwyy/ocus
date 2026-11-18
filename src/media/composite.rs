@@ -98,7 +98,7 @@ pub struct Compositor {
 }
 
 enum Layer<'a> {
-    Media(FrameImage),
+    Media(Arc<FrameImage>),
     Title(&'a Title),
 }
 
@@ -381,6 +381,61 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    #[ignore = "release-mode still-image benchmark; requires ffmpeg"]
+    fn benchmark_still_image() {
+        let root = std::env::temp_dir().join(format!("ocus-still-bench-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("still.png");
+        assert!(
+            std::process::Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=4000x3000",
+                    "-frames:v",
+                    "1",
+                    "-threads",
+                    "1"
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let plan = VisualPlan {
+            resolution: (1920, 1080),
+            tracks: vec![vec![VisualClip::Media(FrameSource {
+                clip_id: 1,
+                path,
+                kind: MediaKind::Image,
+                start: 0,
+                source_start: 0,
+                duration: 300,
+            })]],
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut compositor = Compositor::new(plan, 1920, 1080, (30, 1));
+        let started = std::time::Instant::now();
+        let mut hash = 0xcbf29ce484222325u64;
+        for position in 0..300 {
+            let frame = compositor.frame(position, &cancelled).unwrap().unwrap();
+            for byte in &frame.pixels {
+                hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
+            }
+            std::hint::black_box(&frame);
+        }
+        println!(
+            "still frames=300 elapsed_ms={} fnv1a={hash:016x}",
+            started.elapsed().as_millis()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn full_blend(plan: &VisualPlan, position: u64) -> Vec<u8> {
         let (width, height) = plan.resolution;

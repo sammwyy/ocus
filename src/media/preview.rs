@@ -18,6 +18,7 @@ pub struct FrameSource {
     pub duration: u64,
 }
 
+#[derive(Clone)]
 pub struct FrameImage {
     pub width: u32,
     pub height: u32,
@@ -64,7 +65,7 @@ pub fn storyboard(
             .checked_add(offset)
             .ok_or("Storyboard frame range overflows")?;
         let mut reader = FrameReader::open(&source, target, key.fps, (160, 90), cancelled.clone())?;
-        let mut image = reader.frame_at(target, &cancelled)?;
+        let mut image = Arc::unwrap_or_clone(reader.frame_at(target, &cancelled)?);
         for pixel in image.pixels.as_chunks_mut::<4>().0 {
             for channel in 0..3 {
                 pixel[channel] =
@@ -138,7 +139,7 @@ impl VideoLayers {
         source: &FrameSource,
         position: u64,
         cancelled: &Arc<AtomicBool>,
-    ) -> Result<FrameImage, String> {
+    ) -> Result<Arc<FrameImage>, String> {
         let target = source.source_start + position - source.start;
         if !self.readers.contains_key(&source.clip_id) {
             self.readers.insert(
@@ -273,6 +274,8 @@ struct FrameReader {
     current: Option<(u64, ffmpeg::frame::Video)>,
     future: Option<(u64, ffmpeg::frame::Video)>,
     eof: bool,
+    still: bool,
+    fitted: Option<Arc<FrameImage>>,
 }
 
 impl FrameReader {
@@ -343,10 +346,15 @@ impl FrameReader {
             current: None,
             future: None,
             eof: false,
+            still: source.kind == MediaKind::Image,
+            fitted: None,
         })
     }
 
-    fn frame_at(&mut self, target: u64, cancelled: &AtomicBool) -> Result<FrameImage, String> {
+    fn frame_at(&mut self, target: u64, cancelled: &AtomicBool) -> Result<Arc<FrameImage>, String> {
+        if let Some(image) = &self.fitted {
+            return Ok(image.clone());
+        }
         if self.future.is_none() && self.current.is_none() {
             self.future = self.next_decoded(cancelled)?;
         }
@@ -379,11 +387,15 @@ impl FrameReader {
             pixels[destination..destination + row_size]
                 .copy_from_slice(&scaled.pixels[start..start + row_size]);
         }
-        Ok(FrameImage {
+        let image = Arc::new(FrameImage {
             width: self.output.0,
             height: self.output.1,
             pixels,
-        })
+        });
+        if self.still {
+            self.fitted = Some(image.clone());
+        }
+        Ok(image)
     }
 
     fn next_decoded(
@@ -446,6 +458,36 @@ mod tests {
     use super::*;
     use std::fs;
     use std::process::Command;
+
+    #[test]
+    fn still_frames_reuse_fitted_pixels() {
+        ffmpeg::init().unwrap();
+        let path =
+            std::env::temp_dir().join(format!("ocus-still-cache-{}.ppm", std::process::id()));
+        let mut data = b"P6\n8 6\n255\n".to_vec();
+        data.extend((0..8 * 6 * 3).map(|value| value as u8));
+        fs::write(&path, data).unwrap();
+        let source = FrameSource {
+            clip_id: 1,
+            path: path.clone(),
+            kind: MediaKind::Image,
+            start: 0,
+            source_start: 0,
+            duration: 300,
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut reader =
+            FrameReader::open(&source, 0, (30, 1), (16, 9), cancelled.clone()).unwrap();
+        let first = reader.frame_at(0, &cancelled).unwrap();
+        let repeated = reader.frame_at(299, &cancelled).unwrap();
+        assert!(Arc::ptr_eq(&first, &repeated));
+        let fresh = FrameReader::open(&source, 0, (30, 1), (16, 9), cancelled.clone())
+            .unwrap()
+            .frame_at(0, &cancelled)
+            .unwrap();
+        assert_eq!(first.pixels, fresh.pixels);
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn anamorphic_frames_and_thumbnails_use_display_aspect() {

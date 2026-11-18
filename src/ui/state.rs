@@ -655,6 +655,13 @@ impl UiState {
         (rate.numerator, rate.denominator)
     }
 
+    pub(super) fn frames_per_second_step(&self) -> u64 {
+        let fps = self.frame_rate();
+        (f64::from(fps.0) / f64::from(fps.1.max(1)))
+            .round()
+            .max(1.0) as u64
+    }
+
     pub fn sequence_end(&self) -> u64 {
         self.editor
             .borrow()

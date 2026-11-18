@@ -366,8 +366,7 @@ impl UiState {
             return;
         }
         let busy = self.busy.peek();
-        let fps = self.frame_rate();
-        let second = (u64::from(fps.0) / u64::from(fps.1.max(1))).max(1);
+        let second = self.frames_per_second_step();
         let frame = self.program.position.peek();
         let last = self.sequence_end().saturating_sub(1);
         match action {
@@ -1529,6 +1528,83 @@ mod tests {
     use crate::timeline::Clip;
     use creamui::core::Rect;
     use std::collections::HashSet;
+
+    fn second_step_state(fps: (u32, u32), duration: u64) -> UiState {
+        let state = UiState::new();
+        let mut fixture = serde_json::to_value(state.editor.borrow().project()).unwrap();
+        fixture["settings"]["frame_rate"] = serde_json::json!({
+            "numerator": fps.0,
+            "denominator": fps.1,
+        });
+        let project = serde_json::from_value(fixture).unwrap();
+        *state.editor.borrow_mut() = crate::project::Editor::new(project);
+        if duration > 0 {
+            assert!(state.add_title());
+            assert!(state.edit(Command::Trim {
+                track_id: 0,
+                clip_id: 1,
+                start_frame: 0,
+                source_start_frame: 0,
+                duration_frames: duration,
+            }));
+        }
+        state
+    }
+
+    #[test]
+    fn second_seek_fractional_rate_rounds_to_nearest_frame() {
+        let state = second_step_state((30_000, 1001), 3000);
+        state.run(Action::SecondForward);
+        assert_eq!(state.program.position.peek(), 30);
+        state.run(Action::SecondBack);
+        assert_eq!(state.program.position.peek(), 0);
+    }
+
+    #[test]
+    fn second_seek_sixty_jump_probe() {
+        let state = second_step_state((30_000, 1001), 3000);
+        for _ in 0..60 {
+            state.run(Action::SecondForward);
+        }
+        let frame = state.program.position.peek();
+        println!(
+            "60 SecondForward at 30000/1001: frame {frame}, {:.2} s",
+            frame as f64 * 1001.0 / 30_000.0
+        );
+        assert_eq!(frame, 1800);
+    }
+
+    #[test]
+    fn second_seek_integer_rates_and_minimum_frame_are_unchanged() {
+        for (fps, step) in [((25, 1), 25), ((30, 1), 30), ((1, 3), 1)] {
+            let state = second_step_state(fps, 3000);
+            state.run(Action::SecondForward);
+            assert_eq!(state.program.position.peek(), step);
+            state.run(Action::SecondBack);
+            assert_eq!(state.program.position.peek(), 0);
+        }
+    }
+
+    #[test]
+    fn second_seek_clamps_at_start_end_and_empty_sequence() {
+        let state = second_step_state((30_000, 1001), 100);
+        state.run(Action::SecondBack);
+        assert_eq!(state.program.position.peek(), 0);
+        state.seek(10);
+        state.run(Action::SecondBack);
+        assert_eq!(state.program.position.peek(), 0);
+        state.seek(90);
+        state.run(Action::SecondForward);
+        assert_eq!(state.program.position.peek(), 99);
+        state.run(Action::SecondForward);
+        assert_eq!(state.program.position.peek(), 99);
+
+        let empty = second_step_state((30_000, 1001), 0);
+        empty.run(Action::SecondForward);
+        assert_eq!(empty.program.position.peek(), 0);
+        empty.run(Action::SecondBack);
+        assert_eq!(empty.program.position.peek(), 0);
+    }
 
     fn starts(state: &UiState, track: usize) -> Vec<u64> {
         state.editor.borrow().project().tracks()[track]

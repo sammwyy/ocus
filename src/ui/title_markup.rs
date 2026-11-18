@@ -46,7 +46,8 @@ pub(crate) fn parse(title: &Title) -> Vec<Run> {
     };
     let mut style = base;
     let mut html: Vec<(&str, Style)> = Vec::new();
-    let (mut md_bold, mut md_italic) = (false, false);
+    let mut md_bold = false;
+    let mut md_italic = None;
     let mut runs: Vec<Run> = Vec::new();
     let mut index = 0;
     while index < source.len() {
@@ -114,7 +115,8 @@ pub(crate) fn parse(title: &Title) -> Vec<Run> {
                 .next()
                 .filter(|ch| *ch == '_' || *ch == '*')
                 && !(marker == '*' && remaining.starts_with("**"))
-                && (md_italic || remaining[1..].contains(marker))
+                && (md_italic == Some(marker)
+                    || (md_italic.is_none() && remaining[1..].contains(marker)))
                 && !(source[..index]
                     .chars()
                     .last()
@@ -124,14 +126,18 @@ pub(crate) fn parse(title: &Title) -> Vec<Run> {
                         .next()
                         .is_some_and(char::is_alphanumeric))
             {
-                md_italic = !md_italic;
+                md_italic = if md_italic.is_some() {
+                    None
+                } else {
+                    Some(marker)
+                };
                 index += 1;
                 continue;
             }
         }
         let ch = remaining.chars().next().unwrap();
         let bold = style.bold || md_bold;
-        let italic = style.italic || md_italic;
+        let italic = style.italic || md_italic.is_some();
         if let Some(last) = runs.last_mut()
             && last.bold == bold
             && last.italic == italic
@@ -278,6 +284,33 @@ mod tests {
             runs.iter()
                 .any(|run| run.text == "E" && !run.bold && run.color == Color::rgb(255, 255, 255))
         );
+    }
+
+    #[test]
+    fn markdown_italic_closes_only_with_its_opening_delimiter() {
+        for (text, expected) in [
+            ("_hello* world_", "hello* world"),
+            ("*hello_ world*", "hello_ world"),
+            ("_hello* world* again_", "hello* world* again"),
+            ("*hello_ world_ again*", "hello_ world_ again"),
+        ] {
+            let title = Title {
+                text: text.into(),
+                bold: false,
+                parse_markdown: true,
+                ..Title::default()
+            };
+            assert_eq!(
+                parse(&title),
+                vec![Run {
+                    text: expected.into(),
+                    bold: false,
+                    italic: true,
+                    color: Color::rgb(255, 255, 255),
+                }],
+                "{text}"
+            );
+        }
     }
 
     #[test]

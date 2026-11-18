@@ -4,7 +4,7 @@
 
 use super::UiState;
 use super::controls::Glyph;
-use super::edits::{self, ClipRef};
+use super::edits::{self, ClipRef, CopiedClip};
 use super::timeline_view::{Geometry, Ghost, lane_weight};
 use crate::media::MediaKind;
 use crate::project::Command;
@@ -558,14 +558,18 @@ impl UiState {
                     .clips
                     .iter()
                     .filter(|clip| selection.contains(&(track.id, clip.id)))
-                    .map(|clip| (track.id, clip.clone()))
+                    .map(|clip| CopiedClip {
+                        track_id: track.id,
+                        track_kind: track.kind,
+                        clip: clip.clone(),
+                    })
             })
             .collect();
         drop(editor);
         if copied.is_empty() {
             return false;
         }
-        copied.sort_by_key(|(_, clip)| clip.start_frame);
+        copied.sort_by_key(|copied| copied.clip.start_frame);
         self.status.set(match copied.len() {
             1 => "Copied 1 clip".into(),
             count => format!("Copied {count} clips"),
@@ -601,7 +605,7 @@ impl UiState {
                 .clipboard
                 .borrow()
                 .iter()
-                .map(|(_, clip)| clip.start_frame + clip.duration_frames)
+                .map(|copied| copied.clip.start_frame + copied.clip.duration_frames)
                 .max();
             self.paste(end);
         }
@@ -1787,6 +1791,73 @@ mod tests {
         state.undo();
         assert_eq!(state.editor.borrow().project().tracks().len(), 4);
         assert!(state.editor.borrow().project().tracks()[2].kind == TrackKind::Audio);
+    }
+
+    #[test]
+    fn paste_after_track_deletion_keeps_surviving_destinations_and_timing() {
+        let state = UiState::new();
+        state.add_track(TrackKind::Video);
+        assert!(state.add_title_at(Some((0, 10))));
+        assert!(state.add_title_at(Some((1, 0))));
+        state.select_clips(vec![(0, 1), (1, 2)]);
+        state.run(Action::Copy);
+        state.run_menu(MenuCommand::RemoveTrack(1));
+        let before_paste = state.editor.borrow().project().clone();
+
+        state.seek(120);
+        state.run(Action::Paste);
+        assert_eq!(starts(&state, 1), vec![120], "{}", state.status.peek());
+        assert_eq!(starts(&state, 0), vec![10, 130]);
+        assert_eq!(state.selected.peek(), vec![(4, 2), (0, 3)]);
+        state.undo();
+        assert_eq!(state.editor.borrow().project(), &before_paste);
+    }
+
+    #[test]
+    fn paste_after_track_deletion_keeps_detached_audio_on_an_audio_track() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(crate::media::Media {
+            id: 1,
+            path: "footage.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(3_000_000),
+            has_audio: true,
+        })));
+        let detached = Clip {
+            id: 1,
+            start_frame: 0,
+            source_start_frame: 15,
+            duration_frames: 30,
+            content: ClipContent::Media { media_id: 1 },
+            volume: 0.5,
+            muted: false,
+            linked_audio: false,
+        };
+        assert!(state.edit(Command::InsertClip {
+            track_id: 3,
+            clip: detached.clone(),
+        }));
+        state.select_clip(Some((3, 1)));
+        state.run(Action::Copy);
+        state.run_menu(MenuCommand::RemoveTrack(3));
+        state.add_track(TrackKind::Video); // Reuses track ID 3.
+
+        state.seek(60);
+        state.run(Action::Paste);
+        let editor = state.editor.borrow();
+        let tracks = editor.project().tracks();
+        assert_eq!(tracks[2].id, 3);
+        assert!(tracks[2].clips.is_empty());
+        assert_eq!(tracks[3].id, 2);
+        assert_eq!(
+            tracks[3].clips,
+            vec![Clip {
+                start_frame: 60,
+                ..detached
+            }],
+            "{}",
+            state.status.peek()
+        );
     }
 
     #[test]

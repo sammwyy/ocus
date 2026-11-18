@@ -228,6 +228,20 @@ fn scale_thumbnail(
     Ok(thumbnail)
 }
 
+fn stream_duration_us(stream: &ffmpeg::Stream<'_>) -> Option<u64> {
+    let time_base = stream.time_base();
+    let numerator = i128::from(stream.duration())
+        * i128::from(time_base.numerator())
+        * i128::from(ffmpeg::ffi::AV_TIME_BASE);
+    let denominator = i128::from(time_base.denominator());
+    if stream.duration() <= 0 || numerator <= 0 || denominator <= 0 {
+        return None;
+    }
+    u64::try_from(numerator / denominator)
+        .ok()
+        .filter(|duration| *duration > 0)
+}
+
 pub fn probe(path: &Path) -> Result<MediaProbe, String> {
     if !path.is_file() {
         return Err("Source is not a regular file".into());
@@ -259,37 +273,34 @@ pub fn probe(path: &Path) -> Result<MediaProbe, String> {
                 .iter()
                 .any(|known| extension.eq_ignore_ascii_case(known))
         });
-    let (kind, stream) = if let Some(video) = video.as_ref() {
-        (
-            if still {
-                MediaKind::Image
-            } else {
-                MediaKind::Video
-            },
-            video,
-        )
-    } else if let Some(audio) = audio.as_ref() {
-        (MediaKind::Audio, audio)
+    let kind = if video.is_some() {
+        if still {
+            MediaKind::Image
+        } else {
+            MediaKind::Video
+        }
+    } else if audio.is_some() {
+        MediaKind::Audio
     } else {
         return Err("Source contains no supported video or audio stream".into());
     };
     let duration_us = if kind == MediaKind::Image {
         None
     } else {
-        u64::try_from(input.duration())
-            .ok()
-            .filter(|duration| *duration > 0)
+        let video_duration = video.as_ref().and_then(stream_duration_us);
+        let audio_duration = audio.as_ref().and_then(stream_duration_us);
+        let stream_duration = video_duration.max(audio_duration);
+        // Playback starts each stream at its own first timestamp, not at container time zero.
+        let complete = (video.is_none() || video_duration.is_some())
+            && (audio.is_none() || audio_duration.is_some());
+        stream_duration
+            .filter(|_| complete)
             .or_else(|| {
-                let time_base = stream.time_base();
-                let numerator = i128::from(stream.duration())
-                    * i128::from(time_base.numerator())
-                    * i128::from(ffmpeg::ffi::AV_TIME_BASE);
-                let denominator = i128::from(time_base.denominator());
-                (numerator > 0 && denominator > 0)
-                    .then(|| u64::try_from(numerator / denominator).ok())
-                    .flatten()
+                u64::try_from(input.duration())
+                    .ok()
                     .filter(|duration| *duration > 0)
             })
+            .or(stream_duration)
     };
     if duration_us.is_none() && kind != MediaKind::Image {
         return Err("Source has no measurable duration".into());
@@ -305,9 +316,53 @@ pub fn probe(path: &Path) -> Result<MediaProbe, String> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn probe_uses_playable_stream_durations() {
+        let root = std::env::temp_dir().join(format!(
+            "ocus-stream-durations-{}-{}",
+            std::process::id(),
+            NEXT_TEST.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let cases = [
+            ("zero-start", 6, 0, 0),
+            ("offset", 6, 0, 5),
+            ("shorter-audio", 6, 3, 5),
+            ("longer-audio", 3, 6, 5),
+        ];
+        let actual = cases.map(|(name, video, audio, offset)| {
+            let path = root.join(format!("{name}.mp4"));
+            let mut ffmpeg = Command::new("ffmpeg");
+            ffmpeg.args(["-v", "error", "-f", "lavfi", "-i"]);
+            ffmpeg.arg(format!("color=size=32x32:rate=2:d={video}"));
+            if audio > 0 {
+                ffmpeg
+                    .args(["-f", "lavfi", "-i"])
+                    .arg(format!("anullsrc=r=48000:cl=mono:d={audio}"))
+                    .args(["-c:a", "alac"]);
+            }
+            assert!(
+                ffmpeg
+                    .args(["-c:v", "mpeg4", "-output_ts_offset", &offset.to_string()])
+                    .arg(&path)
+                    .status()
+                    .unwrap()
+                    .success(),
+                "{name}"
+            );
+            (name, probe(&path).unwrap().duration_us)
+        });
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(
+            actual,
+            cases.map(|(name, video, audio, _)| (name, Some(video.max(audio) * 1_000_000)))
+        );
+    }
 
     #[test]
     fn sample_aspect_dimensions_handle_unknown_and_square_pixels() {

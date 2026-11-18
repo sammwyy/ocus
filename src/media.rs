@@ -242,7 +242,14 @@ pub fn probe(path: &Path) -> Result<MediaProbe, String> {
         started.elapsed() > Duration::from_secs(10)
     })
     .map_err(|error| format!("Cannot probe source: {error}"))?;
-    let video = input.streams().best(ffmpeg::media::Type::Video);
+    let video = input
+        .streams()
+        .best(ffmpeg::media::Type::Video)
+        .filter(|stream| {
+            !stream
+                .disposition()
+                .contains(ffmpeg::format::stream::Disposition::ATTACHED_PIC)
+        });
     let audio = input.streams().best(ffmpeg::media::Type::Audio);
     let still = path
         .extension()
@@ -403,5 +410,59 @@ mod tests {
             fs::remove_file(file).unwrap();
         }
         fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn cover_art_does_not_make_audio_a_video() {
+        let root = std::env::temp_dir().join(format!(
+            "ocus-cover-art-{}-{}",
+            std::process::id(),
+            NEXT_TEST.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let ffmpeg = |args: &str, output: &str| {
+            let output = root.join(output);
+            let status = std::process::Command::new("ffmpeg")
+                .current_dir(&root)
+                .args(["-v", "error", "-y"])
+                .args(args.split_whitespace())
+                .arg(&output)
+                .status()
+                .unwrap();
+            assert!(status.success(), "ffmpeg failed for {}", output.display());
+            output
+        };
+        let tone = "-f lavfi -i sine=frequency=440:duration=1";
+        let cover = ffmpeg("-f lavfi -i color=red:size=64x64 -frames:v 1", "cover.png");
+        let plain = ffmpeg(&format!("{tone} -c:a libmp3lame"), "plain.mp3");
+        let album = ffmpeg(
+            &format!(
+                "{tone} -i cover.png -map 0:a -map 1:v -c:a libmp3lame \
+                 -c:v mjpeg -disposition:v attached_pic"
+            ),
+            "album.mp3",
+        );
+        for path in [&plain, &album] {
+            let info = probe(path).unwrap();
+            assert_eq!(info.kind, MediaKind::Audio, "{}", path.display());
+            assert!(info.has_audio);
+            assert!(info.duration_us.is_some_and(|duration| duration > 0));
+        }
+
+        let movie = ffmpeg(
+            &format!(
+                "-f lavfi -i testsrc=size=64x64:rate=10:duration=1 {tone} \
+                 -c:v mpeg4 -c:a aac -shortest"
+            ),
+            "movie.mp4",
+        );
+        let info = probe(&movie).unwrap();
+        assert_eq!(info.kind, MediaKind::Video);
+        assert!(info.has_audio);
+        let info = probe(&cover).unwrap();
+        assert_eq!(info.kind, MediaKind::Image);
+        assert_eq!(info.duration_us, None);
+
+        fs::remove_dir_all(root).unwrap();
     }
 }

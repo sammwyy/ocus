@@ -293,6 +293,13 @@ impl Editor {
         &self.project
     }
 
+    pub fn recovered(project: Project) -> Self {
+        Self {
+            saved_revision: u64::MAX,
+            ..Self::new(project)
+        }
+    }
+
     pub fn revision(&self) -> u64 {
         self.revision
     }

@@ -1,5 +1,8 @@
+use crate::media::{Media, MediaKind};
+use crate::project::Project;
+use crate::timeline::{Clip, ClipContent, TrackKind};
 use ffmpeg_next as ffmpeg;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -13,7 +16,7 @@ pub const CHANNELS: usize = 2;
 const CAPACITY: usize = RATE as usize / 4 * CHANNELS;
 const CHUNK: usize = 2_048;
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AudioSource {
     pub path: PathBuf,
     pub start: u64,
@@ -22,10 +25,68 @@ pub struct AudioSource {
     pub volume: f32,
 }
 
+#[derive(Debug, PartialEq)]
 pub struct AudioPlan {
     pub sources: Vec<AudioSource>,
     pub end: u64,
     pub fps: (u32, u32),
+}
+
+impl AudioPlan {
+    pub fn from_project(project: &Project) -> Self {
+        Self::without_media(project, &HashSet::new())
+    }
+
+    /// The project's sound with clips of the `missing` media left out.
+    pub fn without_media(project: &Project, missing: &HashSet<u64>) -> Self {
+        let sources = project
+            .tracks()
+            .iter()
+            .flat_map(|track| {
+                track.clips.iter().filter_map(|clip| {
+                    let ClipContent::Media { media_id } = clip.content else {
+                        return None;
+                    };
+                    if missing.contains(&media_id) {
+                        return None;
+                    }
+                    let media = project.media().iter().find(|media| media.id == media_id)?;
+                    audible(track.kind, clip, media).then(|| AudioSource {
+                        path: media.path.clone(),
+                        start: clip.start_frame,
+                        source_start: clip.source_start_frame,
+                        duration: clip.duration_frames,
+                        volume: clip.volume,
+                    })
+                })
+            })
+            .collect();
+        Self {
+            sources,
+            end: project
+                .tracks()
+                .iter()
+                .flat_map(|track| &track.clips)
+                .filter_map(|clip| clip.start_frame.checked_add(clip.duration_frames))
+                .max()
+                .unwrap_or(0),
+            fps: (
+                project.settings().frame_rate.numerator,
+                project.settings().frame_rate.denominator,
+            ),
+        }
+    }
+}
+
+pub(crate) fn audible(kind: TrackKind, clip: &Clip, media: &Media) -> bool {
+    !clip.muted && carries_sound(kind, clip, media)
+}
+
+pub(crate) fn carries_sound(kind: TrackKind, clip: &Clip, media: &Media) -> bool {
+    match kind {
+        TrackKind::Video => clip.linked_audio && media.has_audio,
+        TrackKind::Audio => media.kind == MediaKind::Audio || media.has_audio,
+    }
 }
 
 /// Stereo samples the output device has consumed. Video pacing follows this
@@ -533,6 +594,93 @@ fn stereo_samples(frame: &ffmpeg::frame::Audio, channels: u16) -> Vec<f32> {
 mod tests {
     use super::*;
     use std::fs;
+
+    fn mixed_project() -> Project {
+        let mut value = serde_json::to_value(Project::new("Mixed audio")).unwrap();
+        value["settings"]["frame_rate"] =
+            serde_json::json!({"numerator": 30000, "denominator": 1001});
+        value["media"] = serde_json::json!([
+            {"id":1,"path":"video.mp4","kind":"video","has_audio":true},
+            {"id":2,"path":"silent.mp4","kind":"video","has_audio":false},
+            {"id":3,"path":"sound.wav","kind":"audio","has_audio":false},
+            {"id":4,"path":"image.png","kind":"image","has_audio":false}
+        ]);
+        let clip = |id, media_id, start, linked, muted, volume| {
+            serde_json::json!({
+                "id":id,"start_frame":start,"source_start_frame":2,"duration_frames":10,
+                "content":{"media":{"media_id":media_id}},"linked_audio":linked,"muted":muted,"volume":volume
+            })
+        };
+        value["tracks"][0]["clips"] = serde_json::json!([
+            clip(1, 1, 0, true, false, 0.5),
+            clip(2, 1, 10, false, false, 1.0),
+            clip(3, 2, 20, true, false, 1.0),
+            clip(4, 1, 30, true, true, 1.0),
+            clip(5, 4, 40, false, false, 1.0),
+            clip(6, 99, 50, true, false, 1.0)
+        ]);
+        value["tracks"][1]["clips"] = serde_json::json!([clip(7, 1, 5, true, false, 0.25)]);
+        value["tracks"][2]["clips"] = serde_json::json!([
+            clip(8, 3, 0, false, false, 1.5),
+            clip(9, 1, 10, false, false, 0.75),
+            clip(10, 2, 20, false, false, 1.0),
+            clip(11, 4, 30, false, false, 1.0),
+            clip(12, 3, 40, false, true, 1.0)
+        ]);
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn timeline_audio_plan_preserves_sources_and_clock() {
+        let project = mixed_project();
+        let source = |path: &str, start, volume| AudioSource {
+            path: path.into(),
+            start,
+            source_start: 2,
+            duration: 10,
+            volume,
+        };
+        let expected = AudioPlan {
+            sources: vec![
+                source("video.mp4", 0, 0.5),
+                source("video.mp4", 5, 0.25),
+                source("sound.wav", 0, 1.5),
+                source("video.mp4", 10, 0.75),
+            ],
+            end: 60,
+            fps: (30000, 1001),
+        };
+        assert_eq!(AudioPlan::from_project(&project), expected);
+        assert_eq!(
+            AudioPlan::without_media(&project, &HashSet::from([1, 99])),
+            AudioPlan {
+                sources: vec![source("sound.wav", 0, 1.5)],
+                end: 60,
+                fps: (30000, 1001),
+            }
+        );
+    }
+
+    #[test]
+    fn empty_timeline_audio_plan() {
+        let project = Project::new("Empty");
+        assert_eq!(
+            AudioPlan::from_project(&project),
+            AudioPlan {
+                sources: vec![],
+                end: 0,
+                fps: (30, 1),
+            }
+        );
+    }
+
+    #[test]
+    fn timeline_audio_plan_ignores_overflowing_ends() {
+        let mut value = serde_json::to_value(mixed_project()).unwrap();
+        value["tracks"][0]["clips"][5]["start_frame"] = u64::MAX.into();
+        let project = serde_json::from_value(value).unwrap();
+        assert_eq!(AudioPlan::from_project(&project).end, 50);
+    }
 
     #[test]
     fn downmixes_center_channel_through_feed() {

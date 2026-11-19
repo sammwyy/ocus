@@ -1,0 +1,9 @@
+{
+  "name": "ocus",
+  "version-string": "0.1.0",
+  "builtin-baseline": "d13c536672dced4b8c671955ea7d057a1b7a1ff8",
+  "dependencies": ["ffmpeg"],
+  "overrides": [
+    { "name": "ffmpeg", "version": "7.1.2", "port-version": 5 }
+  ]
+}

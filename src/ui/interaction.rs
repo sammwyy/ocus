@@ -69,7 +69,7 @@ enum DropAction {
         placement: (u64, u64),
     },
     Replace {
-        command: Command,
+        command: Box<Command>,
         selection: Vec<ClipRef>,
     },
     Nothing,
@@ -958,7 +958,7 @@ impl UiState {
                         ),
                         valid: true,
                         action: DropAction::Replace {
-                            command: Command::ReplaceTracks(plan.tracks),
+                            command: Box::new(Command::ReplaceTracks(plan.tracks)),
                             selection: plan.selection,
                         },
                     },
@@ -993,7 +993,7 @@ impl UiState {
                 self.insert_media_at(media_id, Some(placement));
             }
             DropAction::Replace { command, selection } => {
-                if self.edit(command) {
+                if self.edit(*command) {
                     self.select_clips(selection);
                 }
             }
@@ -1884,6 +1884,7 @@ mod tests {
                     transition_out: None,
                     id: track_id + 1,
                     speed: 1.0,
+                    lut: None,
                     color: Default::default(),
                     transition: None,
                     start_frame: 0,
@@ -1936,6 +1937,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                lut: None,
                 id: 1,
                 start_frame: 45,
                 source_start_frame: 0,
@@ -2085,6 +2087,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id,
                 clip: Clip {
+                    lut: None,
                     id: clip_id,
                     start_frame: 0,
                     source_start_frame: 0,
@@ -2145,6 +2148,7 @@ mod tests {
             has_audio: true,
         })));
         let detached = Clip {
+            lut: None,
             id: 1,
             start_frame: 0,
             source_start_frame: 15,
@@ -2418,6 +2422,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id,
                 clip: Clip {
+                    lut: None,
                     id,
                     start_frame,
                     source_start_frame: 0,

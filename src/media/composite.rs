@@ -1,3 +1,4 @@
+use super::lut::{CompiledLut, Lut};
 use super::preview::{FrameImage, FrameSource, VideoLayers, blend};
 use crate::project::Project;
 use crate::timeline::{
@@ -90,6 +91,7 @@ impl VisualPlan {
                                 project.media().iter().find(|media| media.id == *media_id)?;
                             Some(VisualClip::Media(FrameSource {
                                 speed: clip.speed,
+                                lut: clip.lut.clone(),
                                 color: clip.color,
                                 clip_id: clip.id,
                                 path: media.path.clone(),
@@ -188,6 +190,7 @@ impl VisualPlan {
 }
 
 pub struct Compositor {
+    luts: HashMap<std::path::PathBuf, CompiledLut>,
     width: u32,
     height: u32,
     plan: VisualPlan,
@@ -203,6 +206,7 @@ enum Layer<'a> {
 impl Compositor {
     pub fn new(plan: VisualPlan, width: u32, height: u32, fps: (u32, u32)) -> Self {
         Self {
+            luts: HashMap::new(),
             width,
             height,
             plan,
@@ -246,6 +250,7 @@ impl Compositor {
                             self.layers.layer_at(source, position, cancelled)?,
                             source.color,
                         );
+                        let image = apply_lut(&mut self.luts, source, image)?;
                         let opaque = image.width == self.width
                             && image.height == self.height
                             && image.pixels.len() == pixels.len()
@@ -320,6 +325,7 @@ impl Compositor {
                     self.layers.layer_at(source, position, cancelled)?,
                     source.color,
                 );
+                let image = apply_lut(&mut self.luts, source, image)?;
                 for (dest, src) in pixels
                     .as_chunks_mut::<4>()
                     .0
@@ -431,6 +437,21 @@ impl Compositor {
             pixels,
         }))
     }
+}
+
+fn apply_lut(
+    cache: &mut HashMap<std::path::PathBuf, CompiledLut>,
+    source: &FrameSource,
+    image: Arc<FrameImage>,
+) -> Result<Arc<FrameImage>, String> {
+    let Some(path) = &source.lut else {
+        return Ok(image);
+    };
+    if !cache.contains_key(path) {
+        let lut = Lut::load(path)?.compile();
+        cache.insert(path.clone(), lut);
+    }
+    Ok(cache[path].apply(image))
 }
 
 fn copy_shifted(source: &[u8], dest: &mut [u8], width: u32, height: u32, dx: i64, dy: i64) {
@@ -695,6 +716,7 @@ mod tests {
             tracks: vec![vec![VisualClip::Media(FrameSource {
                 color,
                 speed: 1.0,
+                lut: None,
                 clip_id: 1,
                 path: path.clone(),
                 kind: crate::media::MediaKind::Image,
@@ -758,7 +780,182 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn color_adjustment_precedes_lut_in_normal_and_transition_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("color.tga");
+        let mut tga = vec![0; 18];
+        tga[2] = 2;
+        tga[12..14].copy_from_slice(&2u16.to_le_bytes());
+        tga[14..16].copy_from_slice(&2u16.to_le_bytes());
+        tga[16] = 32;
+        tga[17] = 40;
+        tga.extend([200, 150, 100, 255].repeat(4));
+        fs::write(&path, tga).unwrap();
+        let lut_path = dir.path().join("invert.cube");
+        fs::write(&lut_path, "LUT_1D_SIZE 3\n1 1 1\n0.75 0.75 0.75\n0 0 0\n").unwrap();
+        let color = ColorAdjust {
+            saturation: 0.0,
+            ..Default::default()
+        };
+        let image = Arc::new(FrameImage {
+            width: 2,
+            height: 2,
+            pixels: [100, 150, 200, 255].repeat(4),
+        });
+        let lut = Lut::load(&lut_path).unwrap().compile();
+        let expected = [168, 168, 168, 255].repeat(4);
+        assert_eq!(
+            lut.apply(adjust_color(image.clone(), color)).pixels,
+            expected
+        );
+        assert_ne!(adjust_color(lut.apply(image), color).pixels, expected);
+        let plan = VisualPlan {
+            resolution: (2, 2),
+            transitions: HashMap::new(),
+            transitions_out: HashMap::new(),
+            tracks: vec![vec![VisualClip::Media(FrameSource {
+                color,
+                lut: Some(lut_path),
+                speed: 1.0,
+                clip_id: 1,
+                path,
+                kind: MediaKind::Image,
+                start: 0,
+                source_start: 0,
+                duration: 10,
+            })]],
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut compositor = Compositor::new(plan, 2, 2, (30, 1));
+        assert_eq!(
+            compositor.frame(0, &cancelled).unwrap().unwrap().pixels,
+            expected
+        );
+        for kind in [
+            TransitionKind::Fade,
+            TransitionKind::Dissolve,
+            TransitionKind::Slide,
+        ] {
+            compositor.plan.transitions.insert(
+                1,
+                Transition {
+                    kind,
+                    duration_frames: 3,
+                    direction: Default::default(),
+                },
+            );
+            let expected = if kind == TransitionKind::Slide {
+                [[0, 0, 0, 255], [168, 168, 168, 255]].concat().repeat(2)
+            } else {
+                [126, 126, 126, 255].repeat(4)
+            };
+            assert_eq!(
+                compositor.frame(2, &cancelled).unwrap().unwrap().pixels,
+                expected,
+                "{kind:?}"
+            );
+        }
+    }
+
     static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn lut_colors_normal_transition_and_errors() {
+        ffmpeg_next::init().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("image.tga");
+        let mut tga = vec![0; 18];
+        tga[2] = 2;
+        tga[12..14].copy_from_slice(&2u16.to_le_bytes());
+        tga[14..16].copy_from_slice(&2u16.to_le_bytes());
+        tga[16] = 32;
+        tga[17] = 40;
+        tga.extend([200, 64, 128, 255].repeat(4));
+        fs::write(&path, tga).unwrap();
+        let lut_path = dir.path().join("invert.cube");
+        fs::write(&lut_path, "LUT_1D_SIZE 2\n1 1 1\n0 0 0\n").unwrap();
+        let source = FrameSource {
+            lut: None,
+            speed: 1.0,
+            color: Default::default(),
+            clip_id: 1,
+            path,
+            kind: MediaKind::Image,
+            start: 0,
+            source_start: 0,
+            duration: 10,
+        };
+        let plan = VisualPlan {
+            resolution: (2, 2),
+            transitions: HashMap::new(),
+            transitions_out: HashMap::new(),
+            tracks: vec![vec![VisualClip::Media(source.clone())]],
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut compositor = Compositor::new(plan, 2, 2, (30, 1));
+        assert_eq!(
+            &compositor.frame(0, &cancelled).unwrap().unwrap().pixels[..4],
+            &[128, 64, 200, 255]
+        );
+        let image = Arc::new(FrameImage {
+            width: 1,
+            height: 1,
+            pixels: vec![128, 64, 200, 137],
+        });
+        assert!(Arc::ptr_eq(
+            &image,
+            &apply_lut(&mut compositor.luts, &source, image.clone()).unwrap()
+        ));
+        let VisualClip::Media(source) = &mut compositor.plan.tracks[0][0] else {
+            panic!()
+        };
+        source.lut = Some(lut_path.clone());
+        assert_eq!(
+            &compositor.frame(0, &cancelled).unwrap().unwrap().pixels[..4],
+            &[127, 191, 55, 255]
+        );
+        let graded = compositor.luts[&lut_path].apply(image);
+        assert_eq!(graded.pixels, [127, 191, 55, 137]);
+        compositor.plan.transitions.insert(
+            1,
+            Transition {
+                kind: TransitionKind::Dissolve,
+                duration_frames: 3,
+                direction: Default::default(),
+            },
+        );
+        assert_eq!(
+            &compositor.frame(0, &cancelled).unwrap().unwrap().pixels[..4],
+            &[32, 48, 14, 255]
+        );
+        assert_eq!(compositor.luts.len(), 1);
+        let VisualClip::Media(source) = &mut compositor.plan.tracks[0][0] else {
+            panic!()
+        };
+        source.lut = Some(dir.path().join("missing.cube"));
+        assert!(
+            compositor
+                .frame(0, &cancelled)
+                .err()
+                .unwrap()
+                .contains("missing.cube")
+        );
+        let invalid = dir.path().join("invalid.cube");
+        fs::write(&invalid, "not a LUT").unwrap();
+        let VisualClip::Media(source) = &mut compositor.plan.tracks[0][0] else {
+            panic!()
+        };
+        source.lut = Some(invalid);
+        compositor.plan.transitions.clear();
+        assert!(
+            compositor
+                .frame(0, &cancelled)
+                .err()
+                .unwrap()
+                .contains("invalid.cube")
+        );
+    }
 
     #[test]
     fn out_transition_pixels_and_directional_slides() {
@@ -778,6 +975,7 @@ mod tests {
             VisualClip::Media(FrameSource {
                 color: Default::default(),
                 speed: 1.0,
+                lut: None,
                 clip_id: id,
                 path,
                 kind: MediaKind::Image,
@@ -1068,6 +1266,7 @@ mod tests {
             tracks: vec![vec![
                 VisualClip::Media(FrameSource {
                     speed: 1.0,
+                    lut: None,
                     clip_id: 1,
                     path: video,
                     color: Default::default(),
@@ -1078,6 +1277,7 @@ mod tests {
                 }),
                 VisualClip::Media(FrameSource {
                     speed: 1.0,
+                    lut: None,
                     clip_id: 2,
                     path: still,
                     color: Default::default(),
@@ -1219,6 +1419,7 @@ mod tests {
             fs::write(&path, tga).unwrap();
             VisualClip::Media(FrameSource {
                 speed: 1.0,
+                lut: None,
                 clip_id: id,
                 path,
                 color: Default::default(),
@@ -1426,6 +1627,7 @@ mod tests {
             resolution: (1920, 1080),
             tracks: vec![vec![VisualClip::Media(FrameSource {
                 speed: 1.0,
+                lut: None,
                 color: Default::default(),
                 clip_id: 1,
                 path,
@@ -1477,6 +1679,7 @@ mod tests {
                 resolution: (1920, 1080),
                 tracks: vec![vec![VisualClip::Media(FrameSource {
                     speed: 1.0,
+                    lut: None,
                     color: Default::default(),
                     clip_id: 1,
                     path,
@@ -1571,6 +1774,7 @@ mod tests {
         let source = |id, path| {
             VisualClip::Media(FrameSource {
                 speed: 1.0,
+                lut: None,
                 color: Default::default(),
                 clip_id: id,
                 path,
@@ -1760,6 +1964,7 @@ mod tests {
         let source = |id, path| {
             VisualClip::Media(FrameSource {
                 speed: 1.0,
+                lut: None,
                 color: Default::default(),
                 clip_id: id,
                 path,

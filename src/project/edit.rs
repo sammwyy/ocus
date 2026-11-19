@@ -139,6 +139,11 @@ pub enum Command {
         fade_in_frames: u64,
         fade_out_frames: u64,
     },
+    SetClipNoiseReduction {
+        track_id: u64,
+        clip_id: u64,
+        enabled: bool,
+    },
     SetTitle {
         track_id: u64,
         clip_id: u64,
@@ -416,6 +421,7 @@ impl Editor {
             | Command::SetClipColor { track_id, .. }
             | Command::SetClipLut { track_id, .. }
             | Command::SetClipFades { track_id, .. }
+            | Command::SetClipNoiseReduction { track_id, .. }
             | Command::SetTransition { track_id, .. }
             | Command::SetTransitionOut { track_id, .. }
             | Command::SetTitle { track_id, .. } => editable(*track_id),
@@ -876,6 +882,28 @@ impl Editor {
                 clip.muted = muted;
                 Some(inverse)
             }
+            Command::SetClipNoiseReduction {
+                track_id,
+                clip_id,
+                enabled,
+            } => {
+                let track = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.id == track_id)?;
+                let clip = track.clips.iter_mut().find(|clip| clip.id == clip_id)?;
+                if !(track.kind == TrackKind::Audio || clip.linked_audio)
+                    || clip.noise_reduction == enabled
+                {
+                    return None;
+                }
+                Some(Command::SetClipNoiseReduction {
+                    track_id,
+                    clip_id,
+                    enabled: std::mem::replace(&mut clip.noise_reduction, enabled),
+                })
+            }
             Command::SetClipLut {
                 track_id,
                 clip_id,
@@ -1110,6 +1138,7 @@ mod tests {
             fade_in_frames: 0,
             fade_out_frames: 0,
             muted: false,
+            noise_reduction: false,
             linked_audio: false,
         };
         assert!(editor.apply(Command::InsertClip {
@@ -1296,6 +1325,7 @@ mod tests {
             lut: None,
             volume: 1.0,
             muted: false,
+            noise_reduction: false,
             linked_audio: false,
             color: ColorAdjust::default(),
             transition: None,
@@ -1531,6 +1561,7 @@ mod tests {
                 fade_in_frames: 0,
                 fade_out_frames: 0,
                 muted: false,
+                noise_reduction: false,
                 transition: None,
                 linked_audio: true,
                 color: Default::default(),
@@ -1601,6 +1632,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             };
             assert!(editor.apply(Command::InsertClip {
@@ -1680,6 +1712,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         };
         assert!(editor.apply(Command::InsertClip {
@@ -1762,6 +1795,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         };
         assert!(editor.apply(Command::InsertClip {
@@ -1811,6 +1845,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             },
         }));
@@ -2092,6 +2127,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         };
         let insert =
@@ -2177,6 +2213,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         };
         project.tracks[0].clips = vec![
@@ -2281,6 +2318,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         };
         for (id, start_frame, track_id) in [(1, 0, 0), (2, 30, 0), (3, 30, 1)] {
@@ -2375,6 +2413,7 @@ mod tests {
                     transition_out: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
+                    noise_reduction: false,
                     linked_audio: id == 2,
                 },
             }));
@@ -2433,6 +2472,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         };
         for (track_id, clip) in [
@@ -2459,6 +2499,7 @@ mod tests {
                     transition_out: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
+                    noise_reduction: false,
                     linked_audio: false,
                 },
             ),
@@ -2530,6 +2571,7 @@ mod tests {
                     transition_out: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
+                    noise_reduction: false,
                     linked_audio: false,
                 },
             }));
@@ -2566,6 +2608,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         };
         assert!(!editor.apply(Command::InsertClip {
@@ -2611,6 +2654,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             },
         }));
@@ -2635,6 +2679,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             },
         }));
@@ -2674,6 +2719,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             },
         }));

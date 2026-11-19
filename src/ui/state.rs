@@ -1551,6 +1551,7 @@ impl UiState {
                     source_start: range.source_start,
                     duration: range.duration,
                     volume: 1.0,
+                    noise_reduction: false,
                 })
                 .collect(),
             fps,
@@ -3849,6 +3850,7 @@ mod tests {
                 source_start: clip.source_start_frame,
                 duration: clip.duration_frames,
                 volume: 1.0,
+                noise_reduction: false,
             }],
             end: 1,
             fps: (30, 1),
@@ -4174,6 +4176,7 @@ mod tests {
                     transition_out: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
+                    noise_reduction: false,
                     linked_audio: false,
                 }
             }));
@@ -5049,6 +5052,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             }
         }));

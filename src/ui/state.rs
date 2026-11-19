@@ -1,6 +1,9 @@
 use super::edits::{self, ClipRef, CopiedClip};
 use super::interaction::{DragState, Gesture, MenuState};
-use crate::export::{self, ExportControl, presets};
+use crate::export::{
+    self, presets,
+    queue::{Queue, Request, next_export_path},
+};
 use crate::media::audio::{self, AudioPlan, AudioSource, Clock, Waveform, carries_sound};
 use crate::media::cache::{storyboard, thumbnail};
 use crate::media::composite::VisualPlan;
@@ -72,6 +75,11 @@ enum UnsavedChoice {
 }
 
 type AfterSave = Box<dyn FnOnce(&UiState)>;
+
+enum ExportEvent {
+    Destination(PathBuf),
+    Finished(LastExport, Result<(), String>),
+}
 
 const SAVE_CHOICE: &str = "Save";
 const DISCARD_CHOICE: &str = "Don't Save";
@@ -294,8 +302,9 @@ pub(crate) struct UiState {
     pub autosave_error: Signal<Option<String>>,
     pub dirty: Signal<bool>,
     pub busy: Signal<bool>,
-    pub exporting: Signal<bool>,
-    pub export_total: Signal<u64>,
+    pub export_queue: Signal<Queue>,
+    pub export_queue_modal: Signal<bool>,
+    pub export_queue_scroll: ScrollController,
     pub export_modal: Signal<bool>,
     pub export_error: Signal<Option<String>>,
     pub export_page: Signal<ExportPage>,
@@ -351,7 +360,6 @@ pub(crate) struct UiState {
     storyboard_cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
     storyboard_serial: Rc<Cell<u64>>,
     storyboard_recent: Rc<RefCell<Vec<StoryboardKey>>>,
-    export_control: Rc<RefCell<Option<Arc<ExportControl>>>>,
     audio_output: Rc<RefCell<Option<playback::Output>>>,
     audio_failed: Rc<Cell<bool>>,
 }
@@ -459,8 +467,9 @@ impl UiState {
             autosave_error: Signal::new(None),
             dirty: Signal::new(false),
             busy: Signal::new(false),
-            exporting: Signal::new(false),
-            export_total: Signal::new(0),
+            export_queue: Signal::new(Queue::default()),
+            export_queue_modal: Signal::new(false),
+            export_queue_scroll: ScrollController::default(),
             export_modal: Signal::new(false),
             export_error: Signal::new(None),
             export_page: Signal::new(ExportPage::Presets),
@@ -521,7 +530,6 @@ impl UiState {
             storyboard_cancel: Rc::new(RefCell::new(None)),
             storyboard_serial: Rc::new(Cell::new(0)),
             storyboard_recent: Rc::new(RefCell::new(Vec::new())),
-            export_control: Rc::new(RefCell::new(None)),
             audio_output: Rc::new(RefCell::new(None)),
             audio_failed: Rc::new(Cell::new(false)),
         }
@@ -779,7 +787,7 @@ impl UiState {
     }
 
     pub fn open_settings(&self) {
-        if self.export_modal.peek() {
+        if self.export_modal.peek() || self.export_queue_modal.peek() {
             return;
         }
         self.close_menu();
@@ -2401,7 +2409,11 @@ impl UiState {
                 let path = path.clone();
                 move || store::save(&path, &project)
             },
-            move |result| state.finish_save(path, revision, exported, after_save, result),
+            move |result| {
+                creamui::reactive::batch(|| {
+                    state.finish_save(path, revision, exported, after_save, result);
+                });
+            },
         );
     }
 
@@ -2413,6 +2425,7 @@ impl UiState {
         after_save: Option<AfterSave>,
         result: std::io::Result<()>,
     ) {
+        let from_export = exported.is_some();
         self.busy.set(false);
         if let Err(error) = &result {
             self.show_file_error("Save failed", error.to_string());
@@ -2448,6 +2461,9 @@ impl UiState {
         });
         if saved_current && let Some(after_save) = after_save {
             after_save(self);
+        }
+        if from_export {
+            self.start_next_export();
         }
     }
 
@@ -2490,7 +2506,7 @@ impl UiState {
     }
 
     pub fn export_dialog(&self) {
-        if self.busy.peek() || !export::can_render(self.editor.borrow().project()) {
+        if !self.can_queue_export() || !export::can_render(self.editor.borrow().project()) {
             return;
         }
         self.export_error.set(None);
@@ -2527,6 +2543,7 @@ impl UiState {
         } else {
             "Project original".into()
         });
+        let path = self.export_queue.peek().suggested_path(path);
         self.export_path
             .set_value(path.to_string_lossy().into_owned());
         self.export_name.set_value(String::new());
@@ -2537,6 +2554,21 @@ impl UiState {
 
     pub fn close_export_dialog(&self) {
         self.export_modal.set(false);
+    }
+
+    pub fn open_export_queue(&self) {
+        self.close_menu();
+        self.export_modal.set(false);
+        self.export_queue_scroll.set(0.0);
+        self.export_queue_modal.set(true);
+    }
+
+    pub fn close_export_queue(&self) {
+        self.export_queue_modal.set(false);
+    }
+
+    fn can_queue_export(&self) -> bool {
+        !self.busy.peek() || self.export_queue.peek().accepts_jobs_while_busy()
     }
 
     pub fn set_export_draft(&self, settings: ExportSettings) {
@@ -2771,6 +2803,9 @@ impl UiState {
     }
 
     pub fn save_export_preset(&self) {
+        if self.busy.peek() {
+            return;
+        }
         if !self.export_presets_ready.peek() {
             self.status
                 .set("Preset library is not ready; check the config file".into());
@@ -2854,7 +2889,11 @@ impl UiState {
     }
 
     pub fn quick_export(&self) {
+        if !self.can_queue_export() {
+            return;
+        }
         if self.busy.peek() {
+            self.export_dialog();
             return;
         }
         let last = self.editor.borrow().project().last_export().cloned();
@@ -2877,7 +2916,7 @@ impl UiState {
             );
             return;
         }
-        if self.busy.peek() || !export::can_render(self.editor.borrow().project()) {
+        if !self.can_queue_export() || !export::can_render(self.editor.borrow().project()) {
             return;
         }
         let last = LastExport {
@@ -2888,17 +2927,14 @@ impl UiState {
             self.set_export_error(error);
             return;
         }
-        let Some(app) = self.app.borrow().clone() else {
+        if self.app.borrow().is_none() {
             self.set_export_error("Export requires a running app".into());
             return;
-        };
+        }
         let project = self.editor.borrow().project().clone();
-        let project_path = self.project_path.peek();
-        let was_modal = self.export_modal.peek();
-        let control = Arc::new(ExportControl::default());
         let end = self.sequence_end();
         let fps = &project.settings().frame_rate;
-        self.export_total.set(if settings.container.has_video() {
+        let total = if settings.container.has_video() {
             export::output_frames(
                 end,
                 (fps.numerator, fps.denominator),
@@ -2910,83 +2946,94 @@ impl UiState {
             .unwrap_or(0)
         } else {
             end
+        };
+        let request = Request {
+            project,
+            output: last,
+            total,
+            auto_number: quick,
+        };
+        let mut queue = self.export_queue.peek();
+        if let Err(error) = queue.enqueue(request) {
+            self.set_export_error(error);
+            return;
+        }
+        creamui::reactive::batch(|| {
+            self.export_queue.set(queue);
+            self.export_modal.set(false);
+            self.export_error.set(None);
+            self.open_export_queue();
+            if self.busy.peek() {
+                self.status.set("Export added to the queue".into());
+            } else {
+                self.start_next_export();
+            }
         });
-        self.export_modal.set(false);
-        self.export_error.set(None);
-        *self.export_control.borrow_mut() = Some(control.clone());
-        self.exporting.set(true);
+    }
+
+    fn start_next_export(&self) {
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        if self.busy.peek() {
+            return;
+        }
+        let mut queue = self.export_queue.peek();
+        let Some(work) = queue.start_next() else {
+            return;
+        };
+        let id = work.id;
+        let format = work.request.output.settings.container.extension();
+        self.export_queue.set(queue);
         self.busy.set(true);
-        self.status
-            .set(format!("Encoding {}…", settings.container.extension()));
+        self.status.set(format!("Encoding {format}…"));
         let state = self.clone();
-        app.spawn_background(
-            move || {
-                let destination = if quick {
-                    unused_export_path(path)
-                } else {
-                    path
-                };
-                let result =
-                    export::render_with_settings(&project, &destination, &settings, control);
-                (destination, settings, result)
+        app.spawn_stream(
+            move |send| {
+                let (output, result) = work.render(|path| send(ExportEvent::Destination(path)));
+                send(ExportEvent::Finished(output, result));
             },
-            move |(path, settings, result)| {
-                state.exporting.set(false);
-                state.export_control.borrow_mut().take();
-                state.busy.set(false);
-                if let Err(error) = &result
-                    && error != "Export cancelled"
-                {
-                    state
-                        .export_error
-                        .set(Some(format!("Export failed: {error}")));
-                }
-                if result
-                    .as_ref()
-                    .is_err_and(|error| error != "Export cancelled")
-                    && was_modal
-                {
-                    state.export_modal.set(true);
-                }
-                state.status.set(match result {
-                    Ok(()) => {
-                        state.remember_export_directory(&path);
-                        state.edit(Command::SetLastExport(Some(LastExport {
-                            settings,
-                            path: path.clone(),
-                        })));
-                        if let Some(project_path) = &project_path {
-                            state.save_to_with_export(
-                                project_path.clone(),
-                                Some(path.clone()),
-                                None,
-                            );
-                        }
-                        if project_path.is_some() {
-                            format!("Exported: {}", path.display())
-                        } else {
-                            format!(
-                                "Exported: {} · Save project to keep settings",
-                                path.display()
-                            )
-                        }
-                    }
-                    Err(ref error) if error == "Export cancelled" => error.clone(),
-                    Err(error) => format!("Export failed: {error}"),
-                });
+            move |event| match event {
+                ExportEvent::Destination(path) => state
+                    .export_queue
+                    .update(|queue| queue.set_active_path(id, path)),
+                ExportEvent::Finished(output, result) => state.finish_export(id, output, result),
             },
         );
     }
 
-    pub fn cancel_export(&self) {
-        if let Some(control) = self.export_control.borrow().as_ref() {
-            control.cancel();
-            self.status.set("Cancelling export…".into());
-        }
+    fn finish_export(&self, id: u64, output: LastExport, result: Result<(), String>) {
+        creamui::reactive::batch(|| {
+            let path = output.path.clone();
+            self.export_queue
+                .update(|queue| queue.finish(id, path.clone(), &result));
+            self.busy.set(false);
+            match result {
+                Ok(()) => {
+                    self.remember_export_directory(&path);
+                    self.edit(Command::SetLastExport(Some(output)));
+                    if let Some(project_path) = self.project_path.peek() {
+                        self.save_to_with_export(project_path, Some(path), None);
+                        return;
+                    }
+                    self.status.set(format!(
+                        "Exported: {} · Save project to keep settings",
+                        path.display()
+                    ));
+                }
+                Err(error) if error == export::CANCELLED => self.status.set(error),
+                Err(error) => self.status.set(format!("Export failed: {error}")),
+            }
+            self.start_next_export();
+        });
     }
 
-    pub fn export_control(&self) -> Option<Arc<ExportControl>> {
-        self.export_control.borrow().clone()
+    pub fn cancel_export(&self, id: u64) {
+        self.export_queue.update(|queue| queue.cancel(id));
+    }
+
+    pub fn clear_finished_exports(&self) {
+        self.export_queue.update(Queue::clear_finished);
     }
 
     pub fn relink_dialog(&self, media_id: Option<u64>) {
@@ -3515,38 +3562,6 @@ fn upload_preview_frame(window: &WindowHandle, image: FrameImage) -> Result<GpuF
     Ok(GpuFrame::new(
         texture.create_view(&wgpu::TextureViewDescriptor::default()),
     ))
-}
-
-fn next_export_path(path: &Path) -> PathBuf {
-    let stem = path
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or("export");
-    let extension = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("mp4");
-    let (prefix, next) = stem
-        .rsplit_once('-')
-        .and_then(|(prefix, number)| {
-            number
-                .parse::<u32>()
-                .ok()
-                .and_then(|n| n.checked_add(1))
-                .map(|next| (prefix, next))
-        })
-        .unwrap_or((stem, 2));
-    path.with_file_name(format!("{prefix}-{next}.{extension}"))
-}
-
-fn unused_export_path(mut path: PathBuf) -> PathBuf {
-    for _ in 0..10_000 {
-        if !path.exists() {
-            break;
-        }
-        path = next_export_path(&path);
-    }
-    path
 }
 
 /// Platforms without custom button labels report the Yes/No/Cancel buttons.
@@ -4815,29 +4830,6 @@ mod tests {
             next_export_path(&next_export_path(first)),
             Path::new("/tmp/video-3.webm")
         );
-    }
-
-    #[test]
-    fn quick_export_skips_existing_files_in_background() {
-        let dir = std::env::temp_dir().join(format!(
-            "ocus-quick-path-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&dir).unwrap();
-        let first = dir.join("video-2.webm");
-        let second = dir.join("video-3.webm");
-        std::fs::write(&first, b"first").unwrap();
-        std::fs::write(&second, b"second").unwrap();
-        assert_eq!(unused_export_path(first.clone()), dir.join("video-4.webm"));
-        assert_eq!(std::fs::read(&first).unwrap(), b"first");
-        assert_eq!(std::fs::read(&second).unwrap(), b"second");
-        std::fs::remove_file(first).unwrap();
-        std::fs::remove_file(second).unwrap();
-        std::fs::remove_dir(dir).unwrap();
     }
 
     #[test]

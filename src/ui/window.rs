@@ -2160,6 +2160,19 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                             .child(text("Noise reduction", text_color(), 11.0)),
                     ),
                     text("Best for speech with background noise.", faint(), 10.0),
+                    inline(with_help(
+                        secondary_button(
+                            None,
+                            "Normalize loudness",
+                            true,
+                            state,
+                            UiState::normalize_loudness,
+                        ),
+                        Help::new(
+                            "Set volume so this clip plays at a standard loudness (-14 LUFS)",
+                        ),
+                        state,
+                    )),
                     fade_row(state, &clip, true),
                     fade_row(state, &clip, false),
                     if clip.linked_audio {

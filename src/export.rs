@@ -1,11 +1,10 @@
 pub mod presets;
 
-use crate::media::audio::{self, AudioPlan, AudioQueue, AudioSource};
+use crate::media::audio::{self, AudioPlan, AudioQueue};
 use crate::media::composite::{Compositor, VisualPlan};
-use crate::media::{MediaKind, fitted_dimensions};
+use crate::media::fitted_dimensions;
 use crate::project::Project;
 use crate::project::export_settings::{AudioCodec, EncodingSpeed, ExportSettings, VideoCodec};
-use crate::timeline::{ClipContent, TrackKind};
 use ffmpeg_next as ffmpeg;
 use std::fs;
 use std::path::Path;
@@ -209,42 +208,13 @@ fn render_to(
         stream.set_parameters(&encoder);
         stream.index()
     };
-    let end = project
-        .tracks()
-        .iter()
-        .flat_map(|track| &track.clips)
-        .map(|clip| clip.start_frame + clip.duration_frames)
-        .max()
-        .ok_or("Nothing to export")?;
-    let fps_pair = (
-        project.settings().frame_rate.numerator,
-        project.settings().frame_rate.denominator,
-    );
-    let sources: Vec<_> = project
-        .tracks()
-        .iter()
-        .flat_map(|track| {
-            track.clips.iter().filter_map(|clip| {
-                let ClipContent::Media { media_id } = clip.content else {
-                    return None;
-                };
-                let media = project.media().iter().find(|media| media.id == media_id)?;
-                let audible = !clip.muted
-                    && match track.kind {
-                        TrackKind::Video => clip.linked_audio && media.has_audio,
-                        TrackKind::Audio => media.kind == MediaKind::Audio || media.has_audio,
-                    };
-                audible.then(|| AudioSource {
-                    path: media.path.clone(),
-                    start: clip.start_frame,
-                    source_start: clip.source_start_frame,
-                    duration: clip.duration_frames,
-                    volume: clip.volume,
-                })
-            })
-        })
-        .collect();
-    for source in &sources {
+    if !can_render(project) {
+        return Err("Nothing to export".into());
+    }
+    let audio_plan = AudioPlan::from_project(project);
+    let end = audio_plan.end;
+    let fps_pair = audio_plan.fps;
+    for source in &audio_plan.sources {
         control.check()?;
         let interrupted = control.cancelled.clone();
         let input = ffmpeg::format::input_with_interrupt(&source.path, move || {
@@ -255,7 +225,7 @@ fn render_to(
             return Err("An audible clip has no audio stream".into());
         }
     }
-    let audio_encoder = if sources.is_empty() {
+    let audio_encoder = if audio_plan.sources.is_empty() {
         None
     } else {
         let audio_id = match settings.audio_codec {
@@ -330,25 +300,14 @@ fn render_to(
         audio_end: (u128::from(end) * u128::from(audio::RATE) * u128::from(fps_pair.1)
             / u128::from(fps_pair.0)) as u64,
     };
-    let queue = (!sources.is_empty()).then(|| Arc::new(AudioQueue::new()));
+    let queue = (!audio_plan.sources.is_empty()).then(|| Arc::new(AudioQueue::new()));
     muxer.queue = queue.clone();
     let cancelled = Arc::new(AtomicBool::new(false));
     thread::scope(|scope| {
         let worker = queue.as_ref().map(|queue| {
             let queue = queue.clone();
             let cancelled = cancelled.clone();
-            scope.spawn(move || {
-                audio::feed(
-                    &AudioPlan {
-                        sources,
-                        end,
-                        fps: fps_pair,
-                    },
-                    0,
-                    queue,
-                    cancelled,
-                )
-            })
+            scope.spawn(move || audio::feed(&audio_plan, 0, queue, cancelled))
         });
         let result = (|| {
             let (picture_width, picture_height) = fitted_dimensions(

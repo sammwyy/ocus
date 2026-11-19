@@ -28,6 +28,7 @@ src/
   playback.rs       default output device and monitor sound sessions
   export.rs         timeline video, GIF and WAV encoding with cancellation
   export/presets.rs  built-in profiles and global named preset storage
+  export/queue.rs    session-local FIFO and per-output status/cancellation
   timeline.rs       tracks, clips, and title data
   ui/
     window.rs       integrated titlebar, editor layout, and clip controls
@@ -128,6 +129,9 @@ keeps the last export settings and destination as an optional version 1 field,
 changed through a command, and auto-saves an already-saved project after
 successful export. `export::presets` validates and atomically writes named
 presets to the OS config directory independently of project files.
+The UI queues project snapshots with per-job settings and destinations.
+Only one export worker runs at a time, and the next job starts after that
+worker and any resulting project save have finished.
 The UI has independent source and program monitors, each with its own
 decode stream, position and GPU frame slot; only one plays at a time. It
 supports video play/pause, frame stepping, monitor and timeline scrubbing,

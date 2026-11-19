@@ -3,13 +3,13 @@ use super::controls::{
     Thumb, VIDEO, ZoomSlider, accent, accent_button, background, border, chip, faint, fit, glyph,
     heading, icon_button, kind_color, list_row, media_item, menu_row, muted, panel, panel_raised,
     play_button, secondary_button, segment, short_duration, sized_icon_button, surface,
-    surface_hover, text, text_color, timecode, tool_button,
+    surface_hover, text, text_color, timecode, tool_button, with_help,
 };
 use super::edits::ClipRef;
 use super::interaction::{Action, DragPayload, MenuState};
 use super::state::{
-    ExportPage, MediaView, PlaybackMonitor, SequenceContent, SettingsPage, SourceRange,
-    TitleGesture, ZOOM_SECONDS, media_frames,
+    ExportPage, MediaView, PlaybackMonitor, PreviewState, SequenceContent, SettingsPage,
+    SourceRange, TitleGesture, ZOOM_SECONDS, media_frames,
 };
 use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
 use super::waveform::WaveformSlice;
@@ -22,7 +22,7 @@ use crate::media::{Media, MediaKind};
 use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, VideoCodec};
 use crate::project::{Command, Project};
 use crate::settings::ThemeMode;
-use crate::timeline::{Clip, ClipContent, Title, Track, TrackKind};
+use crate::timeline::{Clip, ClipContent, Title, Track, TrackKind, Transition, TransitionKind};
 use creamui::core::layout::{Dimension, Style};
 use creamui::core::{Painter, Point, Rect, TextAlign, Widget};
 use creamui::fonts::{FontWeight, HorizontalAlign, LayoutSettings, cached_layout, resolve};
@@ -212,6 +212,144 @@ fn timing_steps(state: &UiState, source: bool) -> BoxedWidget {
         }));
     }
     Box::new(row)
+}
+
+fn selected_video_clip(state: &UiState) -> Option<(u64, Clip)> {
+    if state.busy.peek() {
+        return None;
+    }
+    let (track_id, clip) = selected_clip(state)?;
+    state
+        .editor
+        .borrow()
+        .project()
+        .tracks()
+        .iter()
+        .any(|track| track.id == track_id && track.kind == TrackKind::Video)
+        .then_some((track_id, clip))
+}
+
+fn transition_frames(state: &UiState, seconds: f64) -> u64 {
+    let fps = state.frame_rate();
+    (seconds * f64::from(fps.0) / f64::from(fps.1))
+        .round()
+        .max(1.0) as u64
+}
+
+fn set_transition_kind(state: &UiState, kind: Option<TransitionKind>) {
+    let Some((track_id, clip)) = selected_video_clip(state) else {
+        return;
+    };
+    let transition = kind.map(|kind| Transition {
+        kind,
+        duration_frames: clip
+            .transition
+            .as_ref()
+            .map_or_else(
+                || transition_frames(state, 0.5),
+                |transition| transition.duration_frames,
+            )
+            .clamp(1, clip.duration_frames),
+    });
+    state.edit(Command::SetTransition {
+        track_id,
+        clip_id: clip.id,
+        transition,
+    });
+}
+
+fn adjust_transition_duration(state: &UiState, increase: bool) {
+    let Some((track_id, clip)) = selected_video_clip(state) else {
+        return;
+    };
+    let Some(mut transition) = clip.transition else {
+        return;
+    };
+    let current = transition.duration_frames.min(clip.duration_frames);
+    let step = transition_frames(state, 0.25);
+    transition.duration_frames = if increase {
+        current.saturating_add(step)
+    } else {
+        current.saturating_sub(step)
+    }
+    .clamp(1, clip.duration_frames);
+    state.edit(Command::SetTransition {
+        track_id,
+        clip_id: clip.id,
+        transition: Some(transition),
+    });
+}
+
+fn transition_section(state: &UiState, clip: &Clip, busy: bool) -> BoxedWidget {
+    let mut choices = Flex::row().gap(2.0);
+    let current = clip.transition.as_ref().map(|transition| transition.kind);
+    for (label, kind, help) in [
+        ("None", None, "Remove the transition"),
+        (
+            "Fade",
+            Some(TransitionKind::Fade),
+            "Fade in; dip through black between adjacent clips",
+        ),
+        (
+            "Dissolve",
+            Some(TransitionKind::Dissolve),
+            "Blend smoothly into this clip",
+        ),
+        (
+            "Slide",
+            Some(TransitionKind::Slide),
+            "Slide this clip in from the right",
+        ),
+    ] {
+        choices = choices.child(with_help(
+            chip(label, current == kind, state, move |state| {
+                set_transition_kind(state, kind)
+            }),
+            Help::new(help),
+            state,
+        ));
+    }
+    let mut rows = vec![Box::new(choices) as BoxedWidget];
+    if let Some(transition) = &clip.transition {
+        let duration = transition.duration_frames.min(clip.duration_frames);
+        let fps = state.frame_rate();
+        rows.push(property(
+            "Duration",
+            format!(
+                "{:.2} s",
+                duration as f64 * f64::from(fps.1) / f64::from(fps.0)
+            ),
+        ));
+        rows.push(Box::new(
+            Flex::row()
+                .gap(6.0)
+                .child(secondary_button(
+                    None,
+                    "−0.25 s",
+                    !busy && duration > 1,
+                    state,
+                    |state| adjust_transition_duration(state, false),
+                ))
+                .child(secondary_button(
+                    None,
+                    "+0.25 s",
+                    !busy && duration < clip.duration_frames,
+                    state,
+                    |state| adjust_transition_duration(state, true),
+                )),
+        ));
+    }
+    rows.push(text(
+        match current {
+            None => "Choose how this clip appears.",
+            Some(TransitionKind::Fade) => "Fade in; dip through black between adjacent clips.",
+            Some(TransitionKind::Dissolve) => "Blend smoothly into this clip.",
+            Some(TransitionKind::Slide) => "Slide this clip in from the right.",
+        },
+        muted(),
+        11.0,
+    ));
+    section("Transition", rows)
 }
 
 fn set_title_duration(state: &UiState) {
@@ -566,6 +704,30 @@ fn stage_message(
 
 fn monitor_viewport(slot: &GpuFrameSlot, aspect: f32) -> BoxedWidget {
     Box::new(GpuViewport::new(fill_style(), slot.clone()).aspect_ratio(aspect))
+}
+
+fn preview_stage(state: &UiState, target: PlaybackMonitor) -> Option<BoxedWidget> {
+    let monitor = match target {
+        PlaybackMonitor::Program => &state.program,
+        PlaybackMonitor::Source => &state.source,
+    };
+    let message = match monitor.preview.get() {
+        PreviewState::Ready => None,
+        PreviewState::Loading => Some(stage_message(Glyph::Film, "Loading preview…", "", None)),
+        PreviewState::Failed(reason) => Some(stage_message(
+            Glyph::Film,
+            "Preview failed",
+            &reason,
+            Some(secondary_button(
+                None,
+                "Retry",
+                !state.busy.get(),
+                state,
+                move |s| s.retry_preview(target),
+            )),
+        )),
+    };
+    message.map(|message| Box::new(Flex::column().full_width().child(message)) as BoxedWidget)
 }
 
 /// What plays at `frame`: picture, sound, titles, and the first missing
@@ -1155,6 +1317,7 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     vec![
                         Box::new(Thumb {
                             image,
+                            placeholder: state.thumbnail_label(media),
                             kind: media.kind,
                             width: None,
                             height: ((tile - 10.0) * 9.0 / 16.0).round(),
@@ -1203,6 +1366,7 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     vec![
                         Box::new(Thumb {
                             image,
+                            placeholder: state.thumbnail_label(media),
                             kind: media.kind,
                             width: Some(64.0),
                             height: 36.0,
@@ -1756,6 +1920,9 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         };
         if let Some(media) = media {
             rows.push(Box::new(Thumb {
+                placeholder: (track_kind == TrackKind::Video)
+                    .then(|| state.thumbnail_label(media))
+                    .flatten(),
                 image: (track_kind == TrackKind::Video)
                     .then(|| state.thumbnails.borrow().get(&media.path).cloned())
                     .flatten(),
@@ -1798,6 +1965,9 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         timing.push(text("Length", muted(), 11.0));
         timing.push(timing_steps(state, false));
         rows.push(section("Timing", timing));
+        if track_kind == TrackKind::Video {
+            rows.push(transition_section(state, &clip, busy));
+        }
         if let ClipContent::Title(title) = &clip.content {
             rows.push(section(
                 "Title",
@@ -2167,6 +2337,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         subtitle = "Source file";
         let id = media.id;
         rows.push(Box::new(Thumb {
+            placeholder: state.thumbnail_label(media),
             image: state.thumbnails.borrow().get(&media.path).cloned(),
             kind: media.kind,
             width: None,
@@ -2344,6 +2515,9 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                     };
                     let video = track.kind == TrackKind::Video;
                     LaneClip {
+                        transition_frames: clip.transition.as_ref().map_or(0, |transition| {
+                            transition.duration_frames.min(clip.duration_frames)
+                        }),
                         clip_id: clip.id,
                         start: clip.start_frame,
                         duration: clip.duration_frames,
@@ -2528,7 +2702,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 .child(if state.exporting.get() {
                     secondary_button(None, "Cancel export", true, state, UiState::cancel_export)
                 } else {
-                    accent_button(
+                    let button = accent_button(
                         Some(Glyph::Export),
                         if project.last_export().is_some() {
                             "Export again"
@@ -2538,7 +2712,16 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                         !busy && state.sequence_end() > 0,
                         state,
                         UiState::quick_export,
-                    )
+                    );
+                    if state.sequence_end() == 0 {
+                        with_help(
+                            button,
+                            Help::new("Add clips to the timeline to export"),
+                            state,
+                        )
+                    } else {
+                        button
+                    }
                 })
                 .child(
                     if project.last_export().is_some() && !state.exporting.get() {
@@ -2646,7 +2829,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             faint(),
             10.0,
         )],
-        program_stage,
+        preview_stage(state, PlaybackMonitor::Program).unwrap_or(program_stage),
         transport(
             state,
             Transport {
@@ -2692,8 +2875,33 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             .map(media_name),
         (None, None) => None,
     };
+    let missing_source = primary
+        .and_then(|_| selected_clip(state))
+        .and_then(|(_, clip)| match clip.content {
+            ClipContent::Media { media_id } => Some(media_id),
+            ClipContent::Title(_) => None,
+        })
+        .or_else(|| primary.is_none().then_some(selected_media).flatten())
+        .filter(|id| missing.contains(id))
+        .and_then(|id| project.media().iter().find(|media| media.id == id));
     let source_position = state.source.position.get();
     let source_stage: BoxedWidget = match (&range, &selected_title) {
+        _ if missing_source.is_some() => {
+            let media = missing_source.unwrap();
+            let id = media.id;
+            stage_message(
+                Glyph::Film,
+                "Missing source",
+                &format!("{} is missing.", media_name(media)),
+                Some(accent_button(
+                    Some(Glyph::Locate),
+                    "Relink media…",
+                    !busy,
+                    state,
+                    move |s| s.relink_dialog(Some(id)),
+                )),
+            )
+        }
         (Some(range), _) if range.kind == MediaKind::Audio => {
             if let Some(peaks) = state.waveform(&range.path) {
                 Box::new(SourceWaveform {
@@ -2734,6 +2942,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             None,
         ),
     };
+    let source_stage = preview_stage(state, PlaybackMonitor::Source).unwrap_or(source_stage);
     let source_end = range.as_ref().map_or(0, |range| range.duration);
     let source_actions: Vec<BoxedWidget> = match (primary, selected_media) {
         (Some(_), _) => selected_clip(state)
@@ -3054,7 +3263,14 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             muted(),
             10.0,
         ))
-        .child(text(state.status.get(), muted(), 11.0))
+        .child(text(
+            state
+                .autosave_error
+                .get()
+                .unwrap_or_else(|| state.status.get()),
+            muted(),
+            11.0,
+        ))
         .child(spacer());
     if state.exporting.get()
         && let Some(control) = state.export_control()
@@ -3657,7 +3873,11 @@ fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidg
                 UiState::submit_export,
             )),
     );
-    let status = state.status.get();
+    let status = if state.export_error.get().is_some() {
+        String::new()
+    } else {
+        state.status.get()
+    };
     let footer_status = if narrow {
         Box::new(
             Flex::column()
@@ -3699,6 +3919,9 @@ fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidg
                 .child(glyph(Glyph::Save, muted(), 12.0))
                 .child(text("Export also saves your project", muted(), 11.0)),
         ));
+    }
+    if let Some(reason) = state.export_error.get() {
+        footer = footer.child(text(reason, PLAYHEAD, 11.0));
     }
     let footer = Box::new(footer.child(footer_status));
     let close = state.clone();
@@ -4228,6 +4451,7 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 1.0,
             muted: false,
+            transition: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
             noise_reduction: false,
@@ -4380,6 +4604,267 @@ mod tests {
                 .any(|label| label == "No clip at this frame")
         );
         assert!(!painter.labels.iter().any(|label| label == "Audio only"));
+    }
+
+    #[test]
+    fn empty_export_explains_how_to_enable_it() {
+        let state = UiState::new();
+        render(&state, 1280.0, 760.0);
+        state
+            .tooltip_controller(("Add clips to the timeline to export", 0))
+            .focus(true);
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(
+            painter
+                .labels
+                .iter()
+                .any(|label| label == "Add clips to the timeline to export")
+        );
+    }
+
+    #[test]
+    fn export_dialog_wraps_full_error_reasons() {
+        let state = UiState::new();
+        let reason = "Cannot export: relink the missing media used in your timeline first. The source file could not be found at its original location. Open the media bin, select the missing source, and use Relink media to choose its new location before exporting again.";
+        state.export_error.set(Some(reason.into()));
+        state.status.set(reason.into());
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let viewport = Size {
+                width: 760.0,
+                height: 760.0,
+            };
+            let mut painter = TestPainter::default();
+            Renderer::new().render(
+                export_modal(&state, state.editor.borrow().project(), viewport),
+                viewport,
+                &mut painter,
+            );
+            let (_, rect) = painter
+                .bounds
+                .iter()
+                .find(|(label, _)| label == reason)
+                .expect("full export error");
+            assert!(rect.height > 11.0 * 1.4, "{rect:?}");
+        });
+    }
+
+    #[test]
+    fn bin_thumbnail_without_a_preview_has_an_explicit_fallback() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/tmp/video.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: false,
+        })));
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(painter.labels.iter().any(|label| label == "No preview"));
+        let (_, placeholder) = painter
+            .bounds
+            .iter()
+            .find(|(label, _)| label == "No preview")
+            .unwrap();
+        let (_, duration) = painter
+            .bounds
+            .iter()
+            .find(|(label, _)| label == "0:02")
+            .unwrap();
+        assert!(
+            duration.y + duration.height <= placeholder.y
+                || placeholder.y + placeholder.height <= duration.y
+        );
+        for view in [MediaView::Grid, MediaView::List] {
+            state.media_view.set(view);
+            state
+                .thumbnail_loading
+                .set(HashSet::from(["/tmp/video.mp4".into()]));
+            let painter = render(&state, 1280.0, 760.0);
+            assert!(painter.labels.iter().any(|label| label == "Loading…"));
+            assert!(!painter.labels.iter().any(|label| label == "No preview"));
+            state.thumbnail_loading.set(HashSet::new());
+            let painter = render(&state, 1280.0, 760.0);
+            assert!(painter.labels.iter().any(|label| label == "No preview"));
+        }
+    }
+
+    #[test]
+    fn timeline_shows_a_failed_storyboard_fallback() {
+        let state = UiState::new();
+        let path = std::path::PathBuf::from("/tmp/video.mp4");
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: path.clone(),
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: false,
+        })));
+        state.thumbnails.borrow_mut().insert(
+            path.clone(),
+            Arc::new(RgbaImage::new(1, 1, vec![255; 4]).unwrap()),
+        );
+        state.insert_media(1);
+        let editor = state.editor.borrow();
+        let project = editor.project();
+        let clip = project
+            .tracks()
+            .iter()
+            .filter(|track| track.kind == TrackKind::Video)
+            .flat_map(|track| &track.clips)
+            .next()
+            .unwrap();
+        let key = StoryboardKey {
+            path,
+            kind: MediaKind::Video,
+            source_start: clip.source_start_frame,
+            duration: clip.duration_frames,
+            fps: (
+                project.settings().frame_rate.numerator,
+                project.settings().frame_rate.denominator,
+            ),
+        };
+        drop(editor);
+        state
+            .storyboards
+            .borrow_mut()
+            .insert(key.clone(), Arc::new(Vec::new()));
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(painter.labels.iter().any(|label| label == "No preview"));
+        state.storyboards.borrow_mut().insert(
+            key,
+            Arc::new(vec![Arc::new(RgbaImage::new(1, 1, vec![255; 4]).unwrap())]),
+        );
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(!painter.labels.iter().any(|label| label == "No preview"));
+    }
+
+    #[test]
+    fn monitors_show_loading_and_retryable_errors() {
+        let state = UiState::new();
+        for monitor in [&state.source, &state.program] {
+            monitor.preview.set(PreviewState::Loading);
+            let painter = render(&state, 1280.0, 760.0);
+            assert!(
+                painter
+                    .labels
+                    .iter()
+                    .any(|label| label == "Loading preview…")
+            );
+            monitor.preview.set(PreviewState::Ready);
+            let painter = render(&state, 1280.0, 760.0);
+            assert!(
+                !painter
+                    .labels
+                    .iter()
+                    .any(|label| label == "Loading preview…")
+            );
+            monitor
+                .preview
+                .set(PreviewState::Failed("Cannot decode frame".into()));
+            let painter = render(&state, 1280.0, 760.0);
+            assert!(painter.labels.iter().any(|label| label == "Preview failed"));
+            assert!(
+                painter
+                    .labels
+                    .iter()
+                    .any(|label| label == "Cannot decode frame")
+            );
+            assert!(painter.labels.iter().any(|label| label == "Retry"));
+            creamui::reactive::with_context_scope(|| {
+                creamui::reactive::provide_context(creamui::ThemeProvider::new(
+                    creamui::Theme::dark(),
+                ));
+                let viewport = Size {
+                    width: 1280.0,
+                    height: 760.0,
+                };
+                let mut painter = TestPainter::default();
+                let scene = Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+                let (_, rect) = painter
+                    .bounds
+                    .iter()
+                    .find(|(label, _)| label == "Retry")
+                    .unwrap();
+                scene
+                    .hit_test(Point {
+                        x: rect.x + rect.width / 2.0,
+                        y: rect.y + rect.height / 2.0,
+                    })
+                    .unwrap()();
+            });
+            assert_eq!(monitor.preview.peek(), PreviewState::Ready);
+            let painter = render(&state, 1280.0, 760.0);
+            assert!(!painter.labels.iter().any(|label| label == "Preview failed"));
+        }
+    }
+
+    #[test]
+    fn preview_error_reason_wraps_in_a_narrow_monitor() {
+        let state = UiState::new();
+        let reason = "The selected video could not be decoded because its codec is unavailable on this system. Choose another source or retry the preview.";
+        state
+            .source
+            .preview
+            .set(PreviewState::Failed(reason.into()));
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let viewport = Size {
+                width: 240.0,
+                height: 400.0,
+            };
+            let mut painter = TestPainter::default();
+            Renderer::new().render(
+                preview_stage(&state, PlaybackMonitor::Source).unwrap(),
+                viewport,
+                &mut painter,
+            );
+            let (_, rect) = painter
+                .bounds
+                .iter()
+                .find(|(label, _)| label == reason)
+                .unwrap();
+            assert!(rect.width <= viewport.width);
+            assert!(rect.height > 22.0);
+        });
+    }
+
+    #[test]
+    fn source_monitor_explains_missing_bin_and_clip_sources() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/tmp/lost.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: false,
+        })));
+        state.missing_media.set(HashSet::from([1]));
+        state.select_media(1);
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(
+            painter
+                .labels
+                .iter()
+                .any(|label| label == "lost.mp4 is missing.")
+        );
+        assert!(painter.labels.iter().any(|label| label == "Relink media…"));
+        assert!(
+            !painter
+                .labels
+                .iter()
+                .any(|label| label == "No source selected")
+        );
+        state.missing_media.set(HashSet::new());
+        state.insert_media(1);
+        state.missing_media.set(HashSet::from([1]));
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(
+            painter
+                .labels
+                .iter()
+                .any(|label| label == "lost.mp4 is missing.")
+        );
     }
 
     #[test]
@@ -5464,6 +5949,112 @@ mod tests {
     }
 
     #[test]
+    fn inspector_transition_choices_and_steps_are_bounded_and_undoable() {
+        use crate::timeline::TransitionKind;
+        let state = UiState::new();
+        set_transition_kind(&state, Some(TransitionKind::Fade));
+        state.run(Action::AddTitle);
+        set_transition_kind(&state, Some(TransitionKind::Dissolve));
+        assert_eq!(
+            selected_clip(&state)
+                .unwrap()
+                .1
+                .transition
+                .unwrap()
+                .duration_frames,
+            15
+        );
+        adjust_transition_duration(&state, true);
+        assert_eq!(
+            selected_clip(&state)
+                .unwrap()
+                .1
+                .transition
+                .unwrap()
+                .duration_frames,
+            23
+        );
+        state.run(Action::Undo);
+        assert_eq!(
+            selected_clip(&state)
+                .unwrap()
+                .1
+                .transition
+                .unwrap()
+                .duration_frames,
+            15
+        );
+        state.run(Action::Redo);
+        set_transition_kind(&state, Some(TransitionKind::Slide));
+        assert_eq!(
+            selected_clip(&state)
+                .unwrap()
+                .1
+                .transition
+                .unwrap()
+                .duration_frames,
+            23
+        );
+        for _ in 0..50 {
+            adjust_transition_duration(&state, true);
+        }
+        let clip = selected_clip(&state).unwrap().1;
+        assert_eq!(
+            clip.transition.unwrap().duration_frames,
+            clip.duration_frames
+        );
+        for _ in 0..50 {
+            adjust_transition_duration(&state, false);
+        }
+        assert_eq!(
+            selected_clip(&state)
+                .unwrap()
+                .1
+                .transition
+                .unwrap()
+                .duration_frames,
+            1
+        );
+        set_transition_kind(&state, None);
+        assert!(selected_clip(&state).unwrap().1.transition.is_none());
+        state.run(Action::Undo);
+        assert!(selected_clip(&state).unwrap().1.transition.is_some());
+    }
+
+    #[test]
+    fn transitions_are_visible_for_video_but_not_audio_and_ignore_busy_edits() {
+        let state = UiState::new();
+        state.run(Action::AddTitle);
+        assert!(
+            render(&state, 1280.0, 760.0)
+                .labels
+                .iter()
+                .any(|label| label == "TRANSITION")
+        );
+        state.busy.set(true);
+        set_transition_kind(&state, Some(TransitionKind::Fade));
+        assert!(selected_clip(&state).unwrap().1.transition.is_none());
+        state.busy.set(false);
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/sound.wav".into(),
+            kind: MediaKind::Audio,
+            duration_us: Some(1_000_000),
+            has_audio: true
+        })));
+        state.insert_media(1);
+        set_transition_kind(&state, Some(TransitionKind::Fade));
+        adjust_transition_duration(&state, true);
+        assert!(selected_clip(&state).unwrap().1.transition.is_none());
+        assert!(
+            !render(&state, 1280.0, 760.0)
+                .labels
+                .iter()
+                .any(|label| label == "TRANSITION")
+        );
+    }
+
+    #[test]
     fn inspector_source_steps_preserve_length_and_clamp_to_media() {
         let state = UiState::new();
         assert!(state.edit(Command::ImportMedia(Media {
@@ -5483,6 +6074,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                transition: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
                 noise_reduction: false,
@@ -5512,6 +6104,7 @@ mod tests {
                 label: "V1".into(),
                 removable: false,
                 clips: vec![LaneClip {
+                    transition_frames: 0,
                     clip_id: 7,
                     start: 30,
                     duration: 150,

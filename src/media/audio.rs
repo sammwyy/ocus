@@ -1422,6 +1422,7 @@ mod tests {
                 volume: 0.5,
                 fade_in_frames: 3,
                 fade_out_frames: 0,
+                transition: None,
                 muted: false,
                 noise_reduction: false,
                 linked_audio: false,

@@ -110,6 +110,13 @@ const DEFAULT_ZOOM: usize = 5;
 /// An empty cached filmstrip marks a preview that could not be generated.
 pub(crate) type Storyboard = Arc<Vec<Arc<RgbaImage>>>;
 
+type InspectedSource = Result<(PathBuf, MediaProbe, Option<Thumbnail>), String>;
+
+enum ImportEvent {
+    Progress(usize, PathBuf),
+    Complete(Vec<(PathBuf, InspectedSource)>),
+}
+
 fn storyboard_requests(
     keys: &[(StoryboardKey, bool)],
     cache: &mut HashMap<StoryboardKey, Storyboard>,
@@ -2650,20 +2657,28 @@ impl UiState {
             return;
         }
         self.busy.set(true);
-        self.status.set(format!("Probing {} files…", paths.len()));
+        self.import_progress(0, paths.len(), &paths[0]);
+        let total = paths.len();
         let state = self.clone();
         let dialog_app = app.clone();
-        app.spawn_background(
-            move || {
-                paths
-                    .into_iter()
-                    .map(|path| {
-                        let result = inspect_source(&path);
-                        (path, result)
-                    })
-                    .collect::<Vec<_>>()
+        app.spawn_stream(
+            move |emit| {
+                let mut results = Vec::new();
+                for (index, path) in paths.into_iter().enumerate() {
+                    let result = inspect_source(&path);
+                    emit(ImportEvent::Progress(index + 1, path.clone()));
+                    results.push((path, result));
+                }
+                emit(ImportEvent::Complete(results));
             },
-            move |results| {
+            move |event| {
+                let results = match event {
+                    ImportEvent::Progress(completed, path) => {
+                        state.import_progress(completed, total, &path);
+                        return;
+                    }
+                    ImportEvent::Complete(results) => results,
+                };
                 state.busy.set(false);
                 let total = results.len();
                 let mut imported = 0;
@@ -2763,6 +2778,15 @@ impl UiState {
                 }
             },
         );
+    }
+
+    fn import_progress(&self, completed: usize, total: usize, path: &Path) {
+        let name = path
+            .file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy();
+        self.status
+            .set(format!("Importing {completed} of {total} · {name}"));
     }
 
     fn place_imported_media(
@@ -3103,6 +3127,17 @@ fn import_summary(imported: usize, total: usize, errors: &[(PathBuf, String)]) -
 mod tests {
     use super::*;
     use crate::timeline::Clip;
+
+    #[test]
+    fn import_progress_advances_with_each_completed_file() {
+        let state = UiState::new();
+        state.import_progress(1, 3, Path::new("/media/one.mp4"));
+        assert_eq!(state.status.peek(), "Importing 1 of 3 · one.mp4");
+        state.import_progress(2, 3, Path::new("/media/two.mp4"));
+        assert_eq!(state.status.peek(), "Importing 2 of 3 · two.mp4");
+        state.import_progress(3, 3, Path::new("/media/three.mp4"));
+        assert_eq!(state.status.peek(), "Importing 3 of 3 · three.mp4");
+    }
 
     #[test]
     fn thumbnail_completion_distinguishes_pending_failed_and_ready() {

@@ -62,7 +62,9 @@ workers. `media/preview.rs` decodes and scales frames off the UI thread,
 maintaining a small frame buffer during playback and seeking to source frames
 after an edit. It also generates three representative thumbnails per video
 clip's current source range on workers; `ui::state` keeps a bounded, transient
-cache and drops obsolete entries when clips change. The UI transfers decoded
+cache and drops obsolete entries when clips change. `media/audio.rs` also
+extracts bounded waveform peaks on a worker. The timeline and Source monitor
+share the project's transient, per-source peak cache. The UI transfers decoded
 frames to textures on CreamUI's own GPU device and presents them through its
 viewport. `media/composite.rs` decodes active video and still-image clips with
 bounded frame storage and alpha-composites video tracks in timeline order:

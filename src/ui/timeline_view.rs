@@ -6,6 +6,7 @@ use super::controls::{
 use super::edits::ClipRef;
 use super::interaction::Gesture;
 use super::state::Storyboard;
+use super::waveform::WaveformSlice;
 use crate::timeline::TrackKind;
 use creamui::core::layout::{Dimension, Style};
 use creamui::core::{Modifiers, Painter, Point, Rect, RgbaImage, TextAlign, Widget};
@@ -47,6 +48,7 @@ pub(super) struct LaneClip {
     pub look: ClipLook,
     pub images: Option<Storyboard>,
     pub fallback: Option<Arc<RgbaImage>>,
+    pub waveform: Option<WaveformSlice>,
     pub volume: f32,
     pub muted: bool,
     pub linked_audio: bool,
@@ -739,26 +741,7 @@ impl TimelineView {
                 }
             }
             ClipLook::Audio if content.height > 6.0 => {
-                let level = (clip.volume / 2.0).clamp(0.0, 1.0);
-                let y = snap(painter, content.y + content.height * (1.0 - level));
-                painter.fill_rect(
-                    Rect {
-                        y,
-                        height: content.y + content.height - y,
-                        ..content
-                    },
-                    base.mix(panel(), if clip.muted { 0.85 } else { 0.5 }),
-                    0.0,
-                );
-                painter.fill_rect(
-                    Rect {
-                        y: y - 1.0,
-                        height: 2.0,
-                        ..content
-                    },
-                    if clip.muted { muted() } else { base },
-                    0.0,
-                );
+                self.paint_clip_audio(painter, clip, full, content, 1.0);
                 if clip.muted && content.height >= 16.0 && body.width >= 60.0 {
                     draw_glyph(
                         painter,
@@ -840,7 +823,7 @@ impl TimelineView {
                 height: strip - 2.0,
                 ..body
             };
-            self.paint_linked_audio(painter, clip, sound, selected);
+            self.paint_linked_audio(painter, clip, full, sound, selected);
             Rect {
                 height: body.height + sound.height,
                 ..body
@@ -860,28 +843,34 @@ impl TimelineView {
         );
     }
 
-    /// The audio half of a linked clip, drawn under its picture.
-    fn paint_linked_audio(
+    fn paint_clip_audio(
         &self,
         painter: &mut dyn Painter,
         clip: &LaneClip,
+        full: Rect,
         sound: Rect,
-        selected: bool,
+        padding: f32,
     ) {
-        painter.push_clip_rounded(sound, 4.0);
-        let tone = if clip.muted {
-            0.82
-        } else if selected {
-            0.56
-        } else {
-            0.66
-        };
-        painter.fill_rect(sound, AUDIO.mix(panel(), tone), 0.0);
+        if let Some(waveform) = &clip.waveform {
+            waveform.paint(
+                painter,
+                full,
+                Rect {
+                    y: sound.y + padding,
+                    height: sound.height - padding * 2.0,
+                    ..sound
+                },
+                clip.volume,
+                if clip.muted {
+                    AUDIO.mix(panel(), 0.55)
+                } else {
+                    AUDIO
+                },
+            );
+            return;
+        }
         let level = (clip.volume / 2.0).clamp(0.0, 1.0);
-        let y = snap(
-            painter,
-            sound.y + 2.0 + (sound.height - 4.0) * (1.0 - level),
-        );
+        let y = snap(painter, sound.y + (sound.height * (1.0 - level)));
         painter.fill_rect(
             Rect {
                 y,
@@ -900,6 +889,27 @@ impl TimelineView {
             if clip.muted { muted() } else { AUDIO },
             0.0,
         );
+    }
+
+    /// The audio half of a linked clip, drawn under its picture.
+    fn paint_linked_audio(
+        &self,
+        painter: &mut dyn Painter,
+        clip: &LaneClip,
+        full: Rect,
+        sound: Rect,
+        selected: bool,
+    ) {
+        painter.push_clip_rounded(sound, 4.0);
+        let tone = if clip.muted {
+            0.82
+        } else if selected {
+            0.56
+        } else {
+            0.66
+        };
+        painter.fill_rect(sound, AUDIO.mix(panel(), tone), 0.0);
+        self.paint_clip_audio(painter, clip, full, sound, 2.0);
         painter.fill_rect(
             Rect {
                 height: 1.0,

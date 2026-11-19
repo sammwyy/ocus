@@ -55,10 +55,12 @@ clip's trimmed range, or the whole file selected in the media bin, and
 **Program** shows the sequence at the playhead. Each has its own scrub bar,
 Play/Pause, frame stepping and jump-to-start/end; starting one pauses the
 other. **Match frame** moves the program playhead to the source monitor's
-frame, and **Insert** adds the selected bin file. The timeline is one painted
+frame, and **Insert** adds the selected bin file. Audio files show a waveform
+and playhead in **Source**. The timeline is one painted
 surface with track headers, a zoomable ruler (1 s to 10 min per view, with zoom buttons, a slider and **Fit**), clip
-filmstrips sampled from their actual trimmed source range, audio volume
-levels and a playhead across every track.
+filmstrips and audio waveforms sampled from their trimmed source ranges, and a
+playhead across every track. Timeline waveforms reflect clip volume and are
+dimmed when muted.
 
 Tracks can be added from the timeline's **Tracks** button, the **Add
 track** button under the track headers or any right-click menu, and deleted

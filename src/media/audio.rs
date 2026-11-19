@@ -1579,6 +1579,7 @@ mod tests {
                 linked_audio: false,
                 color: Default::default(),
                 lut: None,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));

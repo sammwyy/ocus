@@ -20,6 +20,18 @@ pub struct FrameSource {
     pub source_start: u64,
     pub duration: u64,
     pub transform: Transform,
+    pub keyframes: Vec<crate::timeline::Keyframe>,
+}
+
+impl FrameSource {
+    pub fn transform_at(&self, position: u64) -> Transform {
+        crate::timeline::evaluate_transform(
+            self.transform,
+            &self.keyframes,
+            self.source_start
+                .saturating_add(position.saturating_sub(self.start)),
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -62,6 +74,7 @@ pub fn storyboard(
         start: 0,
         source_start: key.source_start,
         duration: key.duration,
+        keyframes: Vec::new(),
         transform: Transform::default(),
     };
     let mut frames = Vec::new();
@@ -546,6 +559,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         }
     }
@@ -833,6 +847,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 30,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             };
             let cancelled = Arc::new(AtomicBool::new(false));
@@ -872,6 +887,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 1800,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             };
             for target in [0, 300, 901, 1500, 1790] {
@@ -922,6 +938,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 300,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -967,6 +984,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: frames,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             };
             let cancelled = Arc::new(AtomicBool::new(false));
@@ -1029,6 +1047,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 1,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -1102,6 +1121,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 1,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             };
             let cancelled = Arc::new(AtomicBool::new(false));
@@ -1161,6 +1181,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 1,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             };
             let cancelled = Arc::new(AtomicBool::new(false));
@@ -1250,6 +1271,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 120,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         let mut reader =
@@ -1286,6 +1308,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 6,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         }];
         let plan = PreviewPlan {
@@ -1384,6 +1407,7 @@ mod tests {
                 start: 3,
                 source_start: 2,
                 duration: 2,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             }],
             visual: None,

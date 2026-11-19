@@ -558,8 +558,29 @@ fn set_clip_audio(state: &UiState, change: impl FnOnce(&Clip) -> (f32, bool)) {
     }
 }
 
-fn set_clip_transform(state: &UiState, change: impl FnOnce(&mut Transform)) {
+fn set_clip_transform(state: &UiState, animated: bool, change: impl FnOnce(&mut Transform)) {
     if let Some((track_id, clip)) = selected_clip(state) {
+        let position = state.program.position.get();
+        if animated && !clip.keyframes.is_empty() {
+            let Some(frame) = keyframe_source_frame(&clip, position) else {
+                return;
+            };
+            let mut transform = clip.transform_at(position);
+            change(&mut transform);
+            let mut keyframes = clip.keyframes.clone();
+            upsert_keyframe(
+                &mut keyframes,
+                crate::timeline::Keyframe::new(frame, transform),
+            );
+            if state.edit(Command::SetClipKeyframes {
+                track_id,
+                clip_id: clip.id,
+                keyframes,
+            }) {
+                state.request_preview();
+            }
+            return;
+        }
         let mut transform = clip.transform;
         change(&mut transform);
         if state.edit(Command::SetClipTransform {
@@ -570,6 +591,61 @@ fn set_clip_transform(state: &UiState, change: impl FnOnce(&mut Transform)) {
             state.request_preview();
         }
     }
+}
+
+fn keyframe_source_frame(clip: &Clip, position: u64) -> Option<u64> {
+    (position >= clip.start_frame && position - clip.start_frame < clip.duration_frames)
+        .then(|| clip.source_start_frame + (position - clip.start_frame))
+}
+
+fn upsert_keyframe(
+    keyframes: &mut Vec<crate::timeline::Keyframe>,
+    keyframe: crate::timeline::Keyframe,
+) {
+    match keyframes.binary_search_by_key(&keyframe.frame, |key| key.frame) {
+        Ok(index) => keyframes[index] = keyframe,
+        Err(index) => keyframes.insert(index, keyframe),
+    }
+}
+
+fn toggle_keyframe(state: &UiState) {
+    let Some((track_id, clip)) = selected_clip(state) else {
+        return;
+    };
+    let position = state.program.position.get();
+    let Some(frame) = keyframe_source_frame(&clip, position) else {
+        return;
+    };
+    let mut keyframes = clip.keyframes.clone();
+    match keyframes.binary_search_by_key(&frame, |key| key.frame) {
+        Ok(index) => {
+            keyframes.remove(index);
+        }
+        Err(index) => keyframes.insert(
+            index,
+            crate::timeline::Keyframe::new(frame, clip.transform_at(position)),
+        ),
+    }
+    if state.edit(Command::SetClipKeyframes {
+        track_id,
+        clip_id: clip.id,
+        keyframes,
+    }) {
+        state.request_preview();
+    }
+}
+
+fn neighbouring_keyframe(clip: &Clip, position: u64, next: bool) -> Option<u64> {
+    let source = keyframe_source_frame(clip, position)?;
+    let mut frames = clip.keyframes.iter().map(|key| key.frame).filter(|frame| {
+        *frame >= clip.source_start_frame && *frame - clip.source_start_frame < clip.duration_frames
+    });
+    let frame = if next {
+        frames.find(|frame| *frame > source)
+    } else {
+        frames.rfind(|frame| *frame < source)
+    }?;
+    Some(clip.start_frame + (frame - clip.source_start_frame))
 }
 
 #[derive(Clone, Copy)]
@@ -586,6 +662,14 @@ struct TransformField {
 }
 
 fn transform_rows(state: &UiState, transform: Transform, inner: f32) -> Vec<BoxedWidget> {
+    let selected = selected_clip(state).map(|(_, clip)| clip);
+    let position = state.program.position.get();
+    let inside = selected
+        .as_ref()
+        .is_some_and(|clip| keyframe_source_frame(clip, position).is_some());
+    let keyed = selected
+        .as_ref()
+        .is_some_and(|clip| !clip.keyframes.is_empty());
     let fields = [
         TransformField {
             label: "Scale",
@@ -688,7 +772,61 @@ fn transform_rows(state: &UiState, transform: Transform, inner: f32) -> Vec<Boxe
         },
     ];
     let mut rows = Vec::new();
+    let hint = if keyed {
+        format!("{} keyframes", selected.as_ref().unwrap().keyframes.len())
+    } else {
+        "No keyframes".into()
+    };
+    let mut keys = Flex::row().gap(4.0).align(Align::Center).child(Box::new(
+        Flex::column()
+            .child(text("Keyframes", muted(), 11.0))
+            .child(text(hint, muted(), 10.0)),
+    ));
+    let navigation = |next| {
+        let (glyph, help) = if next {
+            (Glyph::StepForward, "Next keyframe")
+        } else {
+            (Glyph::StepBack, "Previous keyframe")
+        };
+        let target = selected
+            .as_ref()
+            .and_then(|clip| neighbouring_keyframe(clip, position, next));
+        sized_icon_button(
+            glyph,
+            Help::new(help),
+            24.0,
+            target.is_some(),
+            false,
+            state,
+            move |state| {
+                if let Some(target) = target {
+                    state.seek(target);
+                }
+            },
+        )
+    };
+    keys = keys.child(navigation(false));
+    let at_key = selected.as_ref().is_some_and(|clip| {
+        keyframe_source_frame(clip, position)
+            .is_some_and(|frame| clip.keyframes.iter().any(|key| key.frame == frame))
+    });
+    keys = keys.child(sized_icon_button(
+        if at_key { Glyph::Minus } else { Glyph::Plus },
+        Help::new(if at_key {
+            "Remove keyframe at playhead"
+        } else {
+            "Add keyframe at playhead"
+        }),
+        24.0,
+        inside,
+        at_key,
+        state,
+        toggle_keyframe,
+    ));
+    keys = keys.child(navigation(true));
+    rows.push(Box::new(keys) as BoxedWidget);
     for field in fields {
+        let animated = !field.label.starts_with("Crop");
         let mut current = transform;
         let value = *(field.accessor)(&mut current);
         let mut row = Flex::row()
@@ -714,15 +852,16 @@ fn transform_rows(state: &UiState, transform: Transform, inner: f32) -> Vec<Boxe
                 glyph,
                 Help::new(help),
                 24.0,
-                if direction < 0.0 {
-                    value > field.min
-                } else {
-                    value < field.max
-                },
+                (!animated || !keyed || inside)
+                    && if direction < 0.0 {
+                        value > field.min
+                    } else {
+                        value < field.max
+                    },
                 false,
                 state,
                 move |state| {
-                    set_clip_transform(state, |transform| {
+                    set_clip_transform(state, animated, |transform| {
                         let value = (field.accessor)(transform);
                         *value = (((*value + direction * field.step) * 1000.0).round() / 1000.0)
                             .clamp(field.min, field.max);
@@ -735,9 +874,9 @@ fn transform_rows(state: &UiState, transform: Transform, inner: f32) -> Vec<Boxe
     rows.push(inline(secondary_button(
         None,
         "Reset transform",
-        !transform.is_identity(),
+        !transform.is_identity() && (!keyed || inside),
         state,
-        |state| set_clip_transform(state, |transform| *transform = Transform::default()),
+        |state| set_clip_transform(state, true, |transform| *transform = Transform::default()),
     )));
     rows
 }
@@ -2533,7 +2672,14 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         if track_kind == TrackKind::Video && matches!(clip.content, ClipContent::Media { .. }) {
             rows.push(section(
                 "Transform",
-                transform_rows(state, clip.transform, inner),
+                vec![Box::new(append(
+                    Flex::column().gap(3.0),
+                    transform_rows(
+                        state,
+                        clip.transform_at(state.program.position.get()),
+                        inner,
+                    ),
+                ))],
             ));
         }
         if track_kind == TrackKind::Video
@@ -3036,6 +3182,15 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                         transition_out_frames = transition_out_frames.min(clip.duration_frames / 2);
                     }
                     LaneClip {
+                        keyframes: clip
+                            .keyframes
+                            .iter()
+                            .filter(|key| {
+                                key.frame >= clip.source_start_frame
+                                    && key.frame - clip.source_start_frame < clip.duration_frames
+                            })
+                            .map(|key| clip.start_frame + (key.frame - clip.source_start_frame))
+                            .collect(),
                         transition_frames,
                         transition_out_frames,
                         clip_id: clip.id,
@@ -3097,6 +3252,14 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
 
 pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
     state.begin_tooltips();
+    for label in [
+        "Previous keyframe",
+        "Next keyframe",
+        "Add keyframe at playhead",
+        "Remove keyframe at playhead",
+    ] {
+        Help::new(label).register(state);
+    }
     state.tooltip_viewport.set(viewport);
     state.sync_system_theme();
     state.revision.get();
@@ -5328,6 +5491,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         }
     }
@@ -7222,10 +7386,37 @@ mod tests {
                 fade_out_frames: 0,
                 linked_audio: false,
                 color: Default::default(),
+                keyframes: Vec::new(),
                 transform: Default::default()
             }
         }));
         state.select_clip(Some((0, 1)));
+        toggle_keyframe(&state);
+        assert_eq!(selected_clip(&state).unwrap().1.keyframes.len(), 1);
+        state.program.position.set(10);
+        set_clip_transform(&state, true, |transform| transform.x = 0.5);
+        let animated = selected_clip(&state).unwrap().1;
+        assert_eq!(animated.keyframes.len(), 2);
+        assert_eq!(animated.transform_at(5).x, 0.25);
+        assert_eq!(neighbouring_keyframe(&animated, 5, false), Some(0));
+        assert_eq!(neighbouring_keyframe(&animated, 5, true), Some(10));
+        set_clip_transform(&state, true, |transform| transform.opacity = 0.5);
+        assert_eq!(selected_clip(&state).unwrap().1.keyframes.len(), 2);
+        set_clip_transform(&state, false, |transform| transform.crop_left = 0.1);
+        assert_eq!(selected_clip(&state).unwrap().1.transform.crop_left, 0.1);
+        state.program.position.set(30);
+        let before = selected_clip(&state).unwrap().1;
+        toggle_keyframe(&state);
+        set_clip_transform(&state, true, |transform| transform.scale = 2.0);
+        assert_eq!(selected_clip(&state).unwrap().1, before);
+        assert_eq!(neighbouring_keyframe(&before, 30, false), None);
+        state.program.position.set(10);
+        toggle_keyframe(&state);
+        assert_eq!(selected_clip(&state).unwrap().1.keyframes.len(), 1);
+        state.program.position.set(0);
+        toggle_keyframe(&state);
+        assert!(selected_clip(&state).unwrap().1.keyframes.is_empty());
+        set_clip_transform(&state, false, |transform| transform.crop_left = 0.0);
         for width in [220.0, 280.0, 340.0] {
             creamui::reactive::with_context_scope(|| {
                 creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
@@ -7264,7 +7455,7 @@ mod tests {
                 }
             });
         }
-        set_clip_transform(&state, |transform| transform.scale = 0.5);
+        set_clip_transform(&state, true, |transform| transform.scale = 0.5);
         assert_eq!(selected_clip(&state).unwrap().1.transform.scale, 0.5);
         state.run(Action::Undo);
         assert!(selected_clip(&state).unwrap().1.transform.is_identity());
@@ -7310,6 +7501,7 @@ mod tests {
                     fade_out_frames: 0,
                     linked_audio: false,
                     color: Default::default(),
+                    keyframes: Vec::new(),
                     transform: Default::default()
                 }
             }));
@@ -7682,6 +7874,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             }
         }));
@@ -7711,6 +7904,7 @@ mod tests {
                 base: true,
                 removable: false,
                 clips: vec![LaneClip {
+                    keyframes: Vec::new(),
                     transition_frames: 0,
                     transition_out_frames: 0,
                     clip_id: 7,

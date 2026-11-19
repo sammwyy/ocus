@@ -188,6 +188,18 @@ LUT paths resolve beside the project file, like media paths. Caches live only
 as long as the compositor. Alpha is unchanged. Source preview and thumbnails
 remain ungraded.
 
+Video-track media clips may store transform keyframes in source-frame units.
+Position, scale, rotation and opacity interpolate linearly, holding the first
+and last values outside their keyed range; crop remains static. Source-frame
+coordinates preserve animation through splits, trims and moves. The optional
+keyframes field is omitted when empty, retaining version 1 compatibility.
+`SetClipKeyframes` validates and records each animation edit for undo/redo.
+Preview and export evaluate the same keyframes in the shared compositor,
+including transition layers. The Transform Inspector can add or remove a
+keyframe at the playhead, jump between visible keys and edit interpolated
+values. Once keyed, animated-property edits upsert a key at the playhead;
+crop edits continue to update the base transform.
+
 ## Where new work belongs
 
 | Work | Place it when implemented | Boundary |

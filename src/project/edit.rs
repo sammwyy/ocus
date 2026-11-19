@@ -54,6 +54,11 @@ pub(crate) fn split_tracks(
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
+    SetClipKeyframes {
+        track_id: u64,
+        clip_id: u64,
+        keyframes: Vec<crate::timeline::Keyframe>,
+    },
     SetClipTransform {
         track_id: u64,
         clip_id: u64,
@@ -425,6 +430,7 @@ impl Editor {
             | Command::SetClipAudio { track_id, .. }
             | Command::SetClipColor { track_id, .. }
             | Command::SetClipTransform { track_id, .. }
+            | Command::SetClipKeyframes { track_id, .. }
             | Command::SetClipLut { track_id, .. }
             | Command::SetClipFades { track_id, .. }
             | Command::SetClipNoiseReduction { track_id, .. }
@@ -546,6 +552,9 @@ impl Editor {
                         .checked_add(clip.duration_frames)
                         .is_none()
                     || !clip.transform.valid()
+                    || !crate::timeline::valid_keyframes(&clip.keyframes)
+                    || (!clip.keyframes.is_empty()
+                        && !matches!(clip.content, ClipContent::Media { .. }))
                     || !clip.color.valid()
                     || !clip.volume.is_finite()
                     || !(0.0..=2.0).contains(&clip.volume)
@@ -578,6 +587,7 @@ impl Editor {
                         }),
                 };
                 if !compatible
+                    || (!clip.keyframes.is_empty() && kind != TrackKind::Video)
                     || (clip.lut.is_some()
                         && (kind != TrackKind::Video
                             || !matches!(clip.content, ClipContent::Media { .. })))
@@ -801,6 +811,31 @@ impl Editor {
                 clip.duration_frames = duration_frames;
                 clip.clamp_fades();
                 self.execute(Command::ReplaceTracks(tracks))
+            }
+            Command::SetClipKeyframes {
+                track_id,
+                clip_id,
+                keyframes,
+            } => {
+                if !crate::timeline::valid_keyframes(&keyframes) {
+                    return None;
+                }
+                let track = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|t| t.id == track_id && t.kind == TrackKind::Video)?;
+                let clip = track.clips.iter_mut().find(|c| c.id == clip_id)?;
+                if !matches!(clip.content, ClipContent::Media { .. }) || clip.keyframes == keyframes
+                {
+                    return None;
+                }
+                let old = std::mem::replace(&mut clip.keyframes, keyframes);
+                Some(Command::SetClipKeyframes {
+                    track_id,
+                    clip_id,
+                    keyframes: old,
+                })
             }
             Command::SetClipTransform {
                 track_id,
@@ -1173,6 +1208,7 @@ mod tests {
             muted: false,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         assert!(editor.apply(Command::InsertClip {
@@ -1366,6 +1402,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         assert!(editor.apply(Command::InsertClip {
@@ -1600,6 +1637,7 @@ mod tests {
                 transition: None,
                 linked_audio: true,
                 color: Default::default(),
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             }
         }));
@@ -1670,6 +1708,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             };
             assert!(editor.apply(Command::InsertClip {
@@ -1751,6 +1790,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         assert!(editor.apply(Command::InsertClip {
@@ -1835,6 +1875,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         assert!(editor.apply(Command::InsertClip {
@@ -1886,6 +1927,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -2169,6 +2211,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         let insert =
@@ -2256,6 +2299,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         project.tracks[0].clips = vec![
@@ -2362,6 +2406,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         for (id, start_frame, track_id) in [(1, 0, 0), (2, 30, 0), (3, 30, 1)] {
@@ -2458,6 +2503,7 @@ mod tests {
                     fade_out_frames: 0,
                     noise_reduction: false,
                     linked_audio: id == 2,
+                    keyframes: Vec::new(),
                     transform: Transform::default(),
                 },
             }));
@@ -2518,6 +2564,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         for (track_id, clip) in [
@@ -2546,6 +2593,7 @@ mod tests {
                     fade_out_frames: 0,
                     noise_reduction: false,
                     linked_audio: false,
+                    keyframes: Vec::new(),
                     transform: Transform::default(),
                 },
             ),
@@ -2619,6 +2667,7 @@ mod tests {
                     fade_out_frames: 0,
                     noise_reduction: false,
                     linked_audio: false,
+                    keyframes: Vec::new(),
                     transform: Transform::default(),
                 },
             }));
@@ -2657,6 +2706,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         assert!(!editor.apply(Command::InsertClip {
@@ -2704,6 +2754,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -2730,6 +2781,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -2771,6 +2823,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -2865,6 +2918,7 @@ mod tests {
             fade_out_frames: 0,
             linked_audio: false,
             color: Default::default(),
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         assert!(editor.apply(Command::InsertClip { track_id: 0, clip }));
@@ -2928,6 +2982,108 @@ mod tests {
                 .iter()
                 .all(|c| c.transform == transformed)
         );
+    }
+
+    #[test]
+    fn keyframes_validate_round_trip_and_follow_content_edits() {
+        use crate::timeline::Keyframe;
+        let mut editor = Editor::new(Project::new("Animation"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "image.png".into(),
+            kind: MediaKind::Image,
+            duration_us: None,
+            has_audio: false,
+        })));
+        let clip: Clip = serde_json::from_value(serde_json::json!({
+            "id": 1, "start_frame": 10, "source_start_frame": 20,
+            "duration_frames": 30, "content": {"media": {"media_id": 1}},
+            "volume": 1.0, "muted": false,
+            "transform": {"scale":1.0,"x":0.0,"y":0.0,"rotation":0.0,
+                "opacity":1.0,"crop_left":0.1,"crop_right":0.0,"crop_top":0.0,"crop_bottom":0.0}
+        }))
+        .unwrap();
+        assert!(editor.apply(Command::InsertClip { track_id: 0, clip }));
+        let command = |keyframes| Command::SetClipKeyframes {
+            track_id: 0,
+            clip_id: 1,
+            keyframes,
+        };
+        assert!(!editor.apply(command(vec![])));
+        let first = Keyframe::new(25, Transform::default());
+        let last = Keyframe::new(
+            35,
+            Transform {
+                scale: 2.0,
+                x: 1.0,
+                y: -1.0,
+                rotation: 90.0,
+                opacity: 0.0,
+                ..Default::default()
+            },
+        );
+        for invalid in [
+            vec![last, first],
+            vec![first, first],
+            vec![Keyframe {
+                opacity: 2.0,
+                ..first
+            }],
+            vec![Keyframe {
+                scale: f32::NAN,
+                ..first
+            }],
+        ] {
+            assert!(!editor.apply(command(invalid)));
+        }
+        let keys = vec![first, last];
+        assert!(editor.apply(command(keys.clone())));
+        assert!(!editor.apply(command(keys.clone())));
+        let clip = &editor.project().tracks()[0].clips[0];
+        assert_eq!(clip.transform_at(10).scale, 1.0);
+        assert_eq!(clip.transform_at(39).scale, 2.0);
+        let middle = clip.transform_at(20);
+        assert_eq!(
+            (
+                middle.scale,
+                middle.x,
+                middle.y,
+                middle.rotation,
+                middle.opacity
+            ),
+            (1.5, 0.5, -0.5, 45.0, 0.5)
+        );
+        assert_eq!(middle.crop_left, 0.1);
+        let json = crate::project::format::to_json(editor.project()).unwrap();
+        assert_eq!(
+            &crate::project::format::from_json(&json).unwrap(),
+            editor.project()
+        );
+        let mut invalid: serde_json::Value = serde_json::from_str(&json).unwrap();
+        invalid["tracks"][0]["clips"][0]["keyframes"][0]["opacity"] = 2.0.into();
+        assert!(crate::project::format::from_json(&invalid.to_string()).is_err());
+        assert!(editor.undo());
+        assert!(editor.project().tracks()[0].clips[0].keyframes.is_empty());
+        assert!(editor.redo());
+        assert!(editor.apply(Command::Split {
+            track_id: 0,
+            clip_id: 1,
+            at_frame: 20,
+            new_id: 2
+        }));
+        let right = &editor.project().tracks()[0].clips[1];
+        assert_eq!(right.keyframes, keys);
+        assert_eq!(right.transform_at(20), middle);
+        assert!(editor.apply(Command::Trim {
+            track_id: 0,
+            clip_id: 2,
+            start_frame: 22,
+            source_start_frame: 32,
+            duration_frames: 18
+        }));
+        let right = &editor.project().tracks()[0].clips[1];
+        assert_eq!(right.keyframes, keys);
+        assert_eq!(right.transform_at(22).rotation, 63.0);
     }
 
     #[test]

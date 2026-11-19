@@ -65,6 +65,7 @@ impl ClipLook {
 }
 
 pub(super) struct LaneClip {
+    pub keyframes: Vec<u64>,
     pub transition_frames: u64,
     pub transition_out_frames: u64,
     pub clip_id: u64,
@@ -847,6 +848,22 @@ impl TimelineView {
                 );
             }
             _ => {}
+        }
+        for frame in &clip.keyframes {
+            let x = geometry.x(*frame);
+            if x >= left && x < right {
+                let y = content.y + content.height - 6.0;
+                let points = [
+                    Point { x, y: y - 3.0 },
+                    Point { x: x + 3.0, y },
+                    Point { x, y: y + 3.0 },
+                    Point { x: x - 3.0, y },
+                    Point { x, y: y - 3.0 },
+                ];
+                for pair in points.windows(2) {
+                    painter.stroke_line(pair[0], pair[1], text_color(), 1.0);
+                }
+            }
         }
         for (frames, out) in [
             (clip.transition_frames, false),

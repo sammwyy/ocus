@@ -206,6 +206,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         }]);
         fixture["tracks"][1]["clips"] = serde_json::json!([Clip {
@@ -236,6 +237,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         }]);
         let project = from_json(&fixture.to_string()).unwrap();
@@ -332,6 +334,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         })
         .unwrap();
@@ -422,6 +425,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         document["tracks"][0]["clips"] = serde_json::json!([clip.clone()]);

@@ -955,6 +955,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             }
         }));
@@ -1054,6 +1055,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             }
         }));
@@ -1211,6 +1213,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -1288,6 +1291,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -1411,6 +1415,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -1483,6 +1488,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         }];
         layered[1].clips = vec![Clip {
@@ -1501,6 +1507,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         }];
         layered.push(Track {
@@ -1531,6 +1538,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             }],
         });
@@ -1644,6 +1652,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -1732,6 +1741,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -1900,6 +1910,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -2029,6 +2040,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));

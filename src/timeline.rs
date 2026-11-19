@@ -69,6 +69,78 @@ pub struct Clip {
     pub color: ColorAdjust,
     #[serde(default, skip_serializing_if = "Transform::is_identity")]
     pub transform: Transform,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keyframes: Vec<Keyframe>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Keyframe {
+    pub frame: u64,
+    pub scale: f32,
+    pub x: f32,
+    pub y: f32,
+    pub rotation: f32,
+    pub opacity: f32,
+}
+
+impl Keyframe {
+    pub fn new(frame: u64, transform: Transform) -> Self {
+        Self {
+            frame,
+            scale: transform.scale,
+            x: transform.x,
+            y: transform.y,
+            rotation: transform.rotation,
+            opacity: transform.opacity,
+        }
+    }
+
+    pub fn valid(&self) -> bool {
+        self.apply(Transform::default()).valid()
+    }
+
+    fn apply(&self, base: Transform) -> Transform {
+        Transform {
+            scale: self.scale,
+            x: self.x,
+            y: self.y,
+            rotation: self.rotation,
+            opacity: self.opacity,
+            ..base
+        }
+    }
+}
+
+pub fn valid_keyframes(keyframes: &[Keyframe]) -> bool {
+    keyframes.iter().all(Keyframe::valid)
+        && keyframes
+            .windows(2)
+            .all(|pair| pair[0].frame < pair[1].frame)
+}
+
+pub fn evaluate_transform(base: Transform, keyframes: &[Keyframe], frame: u64) -> Transform {
+    let Some(first) = keyframes.first() else {
+        return base;
+    };
+    if frame <= first.frame {
+        return first.apply(base);
+    }
+    for pair in keyframes.windows(2) {
+        let [left, right] = pair else { unreachable!() };
+        if frame <= right.frame {
+            let t = (frame - left.frame) as f32 / (right.frame - left.frame) as f32;
+            let lerp = |a: f32, b: f32| a + (b - a) * t;
+            return Transform {
+                scale: lerp(left.scale, right.scale),
+                x: lerp(left.x, right.x),
+                y: lerp(left.y, right.y),
+                rotation: lerp(left.rotation, right.rotation),
+                opacity: lerp(left.opacity, right.opacity),
+                ..base
+            };
+        }
+    }
+    keyframes.last().unwrap().apply(base)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -161,6 +233,15 @@ fn zero(value: &u64) -> bool {
 }
 
 impl Clip {
+    pub fn transform_at(&self, timeline_frame: u64) -> Transform {
+        evaluate_transform(
+            self.transform,
+            &self.keyframes,
+            self.source_start_frame
+                .saturating_add(timeline_frame.saturating_sub(self.start_frame)),
+        )
+    }
+
     pub(crate) fn clamp_fades(&mut self) {
         self.fade_in_frames = self.fade_in_frames.min(self.duration_frames);
         self.fade_out_frames = self

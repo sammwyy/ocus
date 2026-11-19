@@ -161,7 +161,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [ ] Automatic silence removal
 
 **Export**
-- [ ] Export queue
+- [x] Export queue
 - [x] Custom export presets
 
 **Extensibility**

@@ -21,6 +21,7 @@ src/
     recovery.rs     ordered background autosave in the app data directory, with startup restore
   media.rs          source references, probing and thumbnail decoding
   media/preview.rs  background video decoding and frame-accurate seek
+  media/cache.rs    bounded persistent thumbnail and storyboard RGBA cache
   media/composite.rs  shared preview/export visual composition
   media/audio.rs    background audio decoding, mixing and the playback clock
   playback.rs       default output device and monitor sound sessions
@@ -69,7 +70,11 @@ workers. `media/preview.rs` decodes and scales frames off the UI thread,
 maintaining a small frame buffer during playback and seeking to source frames
 after an edit. It also generates three representative thumbnails per video
 clip's current source range on workers; `ui::state` keeps a bounded, transient
-cache and drops obsolete entries when clips change. `media/audio.rs` also
+cache and drops obsolete entries when clips change. Thumbnails and complete
+storyboards also persist in the platform `Ocus` cache directory, under
+`thumbnails/` and `frames/`, with a shared 512 MiB LRU limit. Source metadata
+invalidates stale entries; corrupt or unavailable entries are decoded again.
+`media/audio.rs` also
 extracts bounded waveform peaks on a worker. The timeline and Source monitor
 share the project's transient, per-source peak cache. The UI transfers decoded
 frames to textures on CreamUI's own GPU device and presents them through its

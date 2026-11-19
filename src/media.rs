@@ -7,6 +7,7 @@ use ffmpeg_next as ffmpeg;
 use serde::{Deserialize, Serialize};
 
 pub mod audio;
+pub mod cache;
 pub mod composite;
 pub mod lut;
 pub mod preview;

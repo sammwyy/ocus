@@ -13,8 +13,8 @@ clip commands do not complete the corresponding editor workflows.
 - [x] Keep a video's own sound linked inside its clip so edits apply to both;
   detach it to an audio track (creating one if needed) or link a matching pair
   back. Add and delete video and audio tracks.
-- [ ] Name, reorder, lock and hide tracks; the project format does not store
-  track names or flags yet.
+- [x] Name, reorder, lock and hide tracks; store optional track names and flags
+  in the version 1 project format.
 - [x] Extend ripple delete across overlapping clips that span the removed range;
   preserve the surviving source frames on both sides as separate clips.
 - [x] Make all video and audio tracks selectable as destinations from the UI:

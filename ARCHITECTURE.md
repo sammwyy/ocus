@@ -64,7 +64,14 @@ Failed probes and incompatible metadata retain the stored values. Repairs are
 not undo steps and normal opens remain clean; the status line reports unlinked
 clips alongside missing files. Relink commands repair linked flags atomically
 with the source replacement, so undo restores both. Optional probe metadata and
-title style/parse flags keep version 1 files readable. Media
+title style/parse flags keep version 1 files readable. Track names, locked and
+hidden flags are optional version 1 fields and are omitted when empty/false.
+Names are trimmed, limited to 32 Unicode characters and cannot contain control
+characters. Track metadata and same-kind reordering use undoable commands.
+Locked tracks reject clip edits and removal, including through `ReplaceTracks`;
+ripple delete leaves them untouched. Hidden tracks are excluded from both
+shared visual composition and audio plans (including linked video audio), so
+preview and export agree. Media
 probing and bounded first-frame thumbnails use the `ffmpeg-next` library on
 workers. `media/preview.rs` decodes and scales frames off the UI thread,
 maintaining a small frame buffer during playback and seeking to source frames
@@ -112,7 +119,7 @@ Markdown syntax when their respective switches are enabled. The preview
 composites simultaneous video layers; title edits, split/move/trim/delete,
 audio clip settings, track creation/removal and ripple delete use project
 commands. Ripple delete merges the original selected time ranges and closes
-them across every track; clips spanning a removed range split with distinct IDs,
+them across every unlocked track; clips spanning a removed range split with distinct IDs,
 preserving both source ranges in one undoable edit. A video with sound is
 inserted as one clip with `linked_audio`, an optional field that keeps version 1
 files readable (absent means false), so any edit of the clip also edits its
@@ -127,16 +134,26 @@ default output device; video pacing follows the consumed-sample clock so
 picture and sound stay aligned, skipping late video frames instead of delaying
 the timeline when composition is slower than playback. Source preview decodes
 one clip; the Program monitor and export share the layered composition rules.
-Video clips may store an optional fade, dissolve, or slide into their start.
+Video clips may store an optional fade, dissolve, or slide into their start
+(`transition`) and out of their end (`transition_out`).
 The shared compositor clamps transition length to the clip duration and uses
 the adjacent previous clip's continued picture (holding at source EOF), or
 the lower tracks, as the outgoing picture. Fade dips through black only at an
 adjacent cut; otherwise the incoming clip fades in over the lower tracks.
 Transitions are edited through
-`SetTransition`; splitting leaves the transition only on the left piece.
-The optional field remains compatible with version 1 projects. The Inspector
-offers transition choices and quarter-second duration steps; the timeline
-marks the effective transition range with a ramp at the clip start.
+`SetTransition`; splitting leaves the in-transition only on the left piece.
+`SetTransitionOut` edits the out-transition, which stays on the right piece
+when split. Out-transitions reveal the lower tracks (or black): fade and
+dissolve ramp down the clip's contribution, and slide moves it toward its
+configured edge. Slides enter from or exit toward left, right, up, or down;
+the default remains right for old projects. Each transition is clamped to
+the clip length; if their combined lengths exceed it, both are capped at
+half the clip length, rounded down, leaving any middle frame unaffected.
+Stored durations are not changed by this render-time clamp.
+The optional fields remain compatible with version 1 projects. The Inspector
+offers independent In and Out choices, quarter-second duration steps, and
+slide edges; the timeline marks their effective ranges with mirrored ramps
+at the clip's start and end.
 
 ## Where new work belongs
 

@@ -23,7 +23,8 @@ use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, Vide
 use crate::project::{Command, Project};
 use crate::settings::ThemeMode;
 use crate::timeline::{
-    Clip, ClipContent, ColorAdjust, Title, Track, TrackKind, Transform, Transition, TransitionKind,
+    Clip, ClipContent, ColorAdjust, SlideDirection, Title, Track, TrackKind, Transform, Transition,
+    TransitionKind,
 };
 use creamui::core::layout::{Dimension, Style};
 use creamui::core::{Painter, Point, Rect, TextAlign, Widget};
@@ -238,33 +239,59 @@ fn transition_frames(state: &UiState, seconds: f64) -> u64 {
         .max(1.0) as u64
 }
 
-fn set_transition_kind(state: &UiState, kind: Option<TransitionKind>) {
+fn clip_transition(clip: &Clip, out: bool) -> Option<&Transition> {
+    if out {
+        clip.transition_out.as_ref()
+    } else {
+        clip.transition.as_ref()
+    }
+}
+
+fn edit_transition(
+    state: &UiState,
+    track_id: u64,
+    clip_id: u64,
+    out: bool,
+    transition: Option<Transition>,
+) {
+    state.edit(if out {
+        Command::SetTransitionOut {
+            track_id,
+            clip_id,
+            transition,
+        }
+    } else {
+        Command::SetTransition {
+            track_id,
+            clip_id,
+            transition,
+        }
+    });
+}
+
+fn set_transition_kind(state: &UiState, out: bool, kind: Option<TransitionKind>) {
     let Some((track_id, clip)) = selected_video_clip(state) else {
         return;
     };
+    let current = clip_transition(&clip, out);
     let transition = kind.map(|kind| Transition {
+        direction: current.map_or(SlideDirection::Right, |transition| transition.direction),
         kind,
-        duration_frames: clip
-            .transition
-            .as_ref()
+        duration_frames: current
             .map_or_else(
                 || transition_frames(state, 0.5),
                 |transition| transition.duration_frames,
             )
             .clamp(1, clip.duration_frames),
     });
-    state.edit(Command::SetTransition {
-        track_id,
-        clip_id: clip.id,
-        transition,
-    });
+    edit_transition(state, track_id, clip.id, out, transition);
 }
 
-fn adjust_transition_duration(state: &UiState, increase: bool) {
+fn adjust_transition_duration(state: &UiState, out: bool, increase: bool) {
     let Some((track_id, clip)) = selected_video_clip(state) else {
         return;
     };
-    let Some(mut transition) = clip.transition else {
+    let Some(mut transition) = clip_transition(&clip, out).cloned() else {
         return;
     };
     let current = transition.duration_frames.min(clip.duration_frames);
@@ -275,82 +302,145 @@ fn adjust_transition_duration(state: &UiState, increase: bool) {
         current.saturating_sub(step)
     }
     .clamp(1, clip.duration_frames);
-    state.edit(Command::SetTransition {
-        track_id,
-        clip_id: clip.id,
-        transition: Some(transition),
-    });
+    edit_transition(state, track_id, clip.id, out, Some(transition));
 }
 
-fn transition_section(state: &UiState, clip: &Clip, busy: bool) -> BoxedWidget {
-    let mut choices = Flex::row().gap(2.0);
-    let current = clip.transition.as_ref().map(|transition| transition.kind);
+fn set_slide_direction(state: &UiState, out: bool, direction: SlideDirection) {
+    let Some((track_id, clip)) = selected_video_clip(state) else {
+        return;
+    };
+    let Some(mut transition) = clip_transition(&clip, out).cloned() else {
+        return;
+    };
+    if transition.kind != TransitionKind::Slide {
+        return;
+    }
+    transition.direction = direction;
+    edit_transition(state, track_id, clip.id, out, Some(transition));
+}
+
+fn transition_row(state: &UiState, clip: &Clip, busy: bool, out: bool) -> BoxedWidget {
+    let transition = clip_transition(clip, out);
+    let current = transition.map(|transition| transition.kind);
+    let mut choices = Flex::row().gap(2.0).align(Align::Center).child(Box::new(
+        Flex::row()
+            .width(22.0)
+            .child(heading(if out { "Out" } else { "In" }, muted(), 11.0)),
+    ));
     for (label, kind, help) in [
-        ("None", None, "Remove the transition"),
+        ("None", None, "Remove this transition"),
         (
             "Fade",
             Some(TransitionKind::Fade),
-            "Fade in; dip through black between adjacent clips",
+            if out {
+                "Fade out to reveal the track below, or black"
+            } else {
+                "Fade in; dip through black between adjacent clips"
+            },
         ),
         (
             "Dissolve",
             Some(TransitionKind::Dissolve),
-            "Blend smoothly into this clip",
+            if out {
+                "Blend away to reveal the track below, or black"
+            } else {
+                "Blend smoothly into this clip"
+            },
         ),
         (
             "Slide",
             Some(TransitionKind::Slide),
-            "Slide this clip in from the right",
+            if out {
+                "Slide this clip out toward an edge"
+            } else {
+                "Slide this clip in from an edge"
+            },
         ),
     ] {
         choices = choices.child(with_help(
             chip(label, current == kind, state, move |state| {
-                set_transition_kind(state, kind)
+                set_transition_kind(state, out, kind)
             }),
             Help::new(help),
             state,
         ));
     }
-    let mut rows = vec![Box::new(choices) as BoxedWidget];
-    if let Some(transition) = &clip.transition {
+    let mut row = Flex::column().gap(4.0).child(Box::new(choices));
+    if let Some(transition) = transition {
         let duration = transition.duration_frames.min(clip.duration_frames);
         let fps = state.frame_rate();
-        rows.push(property(
-            "Duration",
-            format!(
-                "{:.2} s",
-                duration as f64 * f64::from(fps.1) / f64::from(fps.0)
-            ),
-        ));
-        rows.push(Box::new(
+        row = row.child(Box::new(
             Flex::row()
                 .gap(6.0)
+                .align(Align::Center)
+                .child(Box::new(Flex::row().width(52.0).child(text(
+                    format!(
+                        "{:.2} s",
+                        duration as f64 * f64::from(fps.1) / f64::from(fps.0)
+                    ),
+                    text_color(),
+                    11.0,
+                ))))
                 .child(secondary_button(
                     None,
                     "−0.25 s",
                     !busy && duration > 1,
                     state,
-                    |state| adjust_transition_duration(state, false),
+                    move |state| adjust_transition_duration(state, out, false),
                 ))
                 .child(secondary_button(
                     None,
                     "+0.25 s",
                     !busy && duration < clip.duration_frames,
                     state,
-                    |state| adjust_transition_duration(state, true),
+                    move |state| adjust_transition_duration(state, out, true),
                 )),
         ));
+        if transition.kind == TransitionKind::Slide {
+            let mut directions = Flex::row().gap(2.0).align(Align::Center).child(Box::new(
+                Flex::row().width(44.0).child(text(
+                    if out { "Toward" } else { "From" },
+                    muted(),
+                    11.0,
+                )),
+            ));
+            for (label, direction, from, toward) in [
+                ("←", SlideDirection::Left, "From left", "Toward left"),
+                ("→", SlideDirection::Right, "From right", "Toward right"),
+                ("↑", SlideDirection::Up, "From top", "Toward top"),
+                ("↓", SlideDirection::Down, "From bottom", "Toward bottom"),
+            ] {
+                directions = directions.child(with_help(
+                    chip(
+                        label,
+                        transition.direction == direction,
+                        state,
+                        move |state| set_slide_direction(state, out, direction),
+                    ),
+                    Help::new(if out { toward } else { from }),
+                    state,
+                ));
+            }
+            row = row.child(Box::new(directions));
+        }
     }
-    rows.push(text(
-        match current {
-            None => "Choose how this clip appears.",
-            Some(TransitionKind::Fade) => "Fade in; dip through black between adjacent clips.",
-            Some(TransitionKind::Dissolve) => "Blend smoothly into this clip.",
-            Some(TransitionKind::Slide) => "Slide this clip in from the right.",
-        },
-        muted(),
-        11.0,
-    ));
+    Box::new(row)
+}
+
+fn transition_section(state: &UiState, clip: &Clip, busy: bool) -> BoxedWidget {
+    let mut rows = vec![
+        transition_row(state, clip, busy, false),
+        transition_row(state, clip, busy, true),
+    ];
+    let incoming = clip.transition.as_ref().map_or(0, |transition| {
+        transition.duration_frames.min(clip.duration_frames)
+    });
+    let outgoing = clip.transition_out.as_ref().map_or(0, |transition| {
+        transition.duration_frames.min(clip.duration_frames)
+    });
+    if incoming > clip.duration_frames - outgoing {
+        rows.push(text("Shortened to fit without overlap.", muted(), 11.0));
+    }
     section("Transition", rows)
 }
 
@@ -907,7 +997,7 @@ fn track_labels(project: &Project) -> Vec<(u64, String)> {
                 audio += 1;
                 format!("A{audio}")
             };
-            (track.id, label)
+            (track.id, track.display_name(&label))
         })
         .collect()
 }
@@ -1050,6 +1140,9 @@ fn program_layers<'a>(
     let mut lost_picture = None;
     let mut lost_sound = None;
     for track in project.tracks() {
+        if track.hidden {
+            continue;
+        }
         for clip in &track.clips {
             if clip.start_frame > frame || frame - clip.start_frame >= clip.duration_frames {
                 continue;
@@ -2169,7 +2262,7 @@ fn compatible_destinations(tracks: &[Track], track_id: u64, clip: &Clip) -> Vec<
     };
     tracks
         .iter()
-        .filter(|track| track.id != track_id && track.kind == source.kind)
+        .filter(|track| !track.locked && track.id != track_id && track.kind == source.kind)
         .map(|track| {
             let occupied = track.clips.iter().any(|other| {
                 clip.start_frame < other.start_frame.saturating_add(other.duration_frames)
@@ -2816,12 +2909,20 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
             track_id: track.id,
             kind: track.kind,
             label: label.clone(),
-            removable: project
+            locked: track.locked,
+            hidden: track.hidden,
+            base: project
                 .tracks()
                 .iter()
-                .filter(|other| other.kind == track.kind)
-                .count()
-                > 1,
+                .find(|other| other.kind == TrackKind::Video)
+                .is_some_and(|other| other.id == track.id),
+            removable: !track.locked
+                && project
+                    .tracks()
+                    .iter()
+                    .filter(|other| other.kind == track.kind)
+                    .count()
+                    > 1,
             clips: track
                 .clips
                 .iter()
@@ -2849,10 +2950,20 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                         ClipContent::Title(_) => None,
                     };
                     let video = track.kind == TrackKind::Video;
-                    LaneClip {
-                        transition_frames: clip.transition.as_ref().map_or(0, |transition| {
+                    let mut transition_frames = clip.transition.as_ref().map_or(0, |transition| {
+                        transition.duration_frames.min(clip.duration_frames)
+                    });
+                    let mut transition_out_frames =
+                        clip.transition_out.as_ref().map_or(0, |transition| {
                             transition.duration_frames.min(clip.duration_frames)
-                        }),
+                        });
+                    if transition_frames > clip.duration_frames - transition_out_frames {
+                        transition_frames = transition_frames.min(clip.duration_frames / 2);
+                        transition_out_frames = transition_out_frames.min(clip.duration_frames / 2);
+                    }
+                    LaneClip {
+                        transition_frames,
+                        transition_out_frames,
                         clip_id: clip.id,
                         start: clip.start_frame,
                         duration: clip.duration_frames,
@@ -3329,6 +3440,11 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
     );
 
     let lanes = timeline_lanes(state, project, fps);
+    for lane in &lanes {
+        for help in lane.toggle_help() {
+            help.register(state);
+        }
+    }
     let zoom = state.timeline_zoom.get();
     let span = state.visible_frames();
     let selected = !selection.is_empty();
@@ -3666,10 +3782,88 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 settings_modal(state, viewport)
             } else {
                 Box::new(Flex::row().size(0.0, 0.0)) as BoxedWidget
+            })
+            .child(if state.rename_track.get().is_some() {
+                rename_track_modal(state, viewport)
+            } else {
+                Box::new(Flex::row().size(0.0, 0.0)) as BoxedWidget
             }),
     );
     state.finish_tooltips();
     content
+}
+
+fn rename_track_modal(state: &UiState, viewport: Size) -> BoxedWidget {
+    let width = 380.0_f32.min((viewport.width - 24.0).max(200.0));
+    let height = 210.0;
+    let valid = crate::timeline::Track::valid_name(state.track_name.value().trim());
+    let submit = state.clone();
+    let close = state.clone();
+    Box::new(Layer {
+        style: Layer::at(0.0, 0.0, viewport.width, viewport.height),
+        on_click: Some(Rc::new(move || close.rename_track.set(None))),
+        children: vec![
+            Box::new(
+                Flex::row()
+                    .size(viewport.width, viewport.height)
+                    .background(Color::rgba(0, 0, 0, 180)),
+            ),
+            Box::new(Layer {
+                style: Layer::at(
+                    (viewport.width - width) / 2.0,
+                    (viewport.height - height) / 2.0,
+                    width,
+                    height,
+                ),
+                on_click: Some(Rc::new(|| {})),
+                children: vec![Box::new(
+                    Flex::column()
+                        .size(width, height)
+                        .padding(20.0)
+                        .gap(12.0)
+                        .background(panel_raised())
+                        .border(border(), 1.0)
+                        .corner_radius(12.0)
+                        .child(heading("Rename track", text_color(), 18.0))
+                        .child(text(
+                            "Up to 32 characters. Leave blank for V1 / A1.",
+                            muted(),
+                            11.0,
+                        ))
+                        .child(Box::new(
+                            TextInput::controlled(&state.track_name)
+                                .width(width - 40.0)
+                                .height(32.0)
+                                .on_submit(move || submit.apply_track_rename()),
+                        ))
+                        .child(text(
+                            if valid {
+                                ""
+                            } else {
+                                "Use 32 characters or fewer, without control characters."
+                            },
+                            TITLE,
+                            10.0,
+                        ))
+                        .child(Box::new(
+                            Flex::row()
+                                .gap(8.0)
+                                .child(spacer())
+                                .child(secondary_button(None, "Cancel", true, state, |s| {
+                                    s.rename_track.set(None)
+                                }))
+                                .child(secondary_button(
+                                    None,
+                                    "Rename",
+                                    valid,
+                                    state,
+                                    UiState::apply_track_rename,
+                                )),
+                        )),
+                )],
+            }),
+        ],
+    })
 }
 
 fn export_field(
@@ -4788,6 +4982,7 @@ mod tests {
             muted: false,
             color: Default::default(),
             transition: None,
+            transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
             linked_audio: false,
@@ -4808,6 +5003,9 @@ mod tests {
         .map(|(id, kind)| Track {
             id: id as u64,
             kind,
+            name: String::new(),
+            locked: false,
+            hidden: false,
             clips: Vec::new(),
         })
         .collect::<Vec<_>>();
@@ -4834,6 +5032,9 @@ mod tests {
         let mut tracks = vec![Track {
             id: 0,
             kind: TrackKind::Video,
+            name: String::new(),
+            locked: false,
+            hidden: false,
             clips: Vec::new(),
         }];
         for (index, (start, duration)) in [(0, 10), (30, 10), (9, 2), (29, 2), (15, 5), (0, 40)]
@@ -4843,6 +5044,9 @@ mod tests {
             tracks.push(Track {
                 id: index as u64 + 1,
                 kind: TrackKind::Video,
+                name: String::new(),
+                locked: false,
+                hidden: false,
                 clips: vec![destination_clip(start, duration)],
             });
         }
@@ -5381,6 +5585,58 @@ mod tests {
             assert!(painter.labels.iter().any(|label| label == "Undo"));
             assert!(scene.hit_test(point).is_none());
         });
+    }
+
+    #[test]
+    fn track_toggle_hover_help_survives_window_rebuilds() {
+        for (width, height) in [(1280.0, 760.0), (2560.0, 1856.0)] {
+            let state = UiState::new();
+            for (track_id, hidden, locked, label) in [
+                (0, false, false, "Lock track"),
+                (0, false, true, "Unlock track"),
+                (0, false, false, "Hide track"),
+                (0, true, false, "Show track"),
+                (2, false, false, "Mute track"),
+                (2, true, false, "Unmute track"),
+            ] {
+                state.edit(Command::SetTrackHidden { track_id, hidden });
+                state.edit(Command::SetTrackLocked { track_id, locked });
+                render(&state, width, height);
+                let help = state.tooltip_controller((label, track_id));
+                creamui::reactive::with_context_scope(|| {
+                    creamui::reactive::provide_context(creamui::ThemeProvider::new(
+                        creamui::Theme::dark(),
+                    ));
+                    let viewport = Size { width, height };
+                    let mut painter = TestPainter::default();
+                    let scene =
+                        Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+                    let caption = if track_id == 0 { "V1" } else { "A1" };
+                    let header = painter
+                        .bounds
+                        .iter()
+                        .find(|(text, _)| text == caption)
+                        .unwrap()
+                        .1;
+                    let point = Point {
+                        x: state.timeline_rect.get().x
+                            + if matches!(label, "Lock track" | "Unlock track") {
+                                111.0
+                            } else {
+                                137.0
+                            },
+                        y: header.y + 9.0,
+                    };
+                    scene.hover_hit_test(point).unwrap().1(true);
+                });
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                render(&state, width, height);
+                let painter = render(&state, width, height);
+                assert!(help.visible(), "{label} at {width}×{height}");
+                assert!(painter.labels.iter().any(|text| text == label));
+                help.hover(false);
+            }
+        }
     }
 
     #[test]
@@ -6284,16 +6540,117 @@ mod tests {
         }
     }
 
+    #[test]
+    fn locked_lanes_refuse_pointer_and_marquee_selection() {
+        let state = UiState::new();
+        state.timeline_rect.set(TIMELINE);
+        assert!(state.add_title());
+        assert!(state.edit(Command::SetTrackLocked {
+            track_id: 0,
+            locked: true
+        }));
+        assert!(state.selected.peek().is_empty());
+        let timeline = view(&state);
+        press(&timeline, at(30.0), 50.0);
+        drag_to(&timeline, at(45.0), 50.0);
+        release(&timeline);
+        assert!(state.selected.peek().is_empty());
+        state.select_all();
+        assert!(state.selected.peek().is_empty());
+        assert!(state.editor.borrow().project().tracks()[0].locked);
+        assert_eq!(
+            state.editor.borrow().project().tracks()[0].clips[0].duration_frames,
+            90
+        );
+    }
+
+    #[test]
+    fn header_double_click_uses_local_coordinates_to_open_rename() {
+        let state = UiState::new();
+        state.timeline_rect.set(Rect {
+            x: 200.0,
+            y: 400.0,
+            ..TIMELINE
+        });
+        let timeline = view(&state);
+        let double_click = timeline.on_double_click_at().unwrap();
+        double_click(Point { x: 110.0, y: 45.0 });
+        assert!(state.rename_track.peek().is_none());
+        double_click(Point { x: 20.0, y: 45.0 });
+        assert_eq!(state.rename_track.peek(), Some(0));
+        state.track_name.set_value("x".repeat(33));
+        state.apply_track_rename();
+        assert_eq!(state.rename_track.peek(), Some(0));
+        assert!(state.editor.borrow().project().tracks()[0].name.is_empty());
+        state.track_name.set_value(" Picture ");
+        state.apply_track_rename();
+        assert!(state.rename_track.peek().is_none());
+        assert_eq!(state.editor.borrow().project().tracks()[0].name, "Picture");
+        state.undo();
+        assert!(state.editor.borrow().project().tracks()[0].name.is_empty());
+    }
+
+    #[test]
+    fn track_headers_ellipsize_names_and_keep_controls_in_bounds() {
+        let state = UiState::new();
+        assert!(state.edit(Command::RenameTrack {
+            track_id: 0,
+            name: "A very long but valid track name".into()
+        }));
+        for width in [680.0, 1000.0, 1280.0] {
+            let painter = render(&state, width, 760.0);
+            let (label, name) = painter
+                .bounds
+                .iter()
+                .find(|(label, _)| label.starts_with("A very"))
+                .unwrap();
+            assert!(label.ends_with('…'));
+            assert!(run_width(label, 12.0, "system-ui", true) <= name.width);
+            assert!(name.width <= super::super::timeline_view::HEADER_WIDTH - 100.0);
+            assert!(painter.labels.iter().any(|label| label == "BASE"));
+            creamui::reactive::with_context_scope(|| {
+                creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
+                    creamui::Theme::dark(),
+                ));
+                let mut timeline = view(&state);
+                let children = timeline.children();
+                assert_eq!(children.len(), 4);
+                for child in children {
+                    let layout = child.style().layout;
+                    assert_eq!(layout.size.width, Dimension::Length(50.0));
+                    let creamui::core::layout::LengthPercentageAuto::Length(x) = layout.inset.left
+                    else {
+                        panic!("header controls need an absolute x position");
+                    };
+                    assert!(x >= name.x);
+                    assert!(x + 50.0 <= super::super::timeline_view::HEADER_WIDTH - 30.0);
+                }
+            });
+        }
+        assert!(state.edit(Command::RenameTrack {
+            track_id: 0,
+            name: "W".repeat(32)
+        }));
+        let painter = render(&state, 680.0, 760.0);
+        let (label, name) = painter
+            .bounds
+            .iter()
+            .find(|(label, _)| label.starts_with("WW"))
+            .unwrap();
+        assert!(label.ends_with('…'));
+        assert!(run_width(label, 12.0, "system-ui", true) <= name.width);
+    }
+
     const TIMELINE: Rect = Rect {
         x: 0.0,
         y: 0.0,
-        width: 1128.0,
+        width: 1184.0,
         height: 240.0,
     };
 
     /// The timeline x for `frame` with a 1000 px wide, 300 frame view.
     fn at(frame: f32) -> f32 {
-        128.0 + frame * 1000.0 / 300.0
+        super::super::timeline_view::HEADER_WIDTH + frame * 1000.0 / 300.0
     }
 
     fn press(view: &TimelineView, x: f32, y: f32) {
@@ -6394,6 +6751,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                transition_out: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -6480,6 +6838,7 @@ mod tests {
                 track_id,
                 clip: Clip {
                     id: id + 100,
+                    transition_out: None,
                     start_frame: 400,
                     source_start_frame: 0,
                     duration_frames: 30,
@@ -6516,12 +6875,177 @@ mod tests {
     }
 
     #[test]
+    fn out_transition_controls_keep_independent_undo_bounds_and_direction() {
+        use crate::timeline::SlideDirection;
+        let state = UiState::new();
+        set_transition_kind(&state, true, Some(TransitionKind::Slide));
+        state.run(Action::AddTitle);
+        set_transition_kind(&state, false, Some(TransitionKind::Dissolve));
+        set_transition_kind(&state, true, Some(TransitionKind::Slide));
+        let clip = selected_clip(&state).unwrap().1;
+        assert_eq!(clip.transition_out.as_ref().unwrap().duration_frames, 15);
+        set_slide_direction(&state, true, SlideDirection::Up);
+        assert_eq!(
+            selected_clip(&state)
+                .unwrap()
+                .1
+                .transition_out
+                .unwrap()
+                .direction,
+            SlideDirection::Up
+        );
+        state.run(Action::Undo);
+        assert_eq!(
+            selected_clip(&state)
+                .unwrap()
+                .1
+                .transition_out
+                .unwrap()
+                .direction,
+            SlideDirection::Right
+        );
+        state.run(Action::Redo);
+        adjust_transition_duration(&state, true, true);
+        assert_eq!(
+            selected_clip(&state)
+                .unwrap()
+                .1
+                .transition_out
+                .unwrap()
+                .duration_frames,
+            23
+        );
+        state.run(Action::Undo);
+        assert_eq!(
+            selected_clip(&state)
+                .unwrap()
+                .1
+                .transition_out
+                .unwrap()
+                .duration_frames,
+            15
+        );
+        set_transition_kind(&state, true, Some(TransitionKind::Fade));
+        set_transition_kind(&state, true, Some(TransitionKind::Slide));
+        assert_eq!(
+            selected_clip(&state)
+                .unwrap()
+                .1
+                .transition_out
+                .unwrap()
+                .direction,
+            SlideDirection::Up
+        );
+        for _ in 0..50 {
+            adjust_transition_duration(&state, true, true);
+        }
+        let clip = selected_clip(&state).unwrap().1;
+        assert_eq!(
+            clip.transition_out.unwrap().duration_frames,
+            clip.duration_frames
+        );
+        for _ in 0..50 {
+            adjust_transition_duration(&state, true, false);
+        }
+        assert_eq!(
+            selected_clip(&state)
+                .unwrap()
+                .1
+                .transition_out
+                .unwrap()
+                .duration_frames,
+            1
+        );
+        assert_eq!(selected_clip(&state).unwrap().1.transition, clip.transition);
+        set_transition_kind(&state, true, None);
+        assert!(selected_clip(&state).unwrap().1.transition_out.is_none());
+        state.run(Action::Undo);
+        assert!(selected_clip(&state).unwrap().1.transition_out.is_some());
+        state.busy.set(true);
+        let before = selected_clip(&state).unwrap().1;
+        set_slide_direction(&state, true, SlideDirection::Left);
+        adjust_transition_duration(&state, true, true);
+        set_transition_kind(&state, true, None);
+        assert_eq!(selected_clip(&state).unwrap().1, before);
+    }
+
+    #[test]
+    fn transition_rows_are_clickable_and_fit_a_narrow_inspector() {
+        let state = UiState::new();
+        state.run(Action::AddTitle);
+        set_transition_kind(&state, false, Some(TransitionKind::Slide));
+        set_transition_kind(&state, true, Some(TransitionKind::Slide));
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let clip = selected_clip(&state).unwrap().1;
+            let mut painter = TestPainter::default();
+            let size = Size {
+                width: 240.0,
+                height: 360.0,
+            };
+            let scene = Renderer::new().render(
+                transition_section(&state, &clip, false),
+                size,
+                &mut painter,
+            );
+            for label in ["In", "Out", "From", "Toward", "−0.25 s", "+0.25 s"] {
+                assert!(painter.labels.iter().any(|text| text == label), "{label}");
+            }
+            for (label, rect) in &painter.bounds {
+                assert!(
+                    rect.x >= 0.0 && rect.x + rect.width <= 240.5,
+                    "{label}: {rect:?}"
+                );
+            }
+            let (_, arrow) = painter
+                .bounds
+                .iter()
+                .rfind(|(label, _)| label == "←")
+                .unwrap();
+            scene
+                .hit_test(Point {
+                    x: arrow.x + arrow.width / 2.0,
+                    y: arrow.y + arrow.height / 2.0,
+                })
+                .unwrap()();
+            assert_eq!(
+                selected_clip(&state)
+                    .unwrap()
+                    .1
+                    .transition_out
+                    .unwrap()
+                    .direction,
+                crate::timeline::SlideDirection::Left
+            );
+            assert_eq!(
+                selected_clip(&state)
+                    .unwrap()
+                    .1
+                    .transition
+                    .unwrap()
+                    .direction,
+                crate::timeline::SlideDirection::Right
+            );
+            state.run(Action::Undo);
+            assert_eq!(
+                selected_clip(&state)
+                    .unwrap()
+                    .1
+                    .transition_out
+                    .unwrap()
+                    .direction,
+                crate::timeline::SlideDirection::Right
+            );
+        });
+    }
+
+    #[test]
     fn inspector_transition_choices_and_steps_are_bounded_and_undoable() {
         use crate::timeline::TransitionKind;
         let state = UiState::new();
-        set_transition_kind(&state, Some(TransitionKind::Fade));
+        set_transition_kind(&state, false, Some(TransitionKind::Fade));
         state.run(Action::AddTitle);
-        set_transition_kind(&state, Some(TransitionKind::Dissolve));
+        set_transition_kind(&state, false, Some(TransitionKind::Dissolve));
         assert_eq!(
             selected_clip(&state)
                 .unwrap()
@@ -6531,7 +7055,7 @@ mod tests {
                 .duration_frames,
             15
         );
-        adjust_transition_duration(&state, true);
+        adjust_transition_duration(&state, false, true);
         assert_eq!(
             selected_clip(&state)
                 .unwrap()
@@ -6552,7 +7076,7 @@ mod tests {
             15
         );
         state.run(Action::Redo);
-        set_transition_kind(&state, Some(TransitionKind::Slide));
+        set_transition_kind(&state, false, Some(TransitionKind::Slide));
         assert_eq!(
             selected_clip(&state)
                 .unwrap()
@@ -6563,7 +7087,7 @@ mod tests {
             23
         );
         for _ in 0..50 {
-            adjust_transition_duration(&state, true);
+            adjust_transition_duration(&state, false, true);
         }
         let clip = selected_clip(&state).unwrap().1;
         assert_eq!(
@@ -6571,7 +7095,7 @@ mod tests {
             clip.duration_frames
         );
         for _ in 0..50 {
-            adjust_transition_duration(&state, false);
+            adjust_transition_duration(&state, false, false);
         }
         assert_eq!(
             selected_clip(&state)
@@ -6582,7 +7106,7 @@ mod tests {
                 .duration_frames,
             1
         );
-        set_transition_kind(&state, None);
+        set_transition_kind(&state, false, None);
         assert!(selected_clip(&state).unwrap().1.transition.is_none());
         state.run(Action::Undo);
         assert!(selected_clip(&state).unwrap().1.transition.is_some());
@@ -6599,7 +7123,7 @@ mod tests {
                 .any(|label| label == "TRANSITION")
         );
         state.busy.set(true);
-        set_transition_kind(&state, Some(TransitionKind::Fade));
+        set_transition_kind(&state, false, Some(TransitionKind::Fade));
         assert!(selected_clip(&state).unwrap().1.transition.is_none());
         state.busy.set(false);
         assert!(state.edit(Command::ImportMedia(Media {
@@ -6610,9 +7134,13 @@ mod tests {
             has_audio: true
         })));
         state.insert_media(1);
-        set_transition_kind(&state, Some(TransitionKind::Fade));
-        adjust_transition_duration(&state, true);
+        set_transition_kind(&state, false, Some(TransitionKind::Fade));
+        adjust_transition_duration(&state, false, true);
+        set_transition_kind(&state, true, Some(TransitionKind::Slide));
+        set_slide_direction(&state, true, SlideDirection::Up);
+        adjust_transition_duration(&state, true, true);
         assert!(selected_clip(&state).unwrap().1.transition.is_none());
+        assert!(selected_clip(&state).unwrap().1.transition_out.is_none());
         assert!(
             !render(&state, 1280.0, 760.0)
                 .labels
@@ -6643,6 +7171,7 @@ mod tests {
                 muted: false,
                 color: Default::default(),
                 transition: None,
+                transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
                 linked_audio: false,
@@ -6670,9 +7199,13 @@ mod tests {
                 track_id: 0,
                 kind: TrackKind::Video,
                 label: "V1".into(),
+                locked: false,
+                hidden: false,
+                base: true,
                 removable: false,
                 clips: vec![LaneClip {
                     transition_frames: 0,
+                    transition_out_frames: 0,
                     clip_id: 7,
                     start: 30,
                     duration: 150,

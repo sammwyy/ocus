@@ -278,6 +278,7 @@ pub(crate) struct UiState {
     pub media_filter: Signal<MediaFilter>,
     pub media_view: Signal<MediaView>,
     pub status: Signal<String>,
+    pub autosave_error: Signal<Option<String>>,
     pub dirty: Signal<bool>,
     pub busy: Signal<bool>,
     pub exporting: Signal<bool>,
@@ -433,6 +434,7 @@ impl UiState {
             media_filter: Signal::new(MediaFilter::All),
             media_view: Signal::new(MediaView::Grid),
             status: Signal::new("Ready · Project not saved".into()),
+            autosave_error: Signal::new(None),
             dirty: Signal::new(false),
             busy: Signal::new(false),
             exporting: Signal::new(false),
@@ -500,6 +502,21 @@ impl UiState {
 
     pub fn connect(&self, app: AppHandle) {
         *self.app.borrow_mut() = Some(app.clone());
+        if let Some(results) = self
+            .autosaver
+            .as_ref()
+            .and_then(|saver| saver.take_results())
+        {
+            let state = self.clone();
+            app.spawn_stream(
+                move |emit| {
+                    while let Ok(result) = results.recv() {
+                        emit(result);
+                    }
+                },
+                move |result| state.finish_autosave(result),
+            );
+        }
         if let Some(path) = presets::path() {
             let state = self.clone();
             app.spawn_background(
@@ -515,6 +532,31 @@ impl UiState {
                 },
             );
         }
+    }
+
+    fn finish_autosave(&self, result: Result<(), String>) {
+        self.autosave_error.set(
+            result
+                .err()
+                .map(|error| format!("Autosave failed: {error}")),
+        );
+    }
+
+    pub(super) fn show_file_error(&self, title: &'static str, reason: String) {
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        app.spawn_background(
+            move || {
+                MessageDialog::new()
+                    .set_level(MessageLevel::Error)
+                    .set_title(title)
+                    .set_description(reason)
+                    .set_buttons(MessageButtons::Ok)
+                    .show()
+            },
+            |_| {},
+        );
     }
 
     pub fn connect_window(&self, window: WindowHandle) {
@@ -534,12 +576,38 @@ impl UiState {
         let state = self.clone();
         app.spawn_background(
             move || {
-                let snapshot = recovery::read(&dir)?;
-                let missing = missing_sources(&snapshot.project);
-                Some((snapshot, missing))
+                recovery::read(&dir).map(|snapshot| {
+                    snapshot.map(|snapshot| {
+                        let missing = missing_sources(&snapshot.project);
+                        (snapshot, missing)
+                    })
+                })
             },
-            move |result| {
-                state.finish_recovery(revision, result);
+            move |result| match result {
+                Ok(snapshot) => state.finish_recovery(revision, snapshot),
+                Err(reason) => {
+                    state.status.set(format!("Recovery failed: {reason}"));
+                    if let Some(app) = state.app.borrow().clone() {
+                        let state = state.clone();
+                        app.spawn_background(
+                            move || {
+                                MessageDialog::new()
+                                    .set_level(MessageLevel::Warning)
+                                    .set_title("Could not recover unsaved work")
+                                    .set_description(format!(
+                                        "{reason}\nThe recovery file will be discarded."
+                                    ))
+                                    .set_buttons(MessageButtons::Ok)
+                                    .show()
+                            },
+                            move |_| {
+                                if !state.busy.peek() && state.revision.peek() == revision {
+                                    state.clear_recovery();
+                                }
+                            },
+                        );
+                    }
+                }
             },
         );
     }
@@ -1791,7 +1859,10 @@ impl UiState {
                     Ok(_) => state
                         .status
                         .set("Open cancelled: project changed while loading".into()),
-                    Err(error) => state.status.set(format!("Open failed: {error}")),
+                    Err(error) => {
+                        state.show_file_error("Open failed", error.to_string());
+                        state.status.set(format!("Open failed: {error}"));
+                    }
                 }
             },
         );
@@ -1959,6 +2030,11 @@ impl UiState {
         result: std::io::Result<()>,
     ) {
         self.busy.set(false);
+        if let Err(error) = &result {
+            self.show_file_error("Save failed", error.to_string());
+        } else {
+            self.autosave_error.set(None);
+        }
         let saved_current = result.is_ok() && self.editor.borrow().revision() == revision;
         self.status.set(match result {
             Ok(()) => {
@@ -2998,6 +3074,31 @@ mod tests {
     use crate::timeline::Clip;
 
     #[test]
+    fn autosave_error_survives_other_status_updates_until_success() {
+        let state = UiState::new();
+        state.finish_autosave(Err("disk full".into()));
+        state.status.set("Playing".into());
+        assert_eq!(
+            state.autosave_error.peek().as_deref(),
+            Some("Autosave failed: disk full")
+        );
+        state.finish_autosave(Ok(()));
+        assert_eq!(state.autosave_error.peek(), None);
+        state.finish_autosave(Err("disk full".into()));
+        let revision = state.editor.borrow().revision();
+        state.finish_save(
+            "film.ocus".into(),
+            revision,
+            None,
+            None,
+            Err(std::io::Error::other("denied")),
+        );
+        assert!(state.autosave_error.peek().is_some());
+        state.finish_save("film.ocus".into(), revision, None, None, Ok(()));
+        assert_eq!(state.autosave_error.peek(), None);
+    }
+
+    #[test]
     fn monitor_preview_transitions_clear_errors_and_loading() {
         let state = UiState::new();
         for (target, monitor) in [
@@ -3200,20 +3301,20 @@ mod tests {
         let mut state = UiState::with_recovery_dir(Some(dir.clone()));
         assert!(state.edit(Command::RenameProject("Recovered film".into())));
         drop(state.autosaver.take());
-        let snapshot = recovery::read(&dir).unwrap();
+        let snapshot = recovery::read(&dir).unwrap().unwrap();
         assert_eq!(snapshot.project.name(), "Recovered film");
 
         state.autosaver = Some(Rc::new(recovery::Autosaver::new(dir.clone())));
         let revision = state.editor.borrow().revision();
         state.finish_save("film.ocus".into(), revision, None, None, Ok(()));
         drop(state.autosaver.take());
-        assert!(recovery::read(&dir).is_none());
+        assert!(recovery::read(&dir).unwrap().is_none());
 
         state.autosaver = Some(Rc::new(recovery::Autosaver::new(dir.clone())));
         assert!(state.edit(Command::RenameProject("Discard me".into())));
         assert!(state.apply_unsaved_choice(UnsavedChoice::Discard, |_| {}));
         drop(state.autosaver.take());
-        assert!(recovery::read(&dir).is_none());
+        assert!(recovery::read(&dir).unwrap().is_none());
 
         let original = PathBuf::from("original.ocus");
         state.install_project(

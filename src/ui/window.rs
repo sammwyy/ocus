@@ -2910,7 +2910,14 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             muted(),
             10.0,
         ))
-        .child(text(state.status.get(), muted(), 11.0))
+        .child(text(
+            state
+                .autosave_error
+                .get()
+                .unwrap_or_else(|| state.status.get()),
+            muted(),
+            11.0,
+        ))
         .child(spacer());
     if state.exporting.get()
         && let Some(control) = state.export_control()

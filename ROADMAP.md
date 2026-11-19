@@ -158,7 +158,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 
 **Automation**
 - [ ] Local automatic subtitles (Whisper)
-- [ ] Automatic silence removal
+- [x] Automatic silence removal
 
 **Export**
 - [x] Export queue

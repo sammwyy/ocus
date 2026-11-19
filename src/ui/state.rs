@@ -878,6 +878,115 @@ impl UiState {
         });
     }
 
+    pub(super) fn remove_silences(&self) {
+        if self.busy.peek() {
+            return;
+        }
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let editor = self.editor.borrow();
+        let project = editor.project();
+        let mut jobs = Vec::new();
+        for (track_id, clip_id) in self.selected.peek() {
+            let Some(track) = project
+                .tracks()
+                .iter()
+                .find(|track| track.id == track_id && !track.locked)
+            else {
+                continue;
+            };
+            let Some(clip) = track.clips.iter().find(|clip| clip.id == clip_id) else {
+                continue;
+            };
+            let ClipContent::Media { media_id } = clip.content else {
+                continue;
+            };
+            let Some(media) = project.media().iter().find(|media| media.id == media_id) else {
+                continue;
+            };
+            if carries_sound(track.kind, clip, media)
+                && clip.playback != crate::timeline::Playback::Freeze
+            {
+                jobs.push((media.path.clone(), clip.clone()));
+            }
+        }
+        if jobs.is_empty() {
+            return;
+        }
+        let fps = self.frame_rate();
+        let revision = self.revision.peek();
+        drop(editor);
+        self.busy.set(true);
+        self.status.set("Analyzing silences…".into());
+        let state = self.clone();
+        app.spawn_background(
+            move || {
+                let mut ranges = Vec::new();
+                let rate = f64::from(fps.0) / f64::from(fps.1);
+                for (path, clip) in jobs {
+                    for (start, end) in
+                        audio::silences(&path, clip.source_start_frame, clip.source_span(), fps)?
+                    {
+                        let (start, end) = if clip.playback == crate::timeline::Playback::Reverse {
+                            (
+                                clip.duration_frames as f64 - end * rate / clip.speed,
+                                clip.duration_frames as f64 - start * rate / clip.speed,
+                            )
+                        } else {
+                            (start * rate / clip.speed, end * rate / clip.speed)
+                        };
+                        let start = start.ceil().max(0.0) as u64;
+                        let end = (end.floor().max(0.0) as u64).min(clip.duration_frames);
+                        if start < end {
+                            ranges.push((clip.start_frame + start, clip.start_frame + end));
+                        }
+                    }
+                }
+                Ok(ranges)
+            },
+            move |result| state.finish_silence_removal(revision, result),
+        );
+    }
+
+    fn finish_silence_removal(&self, revision: u64, result: Result<Vec<(u64, u64)>, String>) {
+        self.busy.set(false);
+        if self.revision.peek() != revision {
+            self.status
+                .set("Silence removal cancelled: project changed".into());
+            return;
+        }
+        match result {
+            Ok(mut ranges) => {
+                ranges.sort_unstable();
+                let mut merged: Vec<(u64, u64)> = Vec::new();
+                for (start, end) in ranges {
+                    if let Some(last) = merged.last_mut()
+                        && start <= last.1
+                    {
+                        last.1 = last.1.max(end);
+                    } else {
+                        merged.push((start, end));
+                    }
+                }
+                if merged.is_empty() {
+                    self.status.set("No silence found".into());
+                } else {
+                    let count = merged.len();
+                    let frames: u64 = merged.iter().map(|(start, end)| end - start).sum();
+                    let fps = self.frame_rate();
+                    if self.edit(Command::RemoveSilences(merged)) {
+                        self.status.set(format!(
+                            "Removed {count} silent parts ({:.1} s)",
+                            frames as f64 * f64::from(fps.1) / f64::from(fps.0)
+                        ));
+                    }
+                }
+            }
+            Err(error) => self.status.set(format!("Cannot remove silences: {error}")),
+        }
+    }
+
     pub(super) fn normalize_loudness(&self) {
         let Some(app) = self.app.borrow().clone() else {
             return;
@@ -4099,6 +4208,72 @@ mod tests {
         assert_eq!(volume(), 1.0);
         assert!(state.status.peek().contains("silent"));
         state.finish_normalization(revision, track_id, clip_id, Err("decode failed".into()));
+        assert!(state.status.peek().contains("decode failed"));
+    }
+
+    #[test]
+    fn silence_removal_real_audio_ripples_and_undoes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pauses.wav");
+        assert!(
+            std::process::Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=d=3:r=48000",
+                    "-af",
+                    "volume=0:enable='between(t,1,2)'",
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (_, info, _) = inspect_source(&path).unwrap();
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: path.clone(),
+            kind: info.kind,
+            duration_us: info.duration_us,
+            has_audio: true,
+        })));
+        state.insert_media_at(1, None).unwrap();
+        let original = state.editor.borrow().project().tracks().to_vec();
+        let fps = state.frame_rate();
+        let duration = original
+            .iter()
+            .flat_map(|track| &track.clips)
+            .next()
+            .unwrap()
+            .duration_frames;
+        let ranges = audio::silences(&path, 0, duration, fps).unwrap();
+        assert_eq!(ranges.len(), 1);
+        let rate = f64::from(fps.0) / f64::from(fps.1);
+        let ranges = ranges
+            .into_iter()
+            .map(|(start, end)| ((start * rate).ceil() as u64, (end * rate).floor() as u64))
+            .collect();
+        let revision = state.revision.peek();
+        state.finish_silence_removal(revision, Ok(ranges));
+        assert!(state.status.peek().contains("Removed 1 silent parts"));
+        let edited = state.editor.borrow().project().tracks().to_vec();
+        let clips: Vec<_> = edited.iter().flat_map(|track| &track.clips).collect();
+        assert_eq!(clips.len(), 2);
+        assert_eq!(
+            clips[0].start_frame + clips[0].duration_frames,
+            clips[1].start_frame
+        );
+        state.undo();
+        assert_eq!(state.editor.borrow().project().tracks(), original);
+        state.redo();
+        assert_eq!(state.editor.borrow().project().tracks(), edited);
+        state.finish_silence_removal(state.revision.peek(), Ok(vec![]));
+        assert_eq!(state.status.peek(), "No silence found");
+        state.finish_silence_removal(state.revision.peek(), Err("decode failed".into()));
         assert!(state.status.peek().contains("decode failed"));
     }
 

@@ -173,23 +173,44 @@ pub(super) enum PlaybackMonitor {
     Source,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum PreviewState {
+    Ready,
+    Loading,
+    Failed(String),
+}
+
 /// One GPU preview surface with its own position and decode stream.
 #[derive(Clone)]
 pub(crate) struct Monitor {
     pub slot: GpuFrameSlot,
     pub playing: Signal<bool>,
     pub position: Signal<u64>,
+    pub(super) preview: Signal<PreviewState>,
     cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
     serial: Rc<Cell<u64>>,
     audio: Rc<RefCell<Option<Session>>>,
 }
 
 impl Monitor {
+    fn begin_preview(&self, visual: bool) {
+        self.preview.set(if visual {
+            PreviewState::Loading
+        } else {
+            PreviewState::Ready
+        });
+    }
+
+    fn frame_ready(&self) {
+        self.preview.set(PreviewState::Ready);
+    }
+
     fn new() -> Self {
         Self {
             slot: GpuFrameSlot::new(),
             playing: Signal::new(false),
             position: Signal::new(0),
+            preview: Signal::new(PreviewState::Ready),
             cancel: Rc::new(RefCell::new(None)),
             serial: Rc::new(Cell::new(0)),
             audio: Rc::new(RefCell::new(None)),
@@ -877,7 +898,9 @@ impl UiState {
         if self.program.playing.peek() {
             self.pause();
         }
-        if self.program.position.peek() != frame {
+        if self.program.position.peek() != frame
+            || matches!(self.program.preview.peek(), PreviewState::Failed(_))
+        {
             self.focus_frame(frame);
         }
     }
@@ -1183,7 +1206,9 @@ impl UiState {
     }
 
     pub fn seek_source(&self, frame: u64) {
-        if self.source.position.peek() == frame {
+        if self.source.position.peek() == frame
+            && !matches!(self.source.preview.peek(), PreviewState::Failed(_))
+        {
             return;
         }
         self.last_playback_monitor.set(PlaybackMonitor::Source);
@@ -1252,6 +1277,7 @@ impl UiState {
     }
 
     fn request_source_preview(&self) {
+        self.source.preview.set(PreviewState::Ready);
         if self
             .selected_media
             .peek()
@@ -1316,6 +1342,7 @@ impl UiState {
         follow_timeline: bool,
     ) {
         monitor.cancel();
+        monitor.preview.set(PreviewState::Ready);
         let Some(window) = self.window.borrow().clone() else {
             return;
         };
@@ -1334,6 +1361,15 @@ impl UiState {
         }
         if !plan.sources.is_empty() && !self.preview_available.peek() {
             return;
+        }
+        let visual = plan
+            .sources
+            .iter()
+            .any(|source| start >= source.start && start - source.start < source.duration)
+            || (follow_timeline && self.program_has_title(start));
+        monitor.begin_preview(visual && self.preview_available.peek());
+        if visual {
+            monitor.slot.clear(&window);
         }
         let serial = monitor.serial.get();
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -1391,8 +1427,7 @@ impl UiState {
                         return;
                     }
                     PreviewEvent::Failed(error) => {
-                        state.stop(&monitor);
-                        state.status.set(format!("Preview failed: {error}"));
+                        state.fail_preview(&monitor, error);
                         return;
                     }
                 };
@@ -1402,15 +1437,44 @@ impl UiState {
                     image
                 };
                 match image.map(|image| upload_preview_frame(&window, image)) {
-                    Some(Ok(texture)) => monitor.slot.publish(texture, &window),
-                    Some(Err(error)) => {
-                        state.stop(&monitor);
-                        state.status.set(format!("Preview failed: {error}"));
+                    Some(Ok(texture)) => {
+                        monitor.slot.publish(texture, &window);
+                        monitor.frame_ready();
                     }
-                    None => monitor.slot.clear(&window),
+                    Some(Err(error)) => {
+                        state.fail_preview(&monitor, error);
+                    }
+                    None => {
+                        monitor.slot.clear(&window);
+                        monitor.frame_ready();
+                    }
                 }
             },
         );
+    }
+
+    fn program_has_title(&self, frame: u64) -> bool {
+        self.editor.borrow().project().tracks().iter().any(|track| {
+            track.kind == TrackKind::Video
+                && track.clips.iter().any(|clip| {
+                    matches!(clip.content, ClipContent::Title(_))
+                        && frame >= clip.start_frame
+                        && frame - clip.start_frame < clip.duration_frames
+                })
+        })
+    }
+
+    fn fail_preview(&self, monitor: &Monitor, error: String) {
+        self.stop(monitor);
+        monitor.preview.set(PreviewState::Failed(error.clone()));
+        self.status.set(format!("Preview failed: {error}"));
+    }
+
+    pub(super) fn retry_preview(&self, target: PlaybackMonitor) {
+        match target {
+            PlaybackMonitor::Program => self.request_preview(),
+            PlaybackMonitor::Source => self.request_source_preview(),
+        }
     }
 
     /// Starts a sound session for a playing stream and returns the clock
@@ -1467,6 +1531,8 @@ impl UiState {
     }
 
     fn reset_monitors(&self) {
+        self.program.preview.set(PreviewState::Ready);
+        self.source.preview.set(PreviewState::Ready);
         self.last_playback_monitor.set(PlaybackMonitor::Program);
         self.pause();
         self.pause_source();
@@ -2930,6 +2996,40 @@ fn import_summary(imported: usize, total: usize, errors: &[(PathBuf, String)]) -
 mod tests {
     use super::*;
     use crate::timeline::Clip;
+
+    #[test]
+    fn monitor_preview_transitions_clear_errors_and_loading() {
+        let state = UiState::new();
+        for (target, monitor) in [
+            (PlaybackMonitor::Source, &state.source),
+            (PlaybackMonitor::Program, &state.program),
+        ] {
+            monitor.begin_preview(true);
+            assert_eq!(monitor.preview.peek(), PreviewState::Loading);
+            monitor.frame_ready();
+            assert_eq!(monitor.preview.peek(), PreviewState::Ready);
+            state.fail_preview(monitor, "Decode failed".into());
+            assert_eq!(
+                monitor.preview.peek(),
+                PreviewState::Failed("Decode failed".into())
+            );
+            assert_eq!(state.status.peek(), "Preview failed: Decode failed");
+            assert!(!monitor.playing.peek());
+            state.retry_preview(target);
+            assert_eq!(monitor.preview.peek(), PreviewState::Ready);
+            state.fail_preview(monitor, "Upload failed".into());
+            match target {
+                PlaybackMonitor::Source => state.seek_source(0),
+                PlaybackMonitor::Program => state.seek(0),
+            }
+            assert_eq!(monitor.preview.peek(), PreviewState::Ready);
+            monitor.begin_preview(false);
+            assert_eq!(monitor.preview.peek(), PreviewState::Ready);
+        }
+        state.fail_preview(&state.source, "Decode failed".into());
+        state.select_media(1);
+        assert_eq!(state.source.preview.peek(), PreviewState::Ready);
+    }
 
     #[test]
     fn next_play_retries_failed_audio_output() {

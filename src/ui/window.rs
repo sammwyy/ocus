@@ -8,8 +8,8 @@ use super::controls::{
 use super::edits::ClipRef;
 use super::interaction::{Action, DragPayload, MenuState};
 use super::state::{
-    ExportPage, MediaView, PlaybackMonitor, SequenceContent, SettingsPage, SourceRange,
-    TitleGesture, ZOOM_SECONDS, media_frames,
+    ExportPage, MediaView, PlaybackMonitor, PreviewState, SequenceContent, SettingsPage,
+    SourceRange, TitleGesture, ZOOM_SECONDS, media_frames,
 };
 use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
 use super::{MediaFilter, Sidebar, UiState};
@@ -430,6 +430,30 @@ fn stage_message(
 
 fn monitor_viewport(slot: &GpuFrameSlot, aspect: f32) -> BoxedWidget {
     Box::new(GpuViewport::new(fill_style(), slot.clone()).aspect_ratio(aspect))
+}
+
+fn preview_stage(state: &UiState, target: PlaybackMonitor) -> Option<BoxedWidget> {
+    let monitor = match target {
+        PlaybackMonitor::Program => &state.program,
+        PlaybackMonitor::Source => &state.source,
+    };
+    let message = match monitor.preview.get() {
+        PreviewState::Ready => None,
+        PreviewState::Loading => Some(stage_message(Glyph::Film, "Loading preview…", "", None)),
+        PreviewState::Failed(reason) => Some(stage_message(
+            Glyph::Film,
+            "Preview failed",
+            &reason,
+            Some(secondary_button(
+                None,
+                "Retry",
+                !state.busy.get(),
+                state,
+                move |s| s.retry_preview(target),
+            )),
+        )),
+    };
+    message.map(|message| Box::new(Flex::column().full_width().child(message)) as BoxedWidget)
 }
 
 /// What plays at `frame`: picture, sound, titles, and the first missing
@@ -2479,7 +2503,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             faint(),
             10.0,
         )],
-        program_stage,
+        preview_stage(state, PlaybackMonitor::Program).unwrap_or(program_stage),
         transport(
             state,
             Transport {
@@ -2577,6 +2601,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             None,
         ),
     };
+    let source_stage = preview_stage(state, PlaybackMonitor::Source).unwrap_or(source_stage);
     let source_end = range.as_ref().map_or(0, |range| range.duration);
     let source_actions: Vec<BoxedWidget> = match (primary, selected_media) {
         (Some(_), _) => selected_clip(state)
@@ -4168,6 +4193,96 @@ mod tests {
                 .any(|label| label == "No clip at this frame")
         );
         assert!(!painter.labels.iter().any(|label| label == "Audio only"));
+    }
+
+    #[test]
+    fn monitors_show_loading_and_retryable_errors() {
+        let state = UiState::new();
+        for monitor in [&state.source, &state.program] {
+            monitor.preview.set(PreviewState::Loading);
+            let painter = render(&state, 1280.0, 760.0);
+            assert!(
+                painter
+                    .labels
+                    .iter()
+                    .any(|label| label == "Loading preview…")
+            );
+            monitor.preview.set(PreviewState::Ready);
+            let painter = render(&state, 1280.0, 760.0);
+            assert!(
+                !painter
+                    .labels
+                    .iter()
+                    .any(|label| label == "Loading preview…")
+            );
+            monitor
+                .preview
+                .set(PreviewState::Failed("Cannot decode frame".into()));
+            let painter = render(&state, 1280.0, 760.0);
+            assert!(painter.labels.iter().any(|label| label == "Preview failed"));
+            assert!(
+                painter
+                    .labels
+                    .iter()
+                    .any(|label| label == "Cannot decode frame")
+            );
+            assert!(painter.labels.iter().any(|label| label == "Retry"));
+            creamui::reactive::with_context_scope(|| {
+                creamui::reactive::provide_context(creamui::ThemeProvider::new(
+                    creamui::Theme::dark(),
+                ));
+                let viewport = Size {
+                    width: 1280.0,
+                    height: 760.0,
+                };
+                let mut painter = TestPainter::default();
+                let scene = Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+                let (_, rect) = painter
+                    .bounds
+                    .iter()
+                    .find(|(label, _)| label == "Retry")
+                    .unwrap();
+                scene
+                    .hit_test(Point {
+                        x: rect.x + rect.width / 2.0,
+                        y: rect.y + rect.height / 2.0,
+                    })
+                    .unwrap()();
+            });
+            assert_eq!(monitor.preview.peek(), PreviewState::Ready);
+            let painter = render(&state, 1280.0, 760.0);
+            assert!(!painter.labels.iter().any(|label| label == "Preview failed"));
+        }
+    }
+
+    #[test]
+    fn preview_error_reason_wraps_in_a_narrow_monitor() {
+        let state = UiState::new();
+        let reason = "The selected video could not be decoded because its codec is unavailable on this system. Choose another source or retry the preview.";
+        state
+            .source
+            .preview
+            .set(PreviewState::Failed(reason.into()));
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let viewport = Size {
+                width: 240.0,
+                height: 400.0,
+            };
+            let mut painter = TestPainter::default();
+            Renderer::new().render(
+                preview_stage(&state, PlaybackMonitor::Source).unwrap(),
+                viewport,
+                &mut painter,
+            );
+            let (_, rect) = painter
+                .bounds
+                .iter()
+                .find(|(label, _)| label == reason)
+                .unwrap();
+            assert!(rect.width <= viewport.width);
+            assert!(rect.height > 22.0);
+        });
     }
 
     #[test]

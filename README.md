@@ -51,7 +51,24 @@ project clears it too. Saves are atomic and file operations run in the backgroun
 **Import** accepts multiple
 files from the native picker and probes video, audio, and images with FFmpeg
 on a worker thread. Video and still-image sources get small, regenerable
-first-frame thumbnails. The media bin offers search, a segmented
+first-frame thumbnails.
+
+**Import subtitles…** accepts SRT files; the regular import picker and file drops
+also recognize `.srt`. Each file adds a dedicated subtitle video track in one
+undoable edit, with bottom-positioned, outlined title clips. Supported bold,
+italic and font-color markup is preserved; unsupported tags (including underline)
+are stripped. Overlapping cues end at the next cue's start; cues rounding to the
+same start frame keep the later cue. Subtitle titles use the existing preview and
+export compositor. Select a subtitle cue to edit the track's font, color, outline,
+background and position in **Subtitle style**. Each style change updates all cues
+on that track in one undoable step without changing their text or timing.
+Video export burns subtitles in by default. Turn off **Burn in subtitles** on
+the Export dialog's Video tab to export a clean video and an SRT sidecar beside
+it. Multiple subtitle tracks merge into one time-sorted sidecar. GIF always burns
+subtitles in; WAV has no subtitle output. Existing output or sidecar files are
+never overwritten.
+
+The media bin offers search, a segmented
 All/video/audio/still filter with per-type counts, grid and list views, and files can also be dropped onto it to import
 them. Each source has a one-click insert action that adds a clip on a video or
 audio track using the probed duration (still images default to three seconds).

@@ -1,4 +1,14 @@
-use std::{env, fs, path::PathBuf, process::Command};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+fn profile_output_dir<'a>(out_dir: &'a Path, profile: &std::ffi::OsStr) -> Option<&'a Path> {
+    out_dir
+        .ancestors()
+        .find(|ancestor| ancestor.file_name() == Some(profile))
+}
 
 fn git_output(args: &[&str]) -> Option<String> {
     let output = Command::new("git")
@@ -64,19 +74,108 @@ fn main() {
     }
 
     let Some(bin_dir) = ffmpeg_bin_dir() else {
+        println!("cargo:warning=FFmpeg runtime DLL directory not found");
         return;
     };
 
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    let Some(profile_dir) = out_dir.ancestors().nth(3) else {
+    let (Some(out_dir), Some(profile)) = (env::var_os("OUT_DIR"), env::var_os("PROFILE")) else {
+        println!("cargo:warning=Cannot locate DLL destination: OUT_DIR or PROFILE is missing");
         return;
     };
+    let out_dir = PathBuf::from(out_dir);
+    let Some(profile_dir) = profile_output_dir(&out_dir, &profile) else {
+        println!(
+            "cargo:warning=Cannot locate DLL destination for profile {} in {}",
+            profile.to_string_lossy(),
+            out_dir.display()
+        );
+        return;
+    };
+    let entries = match fs::read_dir(&bin_dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            println!("cargo:warning=Cannot read {}: {error}", bin_dir.display());
+            return;
+        }
+    };
 
-    for entry in fs::read_dir(bin_dir).into_iter().flatten().flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                println!("cargo:warning=Cannot read DLL directory entry: {error}");
+                continue;
+            }
+        };
         let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if name.ends_with(".dll") {
-            let _ = fs::copy(entry.path(), profile_dir.join(name));
+        if entry
+            .path()
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("dll"))
+        {
+            let destination = profile_dir.join(name);
+            if let Err(error) = fs::copy(entry.path(), &destination) {
+                println!(
+                    "cargo:warning=Cannot copy {} to {}: {error}",
+                    entry.path().display(),
+                    destination.display()
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::profile_output_dir;
+    use std::{ffi::OsStr, path::Path};
+
+    #[test]
+    fn finds_profile_in_classic_and_nested_build_layouts() {
+        for out_dir in [
+            "target/release/build/ocus-hash/out",
+            "target/release/build/ocus/hash/out",
+            "target/x86_64-pc-windows-msvc/release/build/ocus-hash/out",
+            "target/x86_64-pc-windows-msvc/release/build/ocus/hash/out",
+        ] {
+            let out_dir = Path::new(out_dir);
+            let expected = if out_dir.starts_with("target/x86_64-pc-windows-msvc") {
+                Path::new("target/x86_64-pc-windows-msvc/release")
+            } else {
+                Path::new("target/release")
+            };
+            assert_eq!(
+                profile_output_dir(out_dir, OsStr::new("release")),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn finds_nearest_matching_profile() {
+        assert_eq!(
+            profile_output_dir(
+                Path::new("release/target/debug/build/ocus/hash/out"),
+                OsStr::new("debug")
+            ),
+            Some(Path::new("release/target/debug"))
+        );
+        assert_eq!(
+            profile_output_dir(
+                Path::new("release/target/release/build/ocus/hash/out"),
+                OsStr::new("release")
+            ),
+            Some(Path::new("release/target/release"))
+        );
+    }
+
+    #[test]
+    fn missing_profile_has_no_destination() {
+        for out_dir in ["", "target/debug/build/ocus/hash/out"] {
+            assert_eq!(
+                profile_output_dir(Path::new(out_dir), OsStr::new("release")),
+                None
+            );
         }
     }
 }

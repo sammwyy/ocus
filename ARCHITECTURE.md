@@ -190,6 +190,13 @@ offers independent In and Out choices, quarter-second duration steps, and
 slide edges; the timeline marks their effective ranges with mirrored ramps
 at the clip's start and end.
 
+Video and image clips may store an optional rectangle or ellipse mask, edited
+undoably through `SetClipMask`. Center and size are source-picture fractions;
+feather softens the edge relative to the smaller mask dimension and invert
+reveals the outside. Preview, export and filmstrips multiply source alpha by
+mask coverage before crop, transform and transitions. Splits and copies retain
+the mask; absent masks leave version 1 projects unchanged.
+
 Video and image clips may reference a `.cube` color LUT through an optional
 version 1 field (absent means no LUT). `SetClipLut` changes it undoably; splits
 and copies preserve it. The Inspector validates chosen files on a worker.

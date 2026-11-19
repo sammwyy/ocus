@@ -358,6 +358,7 @@ mod tests {
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,

@@ -58,6 +58,7 @@ fn project(path: &Path) -> Editor {
                 stabilization: None,
                 keyframes: Vec::new(),
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 transition: None,
@@ -101,6 +102,7 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
         let request = StoryboardKey {
             transform_bits: StoryboardKey::transform_bits(Transform::default()),
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),

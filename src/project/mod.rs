@@ -206,6 +206,10 @@ impl Project {
                         && (track.kind != TrackKind::Video
                             || !matches!(clip.content, ClipContent::Media { .. })))
                     || !clip.color.valid()
+                    || clip.mask.as_deref().is_some_and(|mask| !mask.valid())
+                    || (clip.mask.is_some()
+                        && (track.kind != TrackKind::Video
+                            || !matches!(clip.content, ClipContent::Media { .. })))
                     || !clip.volume.is_finite()
                     || !(0.0..=2.0).contains(&clip.volume)
                     || !clip.valid_fades()

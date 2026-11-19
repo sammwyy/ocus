@@ -2539,6 +2539,7 @@ mod tests {
                     linked_audio: false,
                     color: Default::default(),
                     effect: None,
+                    mask: None,
                     lut: None,
                     chroma_key: None,
                 }),

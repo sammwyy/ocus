@@ -23,8 +23,8 @@ use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, Vide
 use crate::project::{Command, Project};
 use crate::settings::ThemeMode;
 use crate::timeline::{
-    Clip, ClipContent, ColorAdjust, Playback, SlideDirection, Title, Track, TrackKind, Transform,
-    Transition, TransitionKind,
+    Clip, ClipContent, ColorAdjust, Mask, MaskShape, Playback, SlideDirection, Title, Track,
+    TrackKind, Transform, Transition, TransitionKind,
 };
 use creamui::core::layout::{Dimension, Style};
 use creamui::core::{Painter, Point, Rect, TextAlign, Widget};
@@ -1101,6 +1101,231 @@ fn transform_rows(state: &UiState, transform: Transform, inner: f32) -> Vec<Boxe
     )));
     rows
 }
+fn set_clip_mask(state: &UiState, mask: Option<Mask>) {
+    if let Some((track_id, clip)) = selected_clip(state) {
+        state.edit(Command::SetClipMask {
+            track_id,
+            clip_id: clip.id,
+            mask,
+        });
+    }
+}
+
+fn mask_value(mask: &mut Mask, field: usize) -> &mut f32 {
+    match field {
+        0 => &mut mask.center_x,
+        1 => &mut mask.center_y,
+        2 => &mut mask.width,
+        3 => &mut mask.height,
+        _ => &mut mask.feather,
+    }
+}
+
+struct MaskSlider {
+    state: UiState,
+    field: usize,
+    value: f32,
+    width: f32,
+}
+
+impl Widget for MaskSlider {
+    fn style(&self) -> creamui::Style {
+        Style::default().size(self.width, 24.0).into()
+    }
+
+    fn paint(&self, painter: &mut dyn Painter, rect: Rect) {
+        let track = Rect {
+            x: rect.x + 6.0,
+            y: rect.y + 10.0,
+            width: (rect.width - 12.0).max(1.0),
+            height: 4.0,
+        };
+        painter.fill_rect(track, surface(), 2.0);
+        painter.fill_rect(
+            Rect {
+                width: track.width * self.value,
+                ..track
+            },
+            accent(),
+            2.0,
+        );
+        painter.fill_rect(
+            Rect {
+                x: track.x + track.width * self.value - 5.0,
+                y: rect.y + 7.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            text_color(),
+            5.0,
+        );
+    }
+
+    fn on_drag_start(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
+        let state = self.state.clone();
+        let field = self.field;
+        Some(Rc::new(move |_, _| {
+            if let Some((track, clip)) = selected_clip(&state)
+                && let Some(mask) = clip.mask.as_deref().copied()
+            {
+                state.mask_drag.set(Some((track, clip.id, field, mask)));
+            }
+        }))
+    }
+
+    fn on_drag(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
+        let state = self.state.clone();
+        Some(Rc::new(move |point, rect| {
+            if let Some((track, clip, field, mut mask)) = state.mask_drag.get() {
+                *mask_value(&mut mask, field) =
+                    ((point.x - 6.0) / (rect.width - 12.0).max(1.0)).clamp(0.0, 1.0);
+                state.mask_drag.set(Some((track, clip, field, mask)));
+                state.request_preview();
+            }
+        }))
+    }
+
+    fn on_drag_end(&self) -> Option<Rc<dyn Fn()>> {
+        let state = self.state.clone();
+        Some(Rc::new(move || {
+            if let Some((track_id, clip_id, _, mask)) = state.mask_drag.get() {
+                state.mask_drag.set(None);
+                if !state.edit(Command::SetClipMask {
+                    track_id,
+                    clip_id,
+                    mask: Some(mask),
+                }) {
+                    state.request_preview();
+                }
+            }
+        }))
+    }
+}
+
+fn mask_section(state: &UiState, clip: &Clip, inner: f32) -> BoxedWidget {
+    let mut rows = Vec::new();
+    let mut choices = Flex::row().gap(4.0);
+    for (label, shape) in [
+        ("None", None),
+        ("Rectangle", Some(MaskShape::Rectangle)),
+        ("Ellipse", Some(MaskShape::Ellipse)),
+    ] {
+        choices = choices.child(with_help(
+            export_choice(
+                label,
+                clip.mask.as_deref().map(|mask| mask.shape) == shape,
+                if shape.is_none() {
+                    inner
+                } else {
+                    (inner - 4.0) / 2.0
+                },
+                state,
+                move |state| {
+                    let mask = shape.map(|shape| Mask {
+                        shape,
+                        ..selected_clip(state)
+                            .and_then(|(_, clip)| clip.mask.map(|mask| *mask))
+                            .unwrap_or_default()
+                    });
+                    set_clip_mask(state, mask);
+                },
+            ),
+            Help::new(match shape {
+                None => "Show the whole picture without a mask.",
+                Some(MaskShape::Rectangle) => "Keep a rectangular area of this picture visible.",
+                Some(MaskShape::Ellipse) => "Keep an oval area of this picture visible.",
+            }),
+            state,
+        ));
+        if shape.is_none() {
+            rows.push(Box::new(choices) as BoxedWidget);
+            choices = Flex::row().gap(4.0);
+        }
+    }
+    rows.push(Box::new(choices) as BoxedWidget);
+    if let Some(mut mask) = clip.mask.as_deref().copied() {
+        if let Some((_, id, _, draft)) = state.mask_drag.get()
+            && id == clip.id
+        {
+            mask = draft;
+        }
+        let helps = [
+            "Move the mask horizontally within the source picture.",
+            "Move the mask vertically within the source picture.",
+            "Set mask width as a percentage of the source picture.",
+            "Set mask height as a percentage of the source picture.",
+            "Soften the edge as a percentage of the smaller mask dimension.",
+        ];
+        for (field, label) in ["X", "Y", "Width", "Height", "Feather"]
+            .into_iter()
+            .enumerate()
+        {
+            let value = *mask_value(&mut mask, field);
+            rows.push(Box::new(
+                Flex::row()
+                    .gap(6.0)
+                    .align(Align::Center)
+                    .child(Box::new(Flex::row().width(48.0).child(text(
+                        label,
+                        muted(),
+                        11.0,
+                    ))))
+                    .child(with_help(
+                        Box::new(MaskSlider {
+                            state: state.clone(),
+                            field,
+                            value,
+                            width: (inner - 96.0).max(24.0),
+                        }),
+                        Help::new(helps[field]),
+                        state,
+                    ))
+                    .child(text(format!("{:.0}%", value * 100.0), text_color(), 11.0)),
+            ));
+        }
+        rows.push(with_help(
+            secondary_button(
+                None,
+                if mask.invert {
+                    "Invert: On"
+                } else {
+                    "Invert: Off"
+                },
+                true,
+                state,
+                move |state| {
+                    set_clip_mask(
+                        state,
+                        Some(Mask {
+                            invert: !mask.invert,
+                            ..mask
+                        }),
+                    )
+                },
+            ),
+            Help::new("Invert the mask to hide its inside and show its outside."),
+            state,
+        ));
+        rows.push(with_help(
+            secondary_button(
+                None,
+                "Reset mask",
+                mask != Mask::default(),
+                state,
+                |state| set_clip_mask(state, Some(Mask::default())),
+            ),
+            Help::new("Restore a centered oval mask with a gently softened edge."),
+            state,
+        ));
+        rows.push(text(
+            "The mask follows the clip's transform.",
+            faint(),
+            10.0,
+        ));
+    }
+    section("Mask", rows)
+}
+
 #[derive(Clone)]
 struct ChromaSlider {
     state: UiState,
@@ -2053,10 +2278,16 @@ fn title_resize_handle(selection: Rect, bounds: Rect) -> Rect {
 }
 
 impl ProgramCanvas {
-    fn selected_title_box(&self, bounds: Rect) -> Option<Rect> {
+    fn selected_title(&self) -> Option<&Title> {
         let selected = self.selected?;
-        let title = &self.titles.iter().find(|(key, _)| *key == selected)?.1;
-        Some(title_box(title, bounds, self.resolution))
+        self.titles
+            .iter()
+            .find(|(key, _)| *key == selected)
+            .map(|(_, title)| title)
+    }
+
+    fn selected_title_box(&self, bounds: Rect) -> Option<Rect> {
+        Some(title_box(self.selected_title()?, bounds, self.resolution))
     }
 }
 
@@ -2219,12 +2450,7 @@ impl Widget for ProgramCanvas {
 
     fn on_drag_start(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
         let selected = self.selected?;
-        let title = self
-            .titles
-            .iter()
-            .find(|(key, _)| *key == selected)?
-            .1
-            .clone();
+        let title = self.selected_title()?.clone();
         let state = self.state.clone();
         let aspect = self.aspect;
         let resolution = self.resolution;
@@ -2261,6 +2487,7 @@ impl Widget for ProgramCanvas {
         {
             return None;
         }
+        self.selected_title()?;
         let state = self.state.clone();
         let aspect = self.aspect;
         let resolution = self.resolution;
@@ -3555,6 +3782,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 controls.push(text("Original video is untouched.", faint(), 10.0));
                 rows.push(section("Stabilization", controls));
             }
+            rows.push(mask_section(state, &clip, inner));
             rows.push(section(
                 "Color",
                 vec![
@@ -4593,6 +4821,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                             transform: crate::timeline::Transform::default(),
                             noise_reduction: false,
                             effect: None,
+                            mask: None,
                             lut: None,
                             chroma_key: None,
                             transition_out: None,
@@ -6788,6 +7017,7 @@ mod tests {
         Clip {
             playback: crate::timeline::Playback::Forward,
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             id: 10,
@@ -7641,6 +7871,7 @@ mod tests {
         let key = StoryboardKey {
             transform_bits: StoryboardKey::transform_bits(crate::timeline::Transform::default()),
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
@@ -8162,6 +8393,168 @@ mod tests {
             painter.text_colors.last().unwrap().1,
             Color::rgba(245, 210, 80, 160)
         );
+    }
+
+    #[test]
+    fn feather_drag_keeps_inspector_scroll_and_drag_target() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/mask.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: false,
+        })));
+        state.insert_media(1);
+        set_clip_mask(&state, Some(Mask::default()));
+        state.preview_available.set(true);
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let viewport = Size {
+                width: 1600.0,
+                height: 1160.0,
+            };
+            let mut renderer = Renderer::new();
+            let mut painter = TestPainter::default();
+            let tall = Size {
+                height: 5000.0,
+                ..viewport
+            };
+            renderer.render(build(&state, tall), tall, &mut painter);
+            let feather = painter
+                .bounds
+                .iter()
+                .find(|(label, _)| label == "Feather")
+                .unwrap()
+                .1;
+            renderer.render(
+                build(&state, viewport),
+                viewport,
+                &mut TestPainter::default(),
+            );
+            state.inspector_scroll.set(feather.y - 610.0);
+            let mut painter = TestPainter::default();
+            let scene = renderer.render(build(&state, viewport), viewport, &mut painter);
+            let feather = painter
+                .bounds
+                .iter()
+                .find(|(label, _)| label == "Feather")
+                .unwrap()
+                .1;
+            let pointer = Point {
+                x: feather.x + 110.0,
+                y: feather.y + feather.height / 2.0,
+            };
+            let index = scene.drag_hit_test(pointer).unwrap();
+            let (rect, start) = scene.drag_start_at(pointer).unwrap();
+            start(
+                Point {
+                    x: pointer.x - rect.x,
+                    y: pointer.y - rect.y,
+                },
+                rect,
+            );
+            let offset = state.inspector_scroll.offset();
+            state
+                .tooltip_controller((
+                    "Soften the edge as a percentage of the smaller mask dimension.",
+                    0,
+                ))
+                .focus(true);
+            for preview in [
+                PreviewState::Loading,
+                PreviewState::Ready,
+                PreviewState::Failed("Decode failed".into()),
+                PreviewState::Ready,
+            ] {
+                state.program.preview.set(preview);
+                let mut painter = TestPainter::default();
+                let scene = renderer.render(build(&state, viewport), viewport, &mut painter);
+                let (rect, drag) = scene.draggable_at(index).unwrap();
+                drag(
+                    Point {
+                        x: pointer.x - rect.x,
+                        y: pointer.y - rect.y,
+                    },
+                    rect,
+                );
+                assert_eq!(state.inspector_scroll.offset(), offset);
+                assert_eq!(state.mask_drag.peek().unwrap().2, 4);
+            }
+        });
+    }
+
+    #[test]
+    fn mask_slider_drag_survives_rebuilt_controls_and_undoes_once() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/mask.png".into(),
+            kind: MediaKind::Image,
+            duration_us: None,
+            has_audio: false
+        })));
+        let clip: Clip = serde_json::from_value(serde_json::json!({
+            "id": 1, "start_frame": 0, "source_start_frame": 0,
+            "duration_frames": 30, "content": {"media": {"media_id": 1}},
+            "volume": 1.0, "muted": false
+        }))
+        .unwrap();
+        assert!(state.edit(Command::InsertClip {
+            track_id: 0,
+            clip: Box::new(clip),
+        }));
+        state.select_clip(Some((0, 1)));
+        set_clip_mask(&state, Some(Mask::default()));
+        let slider = MaskSlider {
+            state: state.clone(),
+            field: 2,
+            value: 0.6,
+            width: 112.0,
+        };
+        let rect = Rect {
+            x: 50.0,
+            y: 0.0,
+            width: 112.0,
+            height: 24.0,
+        };
+        slider.on_drag_start().unwrap()(Point { x: 66.0, y: 12.0 }, rect);
+        slider.on_drag().unwrap()(Point { x: 76.0, y: 12.0 }, rect);
+        let rebuilt = MaskSlider {
+            state: state.clone(),
+            field: 3,
+            value: 0.6,
+            width: 112.0,
+        };
+        rebuilt.on_drag().unwrap()(Point { x: 86.0, y: 12.0 }, rect);
+        assert_eq!(selected_clip(&state).unwrap().1.mask.unwrap().width, 0.6);
+        slider.on_drag_end().unwrap()();
+        let mask = selected_clip(&state).unwrap().1.mask.unwrap();
+        assert_eq!(mask.width, 0.8);
+        assert_eq!(mask.height, 0.6);
+        assert!(state.editor.borrow_mut().undo());
+        assert_eq!(
+            selected_clip(&state).unwrap().1.mask.as_deref().copied(),
+            Some(Mask::default())
+        );
+        let revision = state.revision.peek();
+        slider.on_drag_start().unwrap()(Point { x: 66.0, y: 12.0 }, rect);
+        slider.on_drag().unwrap()(Point { x: 86.0, y: 12.0 }, rect);
+        state.run(Action::Escape);
+        slider.on_drag().unwrap()(Point { x: 96.0, y: 12.0 }, rect);
+        slider.on_drag_end().unwrap()();
+        assert!(state.mask_drag.peek().is_none());
+        assert_eq!(state.revision.peek(), revision);
+        assert_eq!(
+            selected_clip(&state).unwrap().1.mask.as_deref().copied(),
+            Some(Mask::default())
+        );
+        slider.on_drag_start().unwrap()(Point { x: 66.0, y: 12.0 }, rect);
+        state.select_clip(None);
+        slider.on_drag_end().unwrap()();
+        assert_eq!(state.revision.peek(), revision);
+        set_clip_mask(&state, None);
+        assert!(state.mask_drag.get().is_none());
     }
 
     #[test]
@@ -9268,6 +9661,7 @@ mod tests {
                 playback: crate::timeline::Playback::Forward,
                 noise_reduction: false,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 transition_out: None,
@@ -9530,6 +9924,7 @@ mod tests {
                     id: id + 100,
                     noise_reduction: false,
                     effect: None,
+                    mask: None,
                     lut: None,
                     chroma_key: None,
                     transition_out: None,
@@ -9558,7 +9953,7 @@ mod tests {
                 kind == MediaKind::Video
             );
             assert_eq!(
-                render(&state, 1280.0, 2100.0)
+                render(&state, 1280.0, 2300.0)
                     .labels
                     .iter()
                     .any(|l| l == "PICTURE-IN-PICTURE"),
@@ -9637,7 +10032,7 @@ mod tests {
                     inspector(&state, state.editor.borrow().project(), 220.0, false),
                     Size {
                         width: 220.0,
-                        height: 1600.0,
+                        height: 2300.0,
                     },
                     &mut painter,
                 );
@@ -10267,6 +10662,7 @@ mod tests {
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,

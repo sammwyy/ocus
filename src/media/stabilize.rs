@@ -379,6 +379,7 @@ mod tests {
             chroma_key: None,
             stabilization: None,
             effect: None,
+            mask: None,
             playback: Playback::Forward,
             lut: None,
             color: Default::default(),

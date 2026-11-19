@@ -537,7 +537,9 @@ impl UiState {
             Action::RippleDelete if !busy => self.delete_selection(true),
             Action::SelectAll => self.select_all(),
             Action::Escape => {
-                if self.menu.peek().is_some() {
+                if self.mask_drag.peek().is_some() {
+                    self.cancel_mask_drag();
+                } else if self.menu.peek().is_some() {
                     self.close_menu();
                 } else if self.drag.peek().is_some()
                     || matches!(*self.gesture.borrow(), Gesture::Trim { .. })
@@ -2118,6 +2120,7 @@ mod tests {
                     id: track_id + 1,
                     speed: 1.0,
                     effect: None,
+                    mask: None,
                     lut: None,
                     chroma_key: None,
                     color: Default::default(),
@@ -2178,6 +2181,7 @@ mod tests {
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -2476,6 +2480,7 @@ mod tests {
                 clip: Box::new(Clip {
                     playback: crate::timeline::Playback::Forward,
                     effect: None,
+                    mask: None,
                     lut: None,
                     chroma_key: None,
                     id: clip_id,
@@ -2544,6 +2549,7 @@ mod tests {
         let detached = Clip {
             playback: crate::timeline::Playback::Forward,
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             id: 1,
@@ -2823,6 +2829,7 @@ mod tests {
                 clip: Box::new(Clip {
                     playback: crate::timeline::Playback::Forward,
                     effect: None,
+                    mask: None,
                     lut: None,
                     chroma_key: None,
                     id,

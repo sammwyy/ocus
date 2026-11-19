@@ -8800,6 +8800,50 @@ mod tests {
     }
 
     #[test]
+    fn frozen_clips_hide_speed_presets_and_reject_speed_edits() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 7,
+            path: "video.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(4_000_000),
+            has_audio: true,
+        })));
+        state.insert_media(7);
+        let (track_id, clip) = selected_clip(&state).unwrap();
+        assert!(state.edit(Command::SetClipSpeed {
+            track_id,
+            clip_id: clip.id,
+            speed: 2.0
+        }));
+        assert!(state.edit(Command::SetPlayback {
+            track_id,
+            clip_id: clip.id,
+            playback: crate::timeline::Playback::Freeze,
+        }));
+        let frozen = state.editor.borrow().project().clone();
+        assert_eq!(selected_clip(&state).unwrap().1.speed, 1.0);
+        let labels = render(&state, 1440.0, 2400.0).labels;
+        assert!(!labels.iter().any(|label| label.starts_with("SPEED ·")));
+        for speed in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0, f64::NAN] {
+            assert!(
+                !state
+                    .editor
+                    .borrow()
+                    .can_set_clip_speed(track_id, clip.id, speed)
+            );
+        }
+        assert!(!state.edit(Command::SetClipSpeed {
+            track_id,
+            clip_id: clip.id,
+            speed: 2.0
+        }));
+        assert_eq!(state.editor.borrow().project(), &frozen);
+        assert!(state.editor.borrow_mut().undo());
+        assert_eq!(selected_clip(&state).unwrap().1.speed, 2.0);
+    }
+
+    #[test]
     fn short_tail_disables_unavailable_speed_presets() {
         let state = UiState::new();
         assert!(state.edit(Command::ImportMedia(Media {

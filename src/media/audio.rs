@@ -389,13 +389,17 @@ pub fn feed(
                 reader: None,
                 reverse: (source.playback == Playback::Reverse).then(|| ReverseAudioReader {
                     path: source.path.clone(),
-                    source_start: source.source_start,
-                    fps: plan.fps,
-                    end: to_samples((source.duration as f64 * source.speed).ceil() as u64)
-                        .saturating_sub(
-                            ((to_samples(from) - to_samples(source.start)) as f64 * source.speed)
-                                .floor() as u64,
-                        ),
+                    source_sample_start: to_samples(source.source_start),
+                    end: to_samples(
+                        source
+                            .start
+                            .saturating_add((source.duration as f64 * source.speed).ceil() as u64),
+                    )
+                    .saturating_sub(to_samples(source.start))
+                    .saturating_sub(
+                        ((to_samples(from) - to_samples(source.start)) as f64 * source.speed)
+                            .floor() as u64,
+                    ),
                     samples: VecDeque::new(),
                 }),
                 noise_reduction: source.noise_reduction,
@@ -771,8 +775,7 @@ impl TempoReader {
 
 struct ReverseAudioReader {
     path: PathBuf,
-    source_start: u64,
-    fps: (u32, u32),
+    source_sample_start: u64,
     end: u64,
     samples: VecDeque<f32>,
 }
@@ -794,15 +797,12 @@ impl ReverseAudioReader {
                 // Whole-second anchors preserve the source trim's resampler phase.
                 // One second of preroll settles the filter before the kept block.
                 let seconds = (begin / u64::from(RATE)).saturating_sub(1);
-                let time = u128::from(self.source_start) * u128::from(self.fps.1)
-                    + u128::from(seconds) * u128::from(self.fps.0);
+                let time =
+                    u128::from(self.source_sample_start) + u128::from(seconds) * u128::from(RATE);
                 let mut block = Vec::new();
-                if let Some(mut reader) = AudioReader::open_time(
-                    &self.path,
-                    time,
-                    u128::from(self.fps.0),
-                    cancelled.clone(),
-                )? {
+                if let Some(mut reader) =
+                    AudioReader::open_time(&self.path, time, u128::from(RATE), cancelled.clone())?
+                {
                     let mut skip = begin - seconds * u64::from(RATE);
                     while skip > 0 && !cancelled.load(Ordering::Relaxed) {
                         block.clear();
@@ -2109,6 +2109,81 @@ mod tests {
     }
 
     #[test]
+    fn reverse_speed_matches_reversed_source_through_tempo_denoise_and_seek() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.wav");
+        let reversed_path = dir.path().join("reversed.wav");
+        let samples: Vec<_> = (0..RATE * 6)
+            .flat_map(|n| {
+                let active = n % RATE < RATE / 3;
+                let t = n as f32 / RATE as f32;
+                if active {
+                    [
+                        ((t * 173.0).sin() * 8000.0) as i16,
+                        ((t * 317.0).cos() * 6000.0) as i16,
+                    ]
+                } else {
+                    [0, 0]
+                }
+            })
+            .collect();
+        write_wav(&path, RATE, CHANNELS as u16, &samples);
+        let reversed: Vec<_> = samples[RATE as usize * CHANNELS..RATE as usize * 5 * CHANNELS]
+            .as_chunks::<CHANNELS>()
+            .0
+            .iter()
+            .rev()
+            .flatten()
+            .copied()
+            .collect();
+        write_wav(&reversed_path, RATE, CHANNELS as u16, &reversed);
+        for speed in [0.25, 0.5, 1.5, 2.0, 4.0] {
+            for noise_reduction in [false, true] {
+                let duration = (120.0 / speed) as u64;
+                let source = AudioSource {
+                    path: path.clone(),
+                    source_start: 30,
+                    start: 7,
+                    duration,
+                    speed,
+                    playback: Playback::Reverse,
+                    volume: 0.8,
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
+                    noise_reduction,
+                };
+                let reverse = Arc::new(AudioPlan {
+                    sources: vec![source.clone()],
+                    end: 7 + duration,
+                    fps: (30, 1),
+                });
+                let forward = Arc::new(AudioPlan {
+                    sources: vec![AudioSource {
+                        path: reversed_path.clone(),
+                        source_start: 0,
+                        playback: Playback::Forward,
+                        ..source
+                    }],
+                    end: reverse.end,
+                    fps: reverse.fps,
+                });
+                for start in [7, 22] {
+                    let actual = play(&reverse, start, None);
+                    let expected = play(&forward, start, None);
+                    assert_eq!(
+                        actual.len(),
+                        (reverse.end - start) as usize * RATE as usize / 30 * CHANNELS
+                    );
+                    assert_eq!(
+                        actual, expected,
+                        "{speed}x, denoise {noise_reduction}, seek {start}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn reverse_audio_mirrors_stereo_samples_across_blocks_and_seeks() {
         for rate in [48_000, 44_100] {
             let dir = tempfile::tempdir().unwrap();
@@ -2289,8 +2364,7 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut reader = ReverseAudioReader {
             path,
-            source_start: 0,
-            fps: (30, 1),
+            source_sample_start: 0,
             end: u64::from(RATE) * 3,
             samples: VecDeque::new(),
         };

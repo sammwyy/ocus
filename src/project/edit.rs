@@ -1956,6 +1956,113 @@ mod tests {
     }
 
     #[test]
+    fn reverse_speed_split_trim_ripple_and_gap_keep_playback_source_ranges() {
+        for speed in [0.5, 2.0] {
+            let mut editor = Editor::new(speed_project());
+            assert!(editor.apply(Command::SetPlayback {
+                track_id: 0,
+                clip_id: 1,
+                playback: Playback::Reverse,
+            }));
+            assert!(editor.apply(Command::SetClipSpeed {
+                track_id: 0,
+                clip_id: 1,
+                speed
+            }));
+            let before = editor.project().clone();
+            let original = before.tracks()[0].clips[0].clone();
+            let frames: Vec<_> = (0..original.duration_frames)
+                .map(|offset| original.source_frame_at(offset).unwrap())
+                .collect();
+            assert_eq!(frames[0], 89);
+            assert_eq!(original.source_frame_at(original.duration_frames), None);
+            assert!(
+                original
+                    .source_start_for_range(original.duration_frames, 1)
+                    .is_none()
+            );
+            assert!(editor.apply(Command::Split {
+                track_id: 0,
+                clip_id: 1,
+                at_frame: original.start_frame + original.duration_frames / 2,
+                new_id: 2,
+            }));
+            let split_frames: Vec<_> = editor.project().tracks()[0]
+                .clips
+                .iter()
+                .flat_map(|clip| {
+                    (0..clip.duration_frames).map(|offset| clip.source_frame_at(offset).unwrap())
+                })
+                .collect();
+            assert_eq!(split_frames, frames);
+            assert!(editor.undo());
+            assert_eq!(editor.project(), &before);
+            for left in [false, true] {
+                let frame = if left {
+                    original.start_frame + 4
+                } else {
+                    original.start_frame + original.duration_frames - 4
+                };
+                assert!(editor.apply(trim_edge(editor.project(), 0, 1, left, frame).unwrap()));
+                let clip = &editor.project().tracks()[0].clips[0];
+                let trimmed: Vec<_> = (0..clip.duration_frames)
+                    .map(|offset| clip.source_frame_at(offset).unwrap())
+                    .collect();
+                assert_eq!(
+                    trimmed,
+                    if left {
+                        &frames[4..]
+                    } else {
+                        &frames[..frames.len() - 4]
+                    }
+                );
+                assert!(editor.undo());
+                assert_eq!(editor.project(), &before);
+            }
+            let mut tracks = before.tracks().to_vec();
+            let mut cut = original.clone();
+            cut.id = 99;
+            cut.start_frame += 4;
+            cut.duration_frames = 4;
+            tracks[1].clips.push(cut);
+            assert!(editor.apply(Command::ReplaceTracks(tracks)));
+            assert!(editor.apply(Command::RippleDelete {
+                track_id: 1,
+                clip_id: 99
+            }));
+            let remaining: Vec<_> = editor.project().tracks()[0]
+                .clips
+                .iter()
+                .flat_map(|clip| {
+                    (0..clip.duration_frames).map(|offset| clip.source_frame_at(offset).unwrap())
+                })
+                .collect();
+            assert_eq!(remaining, [&frames[..4], &frames[8..]].concat());
+            assert!(editor.undo());
+            assert!(editor.undo());
+            let mut tracks = before.tracks().to_vec();
+            let mut next = original.clone();
+            next.id = 2;
+            next.start_frame += original.duration_frames;
+            tracks[0].clips.push(next);
+            assert!(editor.apply(Command::ReplaceTracks(tracks)));
+            assert!(editor.apply(Command::SetClipSpeed {
+                track_id: 0,
+                clip_id: 1,
+                speed: speed / 2.0
+            }));
+            let clamped = &editor.project().tracks()[0].clips[0];
+            assert_eq!(clamped.duration_frames, original.duration_frames);
+            assert_eq!(clamped.source_frame_at(0), Some(89));
+            assert_eq!(clamped.source_start_frame + clamped.source_span(), 90);
+            editor.project().validate().unwrap();
+            let freeze = freeze_at(editor.project(), 0, 1, clamped.start_frame + 4).unwrap();
+            assert!(editor.apply(freeze));
+            assert_eq!(editor.project().tracks()[0].clips[1].speed, 1.0);
+        }
+    }
+
+    #[test]
     fn media_speed_keeps_subtitle_timeline_timing_and_export_unchanged() {
         let mut editor = Editor::new(speed_project());
         let cues = crate::subtitles::parse("1\n00:00:00,500 --> 00:00:01,500\nCaption\n").unwrap();

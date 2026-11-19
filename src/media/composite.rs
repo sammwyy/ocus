@@ -2173,6 +2173,47 @@ mod tests {
                 .pixels[..4],
             &[60, 60, 0, 255]
         );
+        for speed in [0.5, 2.0] {
+            let mut pip = plan.clone();
+            pip.tracks[0].truncate(1);
+            pip.transitions.clear();
+            let VisualClip::Media(source) = &mut pip.tracks[0][0] else {
+                unreachable!()
+            };
+            source.speed = speed;
+            source.duration = (4.0_f64 / speed) as u64;
+            source.playback = Playback::Reverse;
+            source.transform = Transform {
+                scale: 0.5,
+                x: 0.5,
+                y: 0.5,
+                ..Default::default()
+            };
+            let duration = source.duration;
+            let transform = source.transform;
+            let mut compositor = Compositor::new(pip, 4, 2, (30, 1));
+            for offset in 0..duration {
+                let target = 3 - (offset as f64 * speed).floor() as usize;
+                let [r, g, b] = colors[target];
+                let image = FrameImage {
+                    picture: (0, 0, 4, 2),
+                    width: 4,
+                    height: 2,
+                    pixels: [r, g, b, 255].repeat(8),
+                };
+                let mut expected = [0, 0, 0, 255].repeat(8);
+                draw_transformed(&mut expected, 4, 2, &image, transform);
+                assert_eq!(
+                    compositor
+                        .frame(offset, &cancelled)
+                        .unwrap()
+                        .unwrap()
+                        .pixels,
+                    expected,
+                    "reverse PiP {speed}x offset {offset}"
+                );
+            }
+        }
         for (speed, colors) in [
             (0.5, [[0, 180, 0, 255], [0, 120, 0, 255], [0, 0, 60, 255]]),
             (

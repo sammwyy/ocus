@@ -754,23 +754,26 @@ mod tests {
             let proxy = super::super::proxy::ready(&path).unwrap();
             let source = proxy_source(path, if late { 45 } else { 30 });
             for speed in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] {
-                let sped = FrameSource {
-                    speed,
-                    start: 10,
-                    source_start: 3,
-                    duration: ((source.duration - 3) as f64 / speed).floor() as u64,
-                    ..source.clone()
-                };
-                let mut originals = VideoLayers::new((30, 1), (160, 90));
-                let mut proxies = VideoLayers::new((30, 1), (160, 90));
-                proxies.use_proxies = true;
-                for position in sped.start..sped.start + sped.duration {
-                    let expected = originals.layer_at(&sped, position, &cancelled).unwrap();
-                    let actual = proxies.layer_at(&sped, position, &cancelled).unwrap();
-                    assert!(
-                        expected.pixels[0].abs_diff(actual.pixels[0]) <= 3,
-                        "late={late}, {speed}x at {position}"
-                    );
+                for playback in [Playback::Forward, Playback::Reverse] {
+                    let sped = FrameSource {
+                        playback,
+                        speed,
+                        start: 10,
+                        source_start: 3,
+                        duration: ((source.duration - 3) as f64 / speed).floor() as u64,
+                        ..source.clone()
+                    };
+                    let mut originals = VideoLayers::new((30, 1), (160, 90));
+                    let mut proxies = VideoLayers::new((30, 1), (160, 90));
+                    proxies.use_proxies = true;
+                    for position in sped.start..sped.start + sped.duration {
+                        let expected = originals.layer_at(&sped, position, &cancelled).unwrap();
+                        let actual = proxies.layer_at(&sped, position, &cancelled).unwrap();
+                        assert!(
+                            expected.pixels[0].abs_diff(actual.pixels[0]) <= 3,
+                            "late={late}, {playback:?} {speed}x at {position}"
+                        );
+                    }
                 }
             }
             let mut sequential_original = FrameReader::open_selected(
@@ -1108,6 +1111,25 @@ mod tests {
                     frames[69 - k as usize].pixels
                 );
             }
+            for speed in [0.25, 0.5, 1.5, 2.0, 4.0] {
+                source.speed = speed;
+                source.duration = (70.0_f64 / speed).floor() as u64;
+                let span = (source.duration as f64 * speed).ceil() as usize;
+                let mut layers = VideoLayers::new((30, 1), (64, 36));
+                for offset in 0..source.duration {
+                    let target = span - 1 - (offset as f64 * speed).floor() as usize;
+                    assert_eq!(
+                        layers
+                            .layer_at(&source, 10 + offset, &cancelled)
+                            .unwrap()
+                            .pixels,
+                        frames[target].pixels,
+                        "reverse {speed}x offset {offset}, late {late}"
+                    );
+                }
+            }
+            source.speed = 1.0;
+            source.duration = 70;
             source.playback = Playback::Freeze;
             let mut freeze = VideoLayers::new((30, 1), (64, 36));
             let held = freeze.layer_at(&source, 10, &cancelled).unwrap();

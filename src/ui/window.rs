@@ -6,7 +6,7 @@ use super::controls::{
     sized_icon_button, surface, surface_hover, text, text_color, timecode, tool_button, with_help,
 };
 use super::edits::ClipRef;
-use super::interaction::{Action, DragPayload, MenuState};
+use super::interaction::{Action, BarMenu, DragPayload, MenuState};
 use super::state::{
     ChromaGesture, ExportPage, MediaView, PlaybackMonitor, PreviewState, SequenceContent,
     SettingsPage, SourceRange, TitleGesture, ZOOM_SECONDS, media_frames,
@@ -51,6 +51,79 @@ fn logo() -> ImageData {
 }
 
 struct Logo;
+
+struct MenuTitle {
+    state: UiState,
+    menu: BarMenu,
+    rect: Rc<std::cell::Cell<Rect>>,
+}
+
+impl Widget for MenuTitle {
+    fn paint(&self, _painter: &mut dyn Painter, _rect: Rect) {}
+
+    fn style(&self) -> creamui::Style {
+        Style::default().size(44.0, 28.0).into()
+    }
+
+    fn reports_layout(&self) -> bool {
+        true
+    }
+
+    fn on_layout(&self, rect: Rect) -> bool {
+        self.rect.set(rect);
+        false
+    }
+
+    fn children(&mut self) -> Vec<BoxedWidget> {
+        let state = self.state.clone();
+        let menu = self.menu;
+        let rect = self.rect.clone();
+        let active = state.menu.peek().is_some_and(|open| open.bar == Some(menu));
+        vec![Box::new(
+            RawButton::new(
+                Style::default()
+                    .size(44.0, 28.0)
+                    .align(Align::Center)
+                    .justify(Justify::Center),
+                move || {
+                    let rect = rect.get();
+                    state.show_bar_menu(
+                        menu,
+                        Point {
+                            x: rect.x,
+                            y: rect.y + rect.height + 8.0,
+                        },
+                        true,
+                    );
+                },
+            )
+            .background(if active { surface_hover() } else { panel() })
+            .corner_radius(4.0)
+            .hover_style(StateStyle::new().background(surface_hover()))
+            .focus_style(StateStyle::new().outline(accent(), 2.0))
+            .child(text(menu.label(), text_color(), 12.0)),
+        )]
+    }
+
+    fn on_hover(&self) -> Option<Rc<dyn Fn(bool)>> {
+        let state = self.state.clone();
+        let menu = self.menu;
+        let rect = self.rect.clone();
+        Some(Rc::new(move |hovered| {
+            if hovered && !state.menu.peek().is_some_and(|open| open.bar == Some(menu)) {
+                let rect = rect.get();
+                state.show_bar_menu(
+                    menu,
+                    Point {
+                        x: rect.x,
+                        y: rect.y + rect.height + 8.0,
+                    },
+                    false,
+                );
+            }
+        }))
+    }
+}
 
 impl Widget for Logo {
     fn style(&self) -> creamui::Style {
@@ -4470,24 +4543,8 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             || project.name().to_owned(),
             |name| name.to_string_lossy().into_owned(),
         );
+    let title_width = (viewport.width - 640.0 - if dirty { 80.0 } else { 0.0 }).clamp(0.0, 220.0);
 
-    let file_button = |icon: Glyph, label: &str, operation: fn(&UiState)| {
-        if narrow {
-            icon_button(
-                icon,
-                match icon {
-                    Glyph::Document => Help::new("New project").shortcut("Ctrl+N"),
-                    Glyph::Folder => Help::new("Open project").shortcut("Ctrl+O"),
-                    _ => Help::new("Save project").shortcut("Ctrl+S"),
-                },
-                !busy,
-                state,
-                operation,
-            )
-        } else {
-            tool_button(Some(icon), label, !busy, state, operation)
-        }
-    };
     let titlebar = AppTitlebar::new(viewport.width)
         .height(46.0)
         .padding(12.0)
@@ -4504,37 +4561,30 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 .child(Box::new(Flex::row().width(10.0)))
                 .child(divider())
                 .child(Box::new(Flex::row().width(6.0)))
-                .child(if narrow {
-                    icon_button(
-                        Glyph::List,
-                        Help::new("Timeline files (OTIO / EDL)"),
-                        !busy,
-                        state,
-                        UiState::open_timeline_files_menu,
-                    )
-                } else {
-                    tool_button(
-                        Some(Glyph::ChevronDown),
-                        "Timeline files",
-                        !busy,
-                        state,
-                        UiState::open_timeline_files_menu,
-                    )
-                })
-                .child(file_button(Glyph::Document, "New", UiState::new_project))
-                .child(file_button(Glyph::Folder, "Open", UiState::open_dialog))
-                .child(file_button(Glyph::Save, "Save", UiState::save))
-                .child(if narrow {
-                    Box::new(Flex::row().width(0.0)) as BoxedWidget
-                } else {
-                    tool_button(None, "Save as…", !busy, state, UiState::save_as_dialog)
-                }),
+                .child(Box::new(
+                    Flex::row().with_children(
+                        [BarMenu::File, BarMenu::Edit, BarMenu::View, BarMenu::Help]
+                            .into_iter()
+                            .map(|menu| {
+                                Box::new(MenuTitle {
+                                    state: state.clone(),
+                                    menu,
+                                    rect: Rc::new(std::cell::Cell::new(Rect::default())),
+                                }) as BoxedWidget
+                            })
+                            .collect(),
+                    ),
+                )),
         ))
         .center_boxed(Box::new(
             Flex::row()
                 .gap(8.0)
                 .align(Align::Center)
-                .child(text(fit(&project_label, 220.0, 12.0), text_color(), 12.0))
+                .child(text(
+                    fit(&project_label, title_width, 12.0),
+                    text_color(),
+                    12.0,
+                ))
                 .child(if dirty {
                     Box::new(
                         Flex::row()
@@ -4550,94 +4600,33 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     Box::new(Flex::row().width(0.0))
                 }),
         ))
-        .end_boxed(Box::new(
-            Flex::row()
-                .gap(4.0)
-                .align(Align::Center)
-                .child(icon_button(
-                    Glyph::Undo,
-                    Help::new("Undo").shortcut("Ctrl+Z"),
-                    !busy && editor.can_undo(),
-                    state,
-                    UiState::undo,
-                ))
-                .child(icon_button(
-                    Glyph::Redo,
-                    Help::new("Redo").shortcut("Ctrl+Shift+Z / Ctrl+Y"),
-                    !busy && editor.can_redo(),
-                    state,
-                    UiState::redo,
-                ))
-                .child(Box::new(Flex::row().width(6.0)))
-                .child(icon_button(
-                    Glyph::Settings,
-                    Help::new("Settings"),
-                    true,
-                    state,
-                    UiState::open_settings,
-                ))
-                .child(Box::new(Flex::row().width(6.0)))
-                .child(secondary_button(
-                    Some(Glyph::Import),
-                    "Import",
-                    !busy,
-                    state,
-                    UiState::import_dialog,
-                ))
-                .child(secondary_button(
-                    None,
-                    "Import subtitles…",
-                    !busy,
-                    state,
-                    UiState::subtitle_dialog,
-                ))
-                .child({
-                    let button = accent_button(
-                        Some(Glyph::Export),
-                        if busy && (exporting || can_add_export) {
-                            "Add export…"
-                        } else if project.last_export().is_some() {
-                            "Export again"
-                        } else {
-                            "Export"
-                        },
-                        can_add_export && state.sequence_end() > 0,
-                        state,
-                        UiState::quick_export,
-                    );
-                    if state.sequence_end() == 0 {
-                        with_help(
-                            button,
-                            Help::new("Add clips to the timeline to export"),
-                            state,
-                        )
-                    } else {
-                        button
-                    }
-                })
-                .child(if project.last_export().is_some() && !exporting {
-                    secondary_button(None, "Options…", !busy, state, UiState::export_dialog)
+        .end_boxed(Box::new(Flex::row().gap(4.0).align(Align::Center).child({
+            let button = accent_button(
+                Some(Glyph::Export),
+                if busy && (exporting || can_add_export) {
+                    "Add export…"
+                } else if project.last_export().is_some() {
+                    "Export again"
                 } else {
-                    Box::new(Flex::row().width(0.0)) as BoxedWidget
-                })
-                .child(if narrow {
-                    icon_button(
-                        Glyph::List,
-                        Help::new("Export queue"),
-                        true,
-                        state,
-                        UiState::open_export_queue,
-                    )
-                } else {
-                    secondary_button(
-                        Some(Glyph::List),
-                        "Queue",
-                        true,
-                        state,
-                        UiState::open_export_queue,
-                    )
-                }),
-        ));
+                    "Export"
+                },
+                can_add_export && state.sequence_end() > 0,
+                state,
+                |state| {
+                    state.close_menu();
+                    state.quick_export();
+                },
+            );
+            if state.sequence_end() == 0 {
+                with_help(
+                    button,
+                    Help::new("Add clips to the timeline to export"),
+                    state,
+                )
+            } else {
+                button
+            }
+        })));
 
     let frame = state.program.position.get();
     let timeline_end = state.sequence_end();
@@ -5238,7 +5227,14 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             .size(viewport.width, viewport.height)
             .gap(6.0)
             .background(background())
-            .child(Box::new(titlebar))
+            .child(Box::new(Layer {
+                style: Style::default().size(viewport.width, 46.0).into(),
+                children: vec![Box::new(titlebar)],
+                on_click: Some(Rc::new({
+                    let state = state.clone();
+                    move || state.close_menu()
+                })),
+            }))
             .child(Box::new(
                 Flex::column()
                     .gap(6.0)
@@ -6742,12 +6738,22 @@ fn edl_rate_modal(state: &UiState, viewport: Size, drop: bool) -> BoxedWidget {
 /// The open context menu over a full-window layer that closes it when
 /// clicked outside.
 fn context_menu(state: &UiState, menu: MenuState, viewport: Size) -> BoxedWidget {
-    const WIDTH: f32 = 244.0;
+    let width = match menu.bar {
+        Some(BarMenu::File) => 308.0,
+        Some(BarMenu::Edit) => 288.0,
+        Some(_) => 224.0,
+        None => 244.0,
+    };
+    let top = if menu.bar.is_some() { 46.0 } else { 0.0 };
     let separators = menu.entries.iter().filter(|e| e.command.is_none()).count() as f32;
     let rows = menu.entries.len() as f32 - separators;
-    let height = 12.0 + 26.0 + rows * 28.0 + separators * 9.0;
-    let x = menu.anchor.x.min(viewport.width - WIDTH - 8.0).max(8.0);
-    let y = if menu.anchor.y + height > viewport.height - 8.0 {
+    let header = if menu.bar.is_some() { 0.0 } else { 26.0 };
+    let natural_height = 12.0 + header + rows * 28.0 + separators * 9.0;
+    let height = natural_height.min((viewport.height - top - 8.0).max(1.0));
+    let x = menu.anchor.x.min(viewport.width - width - 8.0).max(8.0);
+    let y = if menu.bar.is_some() {
+        top
+    } else if menu.anchor.y + height > viewport.height - 8.0 {
         (menu.anchor.y - height).max(8.0)
     } else {
         menu.anchor.y
@@ -6776,16 +6782,33 @@ fn context_menu(state: &UiState, menu: MenuState, viewport: Size) -> BoxedWidget
             ) as BoxedWidget,
         })
         .collect();
+    let mut content = Flex::column();
+    if menu.bar.is_none() {
+        content = content.child(Box::new(
+            Flex::row()
+                .height(26.0)
+                .align(Align::Center)
+                .padding_xy(10.0, 0.0)
+                .child(heading(fit(&menu.title, width - 32.0, 11.0), muted(), 11.0)),
+        ));
+    }
+    let content = Box::new(append(content, entries));
+    let content = if natural_height > height {
+        Box::new(RawScrollView::controlled(fill_style(), state.menu_scroll.clone()).child(content))
+            as BoxedWidget
+    } else {
+        content as BoxedWidget
+    };
     let close = state.clone();
     Box::new(Layer {
-        style: Layer::at(0.0, 0.0, viewport.width, viewport.height),
+        style: Layer::at(0.0, top, viewport.width, viewport.height - top),
         on_click: Some(Rc::new(move || close.close_menu())),
         children: vec![Box::new(Layer {
-            style: Layer::at(x, y, WIDTH, height),
-            on_click: None,
-            children: vec![Box::new(append(
+            style: Layer::at(x, y - top, width, height),
+            on_click: Some(Rc::new(|| {})),
+            children: vec![Box::new(
                 Flex::column()
-                    .size(WIDTH, height)
+                    .size(width, height)
                     .padding(6.0)
                     .background(panel_raised())
                     .border(surface(), 1.0)
@@ -6797,21 +6820,171 @@ fn context_menu(state: &UiState, menu: MenuState, viewport: Size) -> BoxedWidget
                         0.0,
                         Color::rgba(0, 0, 0, 150),
                     ))
-                    .child(Box::new(
-                        Flex::row()
-                            .height(26.0)
-                            .align(Align::Center)
-                            .padding_xy(10.0, 0.0)
-                            .child(heading(fit(&menu.title, WIDTH - 32.0, 11.0), muted(), 11.0)),
-                    )),
-                entries,
-            ))],
+                    .child(content),
+            )],
         })],
     })
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn titlebar_menus_open_switch_dismiss_and_show_about() {
+        let state = UiState::new();
+        let viewport = Size {
+            width: 980.0,
+            height: 760.0,
+        };
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let render_scene = || {
+                let mut painter = TestPainter::default();
+                let scene = Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+                (scene, painter)
+            };
+            let point = |painter: &TestPainter, label: &str| {
+                let rect = painter
+                    .bounds
+                    .iter()
+                    .find(|(text, _)| text == label)
+                    .unwrap()
+                    .1;
+                Point {
+                    x: rect.x + rect.width / 2.0,
+                    y: rect.y + rect.height / 2.0,
+                }
+            };
+            let (scene, painter) = render_scene();
+            for title in ["File", "Edit", "View", "Help"] {
+                assert!(painter.labels.iter().any(|label| label == title), "{title}");
+            }
+            scene.hit_test(point(&painter, "File")).unwrap()();
+            let (scene, painter) = render_scene();
+            assert!(
+                !state
+                    .menu
+                    .peek()
+                    .unwrap()
+                    .entries
+                    .iter()
+                    .find(|entry| entry.label == "Export again")
+                    .unwrap()
+                    .enabled
+            );
+            assert!(state.menu.peek().unwrap().anchor.y >= 36.0);
+            for label in [
+                "New",
+                "Open…",
+                "Save",
+                "Save as…",
+                "Import media…",
+                "Import subtitles…",
+                "Import OTIO or EDL…",
+                "Export OpenTimelineIO…",
+                "Export CMX3600 EDL…",
+                "Export…",
+                "Export again",
+                "Queue",
+                "Settings…",
+            ] {
+                assert!(painter.labels.iter().any(|text| text == label), "{label}");
+            }
+            scene.hover_hit_test(point(&painter, "Edit")).unwrap().1(true);
+            assert_eq!(state.menu.peek().unwrap().title, "Edit");
+            assert!(
+                !state
+                    .menu
+                    .peek()
+                    .unwrap()
+                    .entries
+                    .iter()
+                    .find(|entry| entry.label == "Undo")
+                    .unwrap()
+                    .enabled
+            );
+            state.run(Action::Escape);
+            assert!(state.menu.peek().is_none());
+            let (scene, painter) = render_scene();
+            scene.hit_test(point(&painter, "Help")).unwrap()();
+            let (scene, painter) = render_scene();
+            scene.hit_test(point(&painter, "About Ocus")).unwrap()();
+            assert!(state.menu.peek().is_none());
+            assert!(state.settings_modal.peek());
+            assert!(state.settings_page.peek() == SettingsPage::About);
+            state.close_settings();
+            let (scene, painter) = render_scene();
+            scene.hit_test(point(&painter, "File")).unwrap()();
+            let (scene, _) = render_scene();
+            scene.hit_test(Point { x: 900.0, y: 700.0 }).unwrap()();
+            assert!(state.menu.peek().is_none());
+            let (scene, painter) = render_scene();
+            scene.hover_hit_test(point(&painter, "View")).unwrap().1(true);
+            assert!(state.menu.peek().is_none());
+            scene.hit_test(point(&painter, "File")).unwrap()();
+            let (scene, painter) = render_scene();
+            scene.hit_test(point(&painter, "File")).unwrap()();
+            assert!(state.menu.peek().is_none());
+            let (scene, painter) = render_scene();
+            scene.hit_test(point(&painter, "File")).unwrap()();
+            let (scene, _) = render_scene();
+            scene.hit_test(Point { x: 600.0, y: 20.0 }).unwrap()();
+            assert!(state.menu.peek().is_none());
+        });
+    }
+
+    #[test]
+    fn titlebar_menus_fit_narrow_windows_and_short_menus_scroll() {
+        let state = UiState::new();
+        assert!(state.add_title());
+        state
+            .project_path
+            .set(Some("A-long-project-name-for-the-titlebar.ocus".into()));
+        for width in [800.0, 980.0, 1280.0] {
+            let painter = render(&state, width, 760.0);
+            let titles: Vec<_> = ["File", "Edit", "View", "Help", "Export"]
+                .into_iter()
+                .map(|label| {
+                    painter
+                        .bounds
+                        .iter()
+                        .find(|(text, _)| text == label)
+                        .unwrap()
+                        .1
+                })
+                .collect();
+            for rect in &titles {
+                assert!(rect.x >= 0.0 && rect.x + rect.width <= width, "{rect:?}");
+            }
+            for pair in titles.windows(2) {
+                assert!(pair[0].x + pair[0].width <= pair[1].x);
+            }
+            let title = painter
+                .bounds
+                .iter()
+                .find(|(text, _)| text.starts_with("A-long-"))
+                .unwrap()
+                .1;
+            let edited = painter
+                .bounds
+                .iter()
+                .find(|(text, _)| text == "Edited")
+                .unwrap()
+                .1;
+            assert!(title.x >= titles[3].x + titles[3].width);
+            assert!(edited.x + edited.width <= titles[4].x);
+        }
+        state.show_bar_menu(BarMenu::File, Point { x: 120.0, y: 46.0 }, true);
+        render(&state, 800.0, 360.0);
+        assert!(state.menu_scroll.max_offset() > 0.0);
+        state.menu_scroll.set(state.menu_scroll.max_offset());
+        assert!(
+            render(&state, 800.0, 360.0)
+                .labels
+                .iter()
+                .any(|text| text == "Settings…")
+        );
+    }
+
     #[test]
     fn subtitle_destinations_and_burn_option_are_contextual() {
         let state = UiState::new();
@@ -8167,17 +8340,17 @@ mod tests {
     fn hovered_help_replaces_an_adjacent_focused_hint() {
         let state = UiState::new();
         render(&state, 1280.0, 760.0);
-        let undo = state.tooltip_controller(("Undo", 0));
-        let redo = state.tooltip_controller(("Redo", 0));
-        undo.focus(true);
-        redo.hover(true);
+        let zoom_in = state.tooltip_controller(("Zoom in", 0));
+        let zoom_out = state.tooltip_controller(("Zoom out", 0));
+        zoom_in.focus(true);
+        zoom_out.hover(true);
         std::thread::sleep(std::time::Duration::from_millis(400));
         render(&state, 1280.0, 760.0);
         let painter = render(&state, 1280.0, 760.0);
-        assert!(redo.visible());
-        assert!(!undo.visible());
-        assert!(painter.labels.iter().any(|label| label == "Redo"));
-        assert!(!painter.labels.iter().any(|label| label == "Undo"));
+        assert!(zoom_out.visible());
+        assert!(!zoom_in.visible());
+        assert!(painter.labels.iter().any(|label| label == "Zoom out"));
+        assert!(!painter.labels.iter().any(|label| label == "Zoom in"));
     }
 
     #[test]
@@ -9289,7 +9462,13 @@ mod tests {
                 };
                 let theme = settings.theme();
                 creamui::reactive::provide_context(creamui::ThemeProvider::new(theme));
-                assert_eq!(background(), theme.colors.surface);
+                assert_eq!(
+                    background(),
+                    Color {
+                        a: 255,
+                        ..theme.colors.surface
+                    }
+                );
                 assert_eq!(accent(), creamui::Color::rgb(224, 165, 46));
                 assert_eq!(text_color(), theme.colors.text_primary);
             });

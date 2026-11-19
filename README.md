@@ -41,16 +41,20 @@ cargo run --locked
 
 ## Make your first edit
 
-1. **Import your media.** Choose **Import** or drop files into the media bin. Select a source to preview it.
+1. **Import your media.** Choose **File → Import media…** or drop files into the media bin. Select a source to preview it.
 2. **Build your timeline.** Drag a source from the bin onto a track. Drag a clip's edge to trim it, or move the playhead and press **S** to split the selected clip. Video on V2 appears over V1, the base layer.
 3. **Add a title.** Move the playhead over your footage and choose **Title**. Edit the text and style in the Inspector, then position it in the Program monitor.
-4. **Save and export.** Choose **Save** to keep an editable `.ocus` project. Choose **Export**, select a preset and destination, and render a file you can share.
+4. **Save and export.** Choose **File → Save** to keep an editable `.ocus` project. Choose **Export**, select a preset and destination, and render a file you can share.
+
+The title bar groups project actions in **File**, clip actions in **Edit**, and
+timeline zoom controls in **View**. Open **File → Settings…** to change appearance
+or performance preferences, and **Help → About Ocus** for build information.
 
 Projects reference your original media rather than copying it. If you move a source, use **Relink…** in the media bin to search a folder, or right-click the missing source and choose **Relink file…** to find a renamed file. Save the updated project to keep the new paths.
 
 ### Exchange timelines with another editor
 
-Use **Timeline files** in the title bar to import or export `.otio` or `.edl`.
+Use the **File** menu to import or export `.otio` or `.edl`.
 Import opens the timeline as a new, unsaved project; **Save** creates an editable
 `.ocus` file. The interchange files reference your original media; they do not
 copy or render it. Relative media paths are resolved next to the timeline file,

@@ -62,7 +62,7 @@ clip commands do not complete the corresponding editor workflows.
 
 ## End-to-end usability
 
-- [ ] Wire import, playback, editing, project open/save, and export into the
+- [x] Wire import, playback, editing, project open/save, and export into the
   window with clear empty, loading, and error states.
 - [x] Add keyboard shortcuts for the main actions without stealing text
   input (they are inactive while a text field has focus).

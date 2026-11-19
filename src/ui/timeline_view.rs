@@ -900,6 +900,11 @@ impl TimelineView {
         selected: bool,
     ) {
         painter.push_clip_rounded(sound, 4.0);
+        if clip.playback == crate::timeline::Playback::Freeze {
+            painter.fill_rect(sound, panel(), 0.0);
+            painter.pop_clip();
+            return;
+        }
         let tone = if clip.muted {
             0.82
         } else if selected {

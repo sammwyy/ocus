@@ -13,7 +13,7 @@ use crate::project::export_settings::{
 };
 use crate::project::{Command, Editor, Project, recovery, store};
 use crate::settings::{self, Settings, ThemeMode};
-use crate::timeline::{ClipContent, Title, TrackKind};
+use crate::timeline::{Clip, ClipContent, Playback, Title, TrackKind};
 use creamui::core::{Modifiers, Point, Rect, RgbaImage};
 use creamui::widgets::{
     ColorPickerController, ScrollController, TextController, TooltipController,
@@ -108,6 +108,27 @@ pub(crate) const ZOOM_SECONDS: [u64; 16] = [
 const DEFAULT_ZOOM: usize = 5;
 
 pub(crate) type Storyboard = Arc<Vec<Arc<RgbaImage>>>;
+
+pub(super) fn clip_storyboard_key(
+    clip: &Clip,
+    media: &Media,
+    fps: (u32, u32),
+) -> Option<StoryboardKey> {
+    let first = clip.source_frame_at(0)?;
+    let last = clip.source_frame_at(clip.duration_frames.checked_sub(1)?)?;
+    Some(StoryboardKey {
+        playback: clip.playback,
+        path: media.path.clone(),
+        kind: media.kind,
+        source_start: first.min(last),
+        duration: if clip.playback == Playback::Freeze {
+            1
+        } else {
+            clip.duration_frames
+        },
+        fps,
+    })
+}
 
 fn storyboard_requests(
     keys: &[(StoryboardKey, bool)],
@@ -1536,6 +1557,36 @@ impl UiState {
         );
     }
 
+    pub(super) fn clip_storyboard(
+        &self,
+        clip: &Clip,
+        media: &Media,
+        fps: (u32, u32),
+    ) -> Option<Storyboard> {
+        let key = clip_storyboard_key(clip, media, fps)?;
+        let images = self.storyboards.borrow().get(&key)?.clone();
+        if clip.playback == Playback::Freeze {
+            Some(Arc::new(vec![images.first()?.clone()]))
+        } else {
+            (!images.is_empty()).then_some(images)
+        }
+    }
+
+    pub(super) fn clip_thumbnail(
+        &self,
+        clip: &Clip,
+        media: &Media,
+        fps: (u32, u32),
+    ) -> Option<Arc<RgbaImage>> {
+        self.clip_storyboard(clip, media, fps)
+            .and_then(|images| images.first().cloned())
+            .or_else(|| {
+                (media.kind == MediaKind::Image || clip.source_frame_at(0) == Some(0))
+                    .then(|| self.thumbnails.borrow().get(&media.path).cloned())
+                    .flatten()
+            })
+    }
+
     fn storyboard_requests(&self) -> Vec<StoryboardKey> {
         let editor = self.editor.borrow();
         let project = editor.project();
@@ -1576,14 +1627,7 @@ impl UiState {
                 }
                 let media = project.media().iter().find(|media| media.id == media_id)?;
                 Some((
-                    StoryboardKey {
-                        playback: clip.playback,
-                        path: media.path.clone(),
-                        kind: media.kind,
-                        source_start: clip.source_start_frame,
-                        duration: clip.duration_frames,
-                        fps,
-                    },
+                    clip_storyboard_key(clip, media, fps)?,
                     geometry.clip_visible(index, clip.start_frame, clip.duration_frames),
                 ))
             })

@@ -15,7 +15,6 @@ use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
 use super::{MediaFilter, Sidebar, UiState};
 use super::{title_fonts, title_markup};
 use crate::media::composite::title_outline_radius;
-use crate::media::preview::StoryboardKey;
 use crate::media::{Media, MediaKind};
 use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, VideoCodec};
 use crate::project::{Command, Project};
@@ -1665,7 +1664,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         if let Some(media) = media {
             rows.push(Box::new(Thumb {
                 image: (track_kind == TrackKind::Video)
-                    .then(|| state.thumbnails.borrow().get(&media.path).cloned())
+                    .then(|| state.clip_thumbnail(&clip, media, fps))
                     .flatten(),
                 kind: if track_kind == TrackKind::Audio {
                     MediaKind::Audio
@@ -1808,7 +1807,12 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 ],
             ));
         }
-        if (track_kind == TrackKind::Audio || clip.linked_audio) && media.is_some() {
+        if clip.playback == Playback::Freeze {
+            rows.push(section(
+                "Audio",
+                vec![text("Frozen frames are silent", muted(), 11.0)],
+            ));
+        } else if (track_kind == TrackKind::Audio || clip.linked_audio) && media.is_some() {
             let volume = clip.volume;
             rows.push(section(
                 "Audio",
@@ -2259,23 +2263,12 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                             (_, Some(media)) if media.kind == MediaKind::Image => ClipLook::Image,
                             _ => ClipLook::Video,
                         },
-                        images: media.filter(|_| video).and_then(|media| {
-                            state
-                                .storyboards
-                                .borrow()
-                                .get(&StoryboardKey {
-                                    playback: clip.playback,
-                                    path: media.path.clone(),
-                                    kind: media.kind,
-                                    source_start: clip.source_start_frame,
-                                    duration: clip.duration_frames,
-                                    fps,
-                                })
-                                .cloned()
-                        }),
+                        images: media
+                            .filter(|_| video)
+                            .and_then(|media| state.clip_storyboard(clip, media, fps)),
                         fallback: media
                             .filter(|_| video)
-                            .and_then(|media| state.thumbnails.borrow().get(&media.path).cloned()),
+                            .and_then(|media| state.clip_thumbnail(clip, media, fps)),
                         volume: clip.volume,
                         muted: clip.muted,
                         linked_audio: clip.linked_audio,
@@ -4034,9 +4027,12 @@ fn context_menu(state: &UiState, menu: MenuState, viewport: Size) -> BoxedWidget
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::preview::{StoryboardKey, storyboard};
+    use crate::ui::state::clip_storyboard_key;
     use crate::ui::timeline_view::RULER_HEIGHT;
     use creamui::core::{Painter, Point, Rect, Renderer, RgbaImage, TextAlign, Widget};
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
     fn destination_clip(start_frame: u64, duration_frames: u64) -> Clip {
         Clip {
@@ -4121,6 +4117,7 @@ mod tests {
         labels: Vec<String>,
         bounds: Vec<(String, Rect)>,
         images: Vec<Rect>,
+        image_ids: Vec<u64>,
         fills: Vec<(Rect, Color)>,
         strokes: Vec<(Rect, Color)>,
         text_colors: Vec<(String, Color)>,
@@ -4141,8 +4138,9 @@ mod tests {
             self.text_colors.push((text.to_owned(), color));
         }
 
-        fn draw_image(&mut self, rect: Rect, _: &RgbaImage, _: Option<Color>) {
+        fn draw_image(&mut self, rect: Rect, image: &RgbaImage, _: Option<Color>) {
             self.images.push(rect);
+            self.image_ids.push(image.id());
         }
     }
 
@@ -4156,6 +4154,142 @@ mod tests {
             Renderer::new().render(build(state, viewport), viewport, &mut painter);
         });
         painter
+    }
+
+    #[test]
+    fn clip_thumbnails_and_painted_filmstrips_follow_displayed_source_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frames.mkv");
+        assert!(
+            ProcessCommand::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "nullsrc=size=64x36:rate=30:duration=2,geq=lum=16+N*3:cb=128:cr=128",
+                    "-c:v",
+                    "ffv1",
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let state = UiState::new();
+        state.timeline_rect.set(TIMELINE);
+        let media = Media {
+            id: 1,
+            path,
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: true,
+        };
+        assert!(state.edit(Command::ImportMedia(media.clone())));
+        state.insert_media(1);
+        let target = state.primary_clip().unwrap();
+        assert!(state.edit(Command::Trim {
+            track_id: target.0,
+            clip_id: target.1,
+            start_frame: 0,
+            source_start_frame: 5,
+            duration_frames: 40
+        }));
+        let bin_image = Arc::new(RgbaImage::new(1, 1, vec![0, 0, 0, 255]).unwrap());
+        state
+            .thumbnails
+            .borrow_mut()
+            .insert(media.path.clone(), bin_image.clone());
+        for playback in [Playback::Forward, Playback::Reverse, Playback::Freeze] {
+            state.set_playback(target, playback);
+            let clip = selected_clip(&state).unwrap().1;
+            let key = clip_storyboard_key(&clip, &media, (30, 1)).unwrap();
+            assert!(
+                state.clip_thumbnail(&clip, &media, (30, 1)).is_none(),
+                "do not show source frame zero while loading"
+            );
+            let frames = storyboard(&key, Arc::new(AtomicBool::new(false))).unwrap();
+            let expected_frames: Vec<_> = [0, clip.duration_frames / 2, clip.duration_frames - 1]
+                .into_iter()
+                .map(|offset| clip.source_frame_at(offset).unwrap())
+                .collect();
+            for (index, frame) in frames.iter().enumerate() {
+                let expected = storyboard(
+                    &StoryboardKey {
+                        playback: Playback::Forward,
+                        source_start: expected_frames[index],
+                        duration: 1,
+                        ..key.clone()
+                    },
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .unwrap();
+                assert_eq!(frame.pixels, expected[0].pixels);
+            }
+            let images: Vec<_> = frames
+                .into_iter()
+                .map(|frame| {
+                    Arc::new(RgbaImage::new(frame.width, frame.height, frame.pixels).unwrap())
+                })
+                .collect();
+            let first_id = images[0].id();
+            state.storyboards.borrow_mut().insert(key, Arc::new(images));
+            assert_eq!(
+                state.clip_thumbnail(&clip, &media, (30, 1)).unwrap().id(),
+                first_id
+            );
+            let mut inspector_painter = TestPainter::default();
+            creamui::reactive::with_context_scope(|| {
+                creamui::reactive::provide_context(creamui::ThemeProvider::new(
+                    creamui::Theme::dark(),
+                ));
+                let editor = state.editor.borrow();
+                Renderer::new().render(
+                    inspector(&state, editor.project(), 300.0, false),
+                    Size {
+                        width: 300.0,
+                        height: 1000.0,
+                    },
+                    &mut inspector_painter,
+                );
+            });
+            assert_eq!(inspector_painter.image_ids, vec![first_id]);
+            let mut timeline = view(&state);
+            timeline.span = 40;
+            let images = timeline.lanes[0].clips[0].images.as_ref().unwrap();
+            let mut painter = TestPainter::default();
+            timeline.paint(&mut painter, TIMELINE);
+            assert!(painter.image_ids.len() > 3);
+            assert!(!painter.image_ids.contains(&bin_image.id()));
+            let indices: Vec<_> = painter
+                .image_ids
+                .iter()
+                .map(|id| images.iter().position(|image| image.id() == *id).unwrap())
+                .collect();
+            assert!(indices.windows(2).all(|pair| pair[0] <= pair[1]));
+            if playback == Playback::Freeze {
+                assert!(painter.image_ids.iter().all(|id| *id == first_id));
+                assert!(
+                    inspector_painter
+                        .labels
+                        .iter()
+                        .any(|label| label == "Frozen frames are silent")
+                );
+                for label in ["100%", "Mute", "Detach audio to its own track"] {
+                    assert!(!inspector_painter.labels.iter().any(|text| text == label));
+                }
+                assert!(
+                    !painter
+                        .fills
+                        .iter()
+                        .any(|(rect, color)| rect.x >= 128.0 && *color == AUDIO.mix(panel(), 0.5))
+                );
+            }
+        }
+        let mut clip = selected_clip(&state).unwrap().1;
+        clip.duration_frames = 0;
+        assert!(state.clip_thumbnail(&clip, &media, (30, 1)).is_none());
     }
 
     #[test]

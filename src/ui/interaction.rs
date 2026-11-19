@@ -5,6 +5,7 @@
 use super::UiState;
 use super::controls::Glyph;
 use super::edits::{self, ClipRef, CopiedClip};
+use super::state::PlaybackMonitor;
 use super::timeline_view::{Geometry, Ghost, lane_weight};
 use crate::media::MediaKind;
 use crate::project::Command;
@@ -98,6 +99,7 @@ pub(crate) enum Action {
     Duplicate,
     Split,
     PlayPause,
+    PlayPauseLastMonitor,
     StepBack,
     StepForward,
     SecondBack,
@@ -144,7 +146,7 @@ const KEY_BINDINGS: &[(Key, bool, bool, Action)] = &[
     (Key::Char('d'), true, false, Action::Duplicate),
     (Key::Char('k'), true, false, Action::Split),
     (Key::Char('s'), false, false, Action::Split),
-    (Key::Char(' '), false, false, Action::PlayPause),
+    (Key::Char(' '), false, false, Action::PlayPauseLastMonitor),
     (Key::Char('k'), false, false, Action::PlayPause),
     (Key::Left, false, false, Action::StepBack),
     (Key::Right, false, false, Action::StepForward),
@@ -182,6 +184,7 @@ impl Action {
     fn shortcut_group(self) -> &'static str {
         match self {
             Self::PlayPause
+            | Self::PlayPauseLastMonitor
             | Self::StepBack
             | Self::StepForward
             | Self::SecondBack
@@ -221,6 +224,7 @@ impl Action {
             Self::Duplicate => "Duplicate",
             Self::Split => "Split at playhead",
             Self::PlayPause => "Play / pause",
+            Self::PlayPauseLastMonitor => "Play / pause last used monitor",
             Self::StepBack => "Previous frame",
             Self::StepForward => "Next frame",
             Self::SecondBack => "Back one second",
@@ -399,15 +403,12 @@ impl UiState {
             Action::Paste if !busy => self.paste(None),
             Action::Duplicate if !busy => self.duplicate_selection(),
             Action::Split if !busy => self.split_at_playhead(),
-            Action::PlayPause => {
-                if self.source.playing.peek() {
-                    self.pause_source();
-                } else if self.program.playing.peek() {
-                    self.pause();
-                } else {
-                    self.play();
-                }
-            }
+            Action::PlayPause => self.toggle_playback_monitor(if self.source.playing.peek() {
+                PlaybackMonitor::Source
+            } else {
+                PlaybackMonitor::Program
+            }),
+            Action::PlayPauseLastMonitor => self.toggle_last_playback_monitor(),
             Action::StepBack => self.seek(frame.saturating_sub(1)),
             Action::StepForward => self.seek((frame + 1).min(last)),
             Action::SecondBack => self.seek(frame.saturating_sub(second)),
@@ -430,16 +431,6 @@ impl UiState {
                 self.quick_export()
             }
             _ => {}
-        }
-    }
-
-    /// Moves the program playhead, pausing playback first.
-    pub fn seek(&self, frame: u64) {
-        if self.program.playing.peek() {
-            self.pause();
-        }
-        if self.program.position.peek() != frame {
-            self.focus_frame(frame);
         }
     }
 
@@ -1531,9 +1522,81 @@ fn label_of_clip(state: &UiState, (track_id, clip_id): ClipRef) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::Media;
     use crate::timeline::Clip;
     use creamui::core::Rect;
     use std::collections::HashSet;
+
+    fn press_space(state: &UiState) {
+        let (_, action) = shortcuts()
+            .into_iter()
+            .find(|(shortcut, _)| shortcut.key == Key::Char(' '))
+            .unwrap();
+        state.run(action);
+    }
+
+    fn playback_state() -> (UiState, tempfile::NamedTempFile) {
+        let state = UiState::new();
+        let source = tempfile::NamedTempFile::new().unwrap();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: source.path().into(),
+            kind: MediaKind::Audio,
+            duration_us: Some(2_000_000),
+            has_audio: true,
+        })));
+        state.insert_media(1);
+        state.select_media(1);
+        (state, source)
+    }
+
+    #[test]
+    fn space_resumes_the_paused_source_instead_of_starting_program() {
+        let (state, _source) = playback_state();
+        state.play_source();
+        assert!(state.source.playing.peek());
+        state.pause_source();
+
+        press_space(&state);
+        assert_eq!(
+            (state.source.playing.peek(), state.program.playing.peek()),
+            (true, false)
+        );
+        press_space(&state);
+        assert!(!state.source.playing.peek());
+    }
+
+    #[test]
+    fn space_follows_seeks_between_source_and_program() {
+        let (state, _source) = playback_state();
+        press_space(&state);
+        assert!(state.program.playing.peek());
+
+        state.seek_source(15);
+        press_space(&state);
+        assert!(state.source.playing.peek());
+        assert_eq!(state.source.position.peek(), 15);
+        assert!(!state.program.playing.peek());
+
+        state.seek(20);
+        press_space(&state);
+        assert!(state.program.playing.peek());
+        assert_eq!(state.program.position.peek(), 20);
+        assert!(!state.source.playing.peek());
+    }
+
+    #[test]
+    fn space_falls_back_to_program_when_source_is_cleared() {
+        let (state, _source) = playback_state();
+        state.insert_media(1);
+        state.seek_source(15);
+        state.select_clip(None);
+        assert!(state.source_range().is_none());
+
+        press_space(&state);
+        assert!(state.program.playing.peek());
+        assert!(!state.source.playing.peek());
+    }
 
     fn second_step_state(fps: (u32, u32), duration: u64) -> UiState {
         let state = UiState::new();
@@ -1754,7 +1817,11 @@ mod tests {
         assert_eq!(bound(Key::Char('z'), true, true), Some(Action::Redo));
         assert_eq!(bound(Key::Delete, false, false), Some(Action::Delete));
         assert_eq!(bound(Key::Delete, false, true), Some(Action::RippleDelete));
-        assert_eq!(bound(Key::Char(' '), false, false), Some(Action::PlayPause));
+        assert_eq!(
+            bound(Key::Char(' '), false, false),
+            Some(Action::PlayPauseLastMonitor)
+        );
+        assert_eq!(bound(Key::Char('k'), false, false), Some(Action::PlayPause));
         assert_eq!(bound(Key::Char('a'), true, false), Some(Action::SelectAll));
     }
 

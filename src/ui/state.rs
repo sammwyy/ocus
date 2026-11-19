@@ -167,6 +167,12 @@ fn storyboard_requests(
         .collect()
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PlaybackMonitor {
+    Program,
+    Source,
+}
+
 /// One GPU preview surface with its own position and decode stream.
 #[derive(Clone)]
 pub(crate) struct Monitor {
@@ -235,6 +241,7 @@ pub(crate) struct UiState {
     pub missing_media: Signal<HashSet<u64>>,
     pub program: Monitor,
     pub source: Monitor,
+    last_playback_monitor: Rc<Cell<PlaybackMonitor>>,
     pub preview_available: Signal<bool>,
     pub project_path: Signal<Option<PathBuf>>,
     pub title_text: TextController,
@@ -389,6 +396,7 @@ impl UiState {
             missing_media: Signal::new(HashSet::new()),
             program: Monitor::new(),
             source: Monitor::new(),
+            last_playback_monitor: Rc::new(Cell::new(PlaybackMonitor::Program)),
             preview_available: Signal::new(false),
             project_path: Signal::new(None),
             title_text: TextController::default(),
@@ -863,6 +871,45 @@ impl UiState {
         self.request_preview();
     }
 
+    /// Moves the Program playhead, pausing playback first.
+    pub fn seek(&self, frame: u64) {
+        self.last_playback_monitor.set(PlaybackMonitor::Program);
+        if self.program.playing.peek() {
+            self.pause();
+        }
+        if self.program.position.peek() != frame {
+            self.focus_frame(frame);
+        }
+    }
+
+    pub(super) fn toggle_last_playback_monitor(&self) {
+        let target = if self.last_playback_monitor.get() == PlaybackMonitor::Source
+            && (self.source.playing.peek()
+                || self.source_range().is_some_and(|range| {
+                    range.kind == MediaKind::Audio || self.preview_available.peek()
+                })) {
+            PlaybackMonitor::Source
+        } else {
+            PlaybackMonitor::Program
+        };
+        self.toggle_playback_monitor(target);
+    }
+
+    pub(super) fn toggle_playback_monitor(&self, target: PlaybackMonitor) {
+        match target {
+            PlaybackMonitor::Program if self.program.playing.peek() => {
+                self.last_playback_monitor.set(target);
+                self.pause();
+            }
+            PlaybackMonitor::Source if self.source.playing.peek() => {
+                self.last_playback_monitor.set(target);
+                self.pause_source();
+            }
+            PlaybackMonitor::Program => self.play(),
+            PlaybackMonitor::Source => self.play_source(),
+        }
+    }
+
     pub fn play(&self) {
         let content = SequenceContent::of(self.editor.borrow().project());
         if content.has_picture && !self.preview_available.peek() {
@@ -876,6 +923,7 @@ impl UiState {
                 .set("Add a clip to the timeline to play the sequence".into());
             return;
         }
+        self.last_playback_monitor.set(PlaybackMonitor::Program);
         self.pause_source();
         self.audio_failed.set(false);
         self.program.playing.set(true);
@@ -1120,6 +1168,7 @@ impl UiState {
                 .set("Video preview is not available on this display".into());
             return;
         }
+        self.last_playback_monitor.set(PlaybackMonitor::Source);
         self.pause();
         self.audio_failed.set(false);
         self.source.playing.set(true);
@@ -1133,7 +1182,14 @@ impl UiState {
         self.stop(&self.source);
     }
 
-    pub fn focus_source_frame(&self, frame: u64) {
+    pub fn seek_source(&self, frame: u64) {
+        if self.source.position.peek() == frame {
+            return;
+        }
+        self.last_playback_monitor.set(PlaybackMonitor::Source);
+        if self.source.playing.peek() {
+            self.pause_source();
+        }
         self.source.position.set(frame);
         self.request_source_preview();
     }
@@ -1411,6 +1467,7 @@ impl UiState {
     }
 
     fn reset_monitors(&self) {
+        self.last_playback_monitor.set(PlaybackMonitor::Program);
         self.pause();
         self.pause_source();
         self.clear_title_gesture();
@@ -4006,7 +4063,7 @@ mod tests {
             source_start_frame: 10,
             duration_frames: 20,
         }));
-        state.focus_source_frame(25);
+        state.seek_source(25);
         let range = state.source_range().unwrap();
         assert_eq!((range.source_start, range.duration), (10, 20));
         assert_eq!(state.source.position.peek(), 19);

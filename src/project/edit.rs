@@ -401,6 +401,7 @@ impl Editor {
             | Command::Split { track_id, .. }
             | Command::Trim { track_id, .. }
             | Command::SetClipAudio { track_id, .. }
+            | Command::SetClipColor { track_id, .. }
             | Command::SetClipFades { track_id, .. }
             | Command::SetTransition { track_id, .. }
             | Command::SetTitle { track_id, .. } => editable(*track_id),
@@ -1026,6 +1027,7 @@ mod tests {
         use crate::timeline::{Clip, ClipContent, Title};
         let mut editor = Editor::new(Project::new("Locked"));
         let clip = Clip {
+            color: ColorAdjust::default(),
             transition: None,
             id: 1,
             start_frame: 0,
@@ -1143,6 +1145,45 @@ mod tests {
         assert_eq!(editor.project(), &locked);
     }
     use super::*;
+
+    #[test]
+    fn locked_tracks_reject_clip_color_changes() {
+        let mut editor = Editor::new(Project::new("Locked color"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "/color.png".into(),
+            kind: MediaKind::Image,
+            duration_us: None,
+            has_audio: false,
+        })));
+        let clip = serde_json::from_value(serde_json::json!({
+            "id": 1, "start_frame": 0, "source_start_frame": 0,
+            "duration_frames": 30, "content": {"media": {"media_id": 1}},
+            "volume": 1.0, "muted": false
+        }))
+        .unwrap();
+        assert!(editor.apply(Command::InsertClip { track_id: 0, clip }));
+        let command = Command::SetClipColor {
+            track_id: 0,
+            clip_id: 1,
+            color: ColorAdjust {
+                brightness: 0.2,
+                contrast: 1.3,
+                saturation: 0.5,
+            },
+        };
+        assert!(editor.apply(command.clone()));
+        assert!(editor.undo());
+        assert!(editor.apply(Command::SetTrackLocked {
+            track_id: 0,
+            locked: true
+        }));
+        let locked = editor.project().clone();
+        assert!(!editor.apply(command.clone()));
+        assert_eq!(editor.project(), &locked);
+        assert!(editor.undo());
+        assert!(editor.apply(command));
+    }
 
     #[test]
     fn clip_color_command_rejects_missing_clip() {

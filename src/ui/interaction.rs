@@ -1882,6 +1882,7 @@ mod tests {
                 track_id,
                 clip: Clip {
                     id: track_id + 1,
+                    color: Default::default(),
                     transition: None,
                     start_frame: 0,
                     source_start_frame: 0,

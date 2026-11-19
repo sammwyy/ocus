@@ -5153,7 +5153,7 @@ mod tests {
     }
 
     #[test]
-    fn trim_drag_previews_then_commits_once_and_cancel_discards() {
+    fn trim_drag_previews_then_commits_once_and_escape_discards() {
         let state = UiState::new();
         state.run(Action::AddTitle);
         let original = selected_clip(&state).unwrap().1;
@@ -5189,9 +5189,14 @@ mod tests {
         assert_eq!(selected_clip(&state).unwrap().1, original);
         press(&timeline, at(1.0), 50.0);
         drag_to(&timeline, at(40.0), 50.0);
-        state.cancel_drag();
+        state.run(Action::Escape);
+        drag_to(&timeline, at(50.0), 50.0);
         release(&timeline);
-        assert_eq!(selected_clip(&state).unwrap().1, original);
+        assert_eq!(
+            state.editor.borrow().project().tracks()[0].clips[0],
+            original
+        );
+        assert_eq!(state.selected.peek(), vec![(0, original.id)]);
         assert!(state.trim_draft.peek().is_none());
         press(&timeline, at(30.0), 50.0);
         assert!(matches!(

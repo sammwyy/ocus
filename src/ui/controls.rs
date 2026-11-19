@@ -936,7 +936,11 @@ impl Widget for Thumb {
             let width = badge.chars().count() as f32 * 6.0 + 10.0;
             let pill = Rect {
                 x: rect.x + rect.width - width - 4.0,
-                y: rect.y + rect.height - 20.0,
+                y: if self.placeholder.is_some() {
+                    rect.y + 4.0
+                } else {
+                    rect.y + rect.height - 20.0
+                },
                 width,
                 height: 15.0,
             };

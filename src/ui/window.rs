@@ -4279,6 +4279,20 @@ mod tests {
         })));
         let painter = render(&state, 1280.0, 760.0);
         assert!(painter.labels.iter().any(|label| label == "No preview"));
+        let (_, placeholder) = painter
+            .bounds
+            .iter()
+            .find(|(label, _)| label == "No preview")
+            .unwrap();
+        let (_, duration) = painter
+            .bounds
+            .iter()
+            .find(|(label, _)| label == "0:02")
+            .unwrap();
+        assert!(
+            duration.y + duration.height <= placeholder.y
+                || placeholder.y + placeholder.height <= duration.y
+        );
         for view in [MediaView::Grid, MediaView::List] {
             state.media_view.set(view);
             state

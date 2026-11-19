@@ -39,6 +39,8 @@ clip commands do not complete the corresponding editor workflows.
 - [x] Present video and still-image frames through CreamUI's GPU viewport.
 - [x] Composite overlapping video layers and titles consistently between
   preview and export.
+- [x] Add undoable fade, dissolve, and slide transitions with Inspector controls,
+  timeline markers, and shared preview/export rendering.
 
 ## Audio, titles, and export
 

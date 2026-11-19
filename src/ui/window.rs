@@ -4401,9 +4401,12 @@ mod tests {
         state.export_dialog();
         state.export_page.set(ExportPage::Video);
         state.project_path.set(Some("/project.ocus".into()));
+        state
+            .status
+            .set("Edit rejected: check range, track and clip".into());
         assert!(state.export_form().unwrap().burn_subtitles);
-        for width in [420.0, 680.0, 1280.0] {
-            let painter = render(&state, width, 900.0);
+        for (width, height) in [(420.0, 480.0), (680.0, 480.0), (1280.0, 760.0)] {
+            let painter = render(&state, width, height);
             let (_, rect) = painter
                 .bounds
                 .iter()
@@ -4412,10 +4415,24 @@ mod tests {
             assert!(rect.x >= 0.0 && rect.x + rect.width <= width);
             for (_, rect) in painter.bounds.iter().filter(|(text, _)| text == "Cancel") {
                 assert!(
-                    rect.y + rect.height <= (900.0 + 520.0) / 2.0 - 12.0,
+                    rect.y + rect.height <= height.min((height + 520.0) / 2.0) - 12.0,
                     "{width}: {rect:?}"
                 );
             }
+            let bounds = |label: &str| {
+                painter
+                    .bounds
+                    .iter()
+                    .rev()
+                    .find(|(text, _)| text.starts_with(label))
+                    .unwrap()
+                    .1
+            };
+            let hint = bounds("Export also saves");
+            let status = bounds("Edit rejected");
+            let cancel = bounds("Cancel");
+            assert!(hint.y + hint.height <= status.y);
+            assert!(status.y + status.height <= cancel.y || status.x + status.width <= cancel.x);
         }
         state.toggle_burn_subtitles();
         assert!(!state.export_form().unwrap().burn_subtitles);
@@ -5703,6 +5720,29 @@ mod tests {
 
     fn release(view: &TimelineView) {
         view.on_drag_end().unwrap()();
+    }
+
+    #[test]
+    fn clicking_a_clip_edge_without_trimming_preserves_status_and_history() {
+        for subtitles in [false, true] {
+            let state = UiState::new();
+            assert!(state.add_title());
+            if subtitles {
+                let mut tracks = state.editor.borrow().project().tracks().to_vec();
+                tracks[0].subtitles = true;
+                assert!(state.edit(Command::ReplaceTracks(tracks)));
+            }
+            let before = state.editor.borrow().project().clone();
+            let status = state.status.peek();
+            let timeline = view(&state);
+            press(&timeline, at(0.0), 50.0);
+            release(&timeline);
+            assert_eq!(state.status.peek(), status);
+            assert_eq!(state.editor.borrow().project(), &before);
+            assert!(state.trim_draft.peek().is_none());
+            state.undo();
+            assert_ne!(state.editor.borrow().project(), &before);
+        }
     }
 
     #[test]

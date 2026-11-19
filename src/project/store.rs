@@ -309,6 +309,7 @@ mod tests {
                 muted: false,
                 color: Default::default(),
                 transition: None,
+                transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
                 linked_audio: false,

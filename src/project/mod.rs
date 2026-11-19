@@ -170,10 +170,11 @@ impl Project {
                     .checked_add(if clip.playback == Playback::Freeze {
                         0
                     } else {
-                        clip.duration_frames
+                        clip.source_span()
                     })
                     .ok_or("Clip source range overflows")?;
                 if clip.duration_frames == 0
+                    || !clip.valid_speed()
                     || clip.start_frame < end
                     || !clip_ids.insert(clip.id)
                     || !clip.transform.valid()
@@ -189,6 +190,7 @@ impl Project {
                     ClipContent::Title(title)
                         if track.kind == TrackKind::Video
                             && title.valid()
+                            && clip.speed == 1.0
                             && clip.playback == Playback::Forward => {}
                     ClipContent::Media { media_id }
                         if self.media.iter().any(|media| {
@@ -216,6 +218,12 @@ impl Project {
         kind: TrackKind,
         clip: &crate::timeline::Clip,
     ) -> bool {
+        if !clip.valid_speed()
+            || (media.kind == MediaKind::Image || clip.playback == Playback::Freeze)
+                && clip.speed != 1.0
+        {
+            return false;
+        }
         if (clip.playback == Playback::Reverse && media.kind == MediaKind::Image)
             || (clip.playback == Playback::Freeze
                 && !(kind == TrackKind::Video && media.kind == MediaKind::Video))
@@ -243,13 +251,7 @@ impl Project {
         } else {
             max_frames
         };
-        u128::from(clip.source_start_frame)
-            + u128::from(if clip.playback == Playback::Freeze {
-                1
-            } else {
-                clip.duration_frames
-            })
-            <= max_frames
+        u128::from(clip.source_start_frame) + u128::from(clip.source_span()) <= max_frames
     }
 }
 

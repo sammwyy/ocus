@@ -101,6 +101,7 @@ impl VisualPlan {
                             let media =
                                 project.media().iter().find(|media| media.id == *media_id)?;
                             Some(VisualClip::Media(FrameSource {
+                                speed: clip.speed,
                                 playback: clip.playback,
                                 lut: clip.lut.clone(),
                                 color: clip.color,
@@ -940,6 +941,7 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         assert!(crate::media::proxy::generate(&path, &cancelled).unwrap());
         let source = FrameSource {
+            speed: 1.0,
             playback: crate::timeline::Playback::Forward,
             clip_id: 1,
             path,
@@ -1038,6 +1040,7 @@ mod tests {
             tracks: vec![vec![VisualClip::Media(FrameSource {
                 playback: Playback::Forward,
                 color,
+                speed: 1.0,
                 lut: None,
                 clip_id: 1,
                 path: path.clone(),
@@ -1142,6 +1145,7 @@ mod tests {
                 playback: crate::timeline::Playback::Forward,
                 color,
                 lut: Some(lut_path),
+                speed: 1.0,
                 clip_id: 1,
                 path,
                 kind: MediaKind::Image,
@@ -1512,6 +1516,7 @@ mod tests {
                     .success()
             );
             FrameSource {
+                speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 clip_id,
                 lut: None,
@@ -1628,6 +1633,7 @@ mod tests {
         let lut_path = dir.path().join("invert.cube");
         fs::write(&lut_path, "LUT_1D_SIZE 2\n1 1 1\n0 0 0\n").unwrap();
         let source = FrameSource {
+            speed: 1.0,
             playback: crate::timeline::Playback::Forward,
             lut: Some(lut_path.clone()),
             clip_id: 1,
@@ -1718,6 +1724,7 @@ mod tests {
         let source = FrameSource {
             playback: crate::timeline::Playback::Forward,
             lut: None,
+            speed: 1.0,
             color: Default::default(),
             clip_id: 1,
             path,
@@ -1817,6 +1824,7 @@ mod tests {
             VisualClip::Media(FrameSource {
                 playback: Playback::Forward,
                 color: Default::default(),
+                speed: 1.0,
                 lut: None,
                 clip_id: id,
                 path,
@@ -2114,6 +2122,7 @@ mod tests {
             )]),
             tracks: vec![vec![
                 VisualClip::Media(FrameSource {
+                    speed: 1.0,
                     playback: crate::timeline::Playback::Forward,
                     lut: None,
                     clip_id: 1,
@@ -2126,6 +2135,7 @@ mod tests {
                     transform: Transform::default(),
                 }),
                 VisualClip::Media(FrameSource {
+                    speed: 1.0,
                     playback: crate::timeline::Playback::Forward,
                     lut: None,
                     clip_id: 2,
@@ -2163,6 +2173,158 @@ mod tests {
                 .pixels[..4],
             &[60, 60, 0, 255]
         );
+        for speed in [0.5, 2.0] {
+            let mut pip = plan.clone();
+            pip.tracks[0].truncate(1);
+            pip.transitions.clear();
+            let VisualClip::Media(source) = &mut pip.tracks[0][0] else {
+                unreachable!()
+            };
+            source.speed = speed;
+            source.duration = (4.0_f64 / speed) as u64;
+            source.playback = Playback::Reverse;
+            source.transform = Transform {
+                scale: 0.5,
+                x: 0.5,
+                y: 0.5,
+                ..Default::default()
+            };
+            let duration = source.duration;
+            let transform = source.transform;
+            let mut compositor = Compositor::new(pip, 4, 2, (30, 1));
+            for offset in 0..duration {
+                let target = 3 - (offset as f64 * speed).floor() as usize;
+                let [r, g, b] = colors[target];
+                let image = FrameImage {
+                    picture: (0, 0, 4, 2),
+                    width: 4,
+                    height: 2,
+                    pixels: [r, g, b, 255].repeat(8),
+                };
+                let mut expected = [0, 0, 0, 255].repeat(8);
+                draw_transformed(&mut expected, 4, 2, &image, transform);
+                assert_eq!(
+                    compositor
+                        .frame(offset, &cancelled)
+                        .unwrap()
+                        .unwrap()
+                        .pixels,
+                    expected,
+                    "reverse PiP {speed}x offset {offset}"
+                );
+            }
+        }
+        for (speed, colors) in [
+            (0.5, [[0, 180, 0, 255], [0, 120, 0, 255], [0, 0, 60, 255]]),
+            (
+                2.0,
+                [[180, 180, 0, 255], [120, 120, 0, 255], [60, 60, 0, 255]],
+            ),
+        ] {
+            let mut sped = plan.clone();
+            let VisualClip::Media(source) = &mut sped.tracks[0][0] else {
+                unreachable!()
+            };
+            source.speed = speed;
+            source.transform.scale = 0.5;
+            let transformed = source.clone();
+            let mut reference = VideoLayers::new((30, 1), (4, 2));
+            let mut transformed_plan = sped.clone();
+            transformed_plan.tracks[0].truncate(1);
+            transformed_plan.transitions.clear();
+            let mut scaled = Compositor::new(transformed_plan, 4, 2, (30, 1));
+            for position in 0..transformed.duration {
+                let image = reference
+                    .layer_at(&transformed, position, &cancelled)
+                    .unwrap();
+                let mut expected = [0, 0, 0, 255].repeat(8);
+                draw_transformed(&mut expected, 4, 2, &image, transformed.transform);
+                assert_eq!(
+                    scaled.frame(position, &cancelled).unwrap().unwrap().pixels,
+                    expected,
+                    "scaled {speed}x frame {position}"
+                );
+            }
+            let VisualClip::Media(source) = &mut sped.tracks[0][0] else {
+                unreachable!()
+            };
+            source.transform = Transform::default();
+            let mut compositor = Compositor::new(sped, 4, 2, (30, 1));
+            for (position, expected) in (2..5).zip(colors) {
+                assert_eq!(
+                    &compositor
+                        .frame(position, &cancelled)
+                        .unwrap()
+                        .unwrap()
+                        .pixels[..4],
+                    &expected
+                );
+            }
+        }
+        for speed in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] {
+            for kind in [
+                TransitionKind::Fade,
+                TransitionKind::Dissolve,
+                TransitionKind::Slide,
+            ] {
+                for direction in [
+                    SlideDirection::Left,
+                    SlideDirection::Right,
+                    SlideDirection::Up,
+                    SlideDirection::Down,
+                ] {
+                    let mut sped = plan.clone();
+                    sped.tracks[0].truncate(1);
+                    let VisualClip::Media(source) = &mut sped.tracks[0][0] else {
+                        unreachable!()
+                    };
+                    source.speed = speed;
+                    source.duration = 5;
+                    sped.transitions.clear();
+                    sped.transitions_out.insert(
+                        1,
+                        Transition {
+                            kind,
+                            direction,
+                            duration_frames: 3,
+                        },
+                    );
+                    let mut compositor = Compositor::new(sped, 4, 2, (30, 1));
+                    for position in 0..5 {
+                        let color = colors[((position as f64 * speed).floor() as usize).min(3)];
+                        let t = if position < 2 {
+                            1.0
+                        } else {
+                            (5 - position) as f64 / 4.0
+                        };
+                        let (dx, dy) = match direction {
+                            SlideDirection::Left => (-((1.0 - t) * 4.0).round() as i32, 0),
+                            SlideDirection::Right => (((1.0 - t) * 4.0).round() as i32, 0),
+                            SlideDirection::Up => (0, -((1.0 - t) * 2.0).round() as i32),
+                            SlideDirection::Down => (0, ((1.0 - t) * 2.0).round() as i32),
+                        };
+                        let actual = compositor.frame(position, &cancelled).unwrap().unwrap();
+                        for y in 0..2 {
+                            for x in 0..4 {
+                                let rgb = if kind != TransitionKind::Slide {
+                                    color.map(|value| (f64::from(value) * t).round() as u8)
+                                } else if (0..4).contains(&(x - dx)) && (0..2).contains(&(y - dy)) {
+                                    color
+                                } else {
+                                    [0; 3]
+                                };
+                                let offset = ((y * 4 + x) * 4) as usize;
+                                assert_eq!(
+                                    &actual.pixels[offset..offset + 3],
+                                    &rgb,
+                                    "{speed}x {kind:?} {direction:?} frame {position}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
         for (playback, color) in [
             (Playback::Reverse, [240, 0, 0]),
             (Playback::Freeze, [0, 240, 0]),
@@ -2296,6 +2458,7 @@ mod tests {
             tga.extend([color[2], color[1], color[0], color[3]].repeat(8));
             fs::write(&path, tga).unwrap();
             VisualClip::Media(FrameSource {
+                speed: 1.0,
                 playback: Playback::Forward,
                 clip_id,
                 lut: None,
@@ -2377,6 +2540,7 @@ mod tests {
             tga.extend([color[2], color[1], color[0], color[3]].repeat(8));
             fs::write(&path, tga).unwrap();
             VisualClip::Media(FrameSource {
+                speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
                 clip_id: id,
@@ -2586,6 +2750,7 @@ mod tests {
             transitions: HashMap::new(),
             resolution: (1920, 1080),
             tracks: vec![vec![VisualClip::Media(FrameSource {
+                speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
                 color: Default::default(),
@@ -2639,6 +2804,7 @@ mod tests {
                 transitions: HashMap::new(),
                 resolution: (1920, 1080),
                 tracks: vec![vec![VisualClip::Media(FrameSource {
+                    speed: 1.0,
                     playback: crate::timeline::Playback::Forward,
                     lut: None,
                     color: Default::default(),
@@ -2739,6 +2905,7 @@ mod tests {
         let transparent = fixture("transparent.tga", 16, 9, 0);
         let source = |id, path| {
             VisualClip::Media(FrameSource {
+                speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
                 color: Default::default(),
@@ -2957,6 +3124,7 @@ mod tests {
         .unwrap();
         let source = |id, path| {
             VisualClip::Media(FrameSource {
+                speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
                 color: Default::default(),

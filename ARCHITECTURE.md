@@ -73,8 +73,23 @@ characters. Track metadata and same-kind reordering use undoable commands.
 Locked tracks reject clip edits and removal, including through `ReplaceTracks`;
 ripple delete leaves them untouched. Hidden tracks are excluded from both
 shared visual composition and audio plans (including linked video audio), so
-preview and export agree. Media
-probing and bounded first-frame thumbnails use the `ffmpeg-next` library on
+preview and export agree. Media clip speed is also an optional version 1 field:
+absent means 1x and 1x is
+omitted when saving. It scales source time, not stored timeline duration;
+titles, still images and frozen clips must stay at 1x. Reverse maps within the
+speed-scaled source span; split and ripple cuts retain that range. Reverse
+speed changes anchor the source end, including when a following clip limits
+the timeline duration. Freeze commands reset speed to 1x and hide its controls.
+The shared audio mixer uses FFmpeg's
+atempo filter for changed speeds, chaining stages outside 0.5x–2x to preserve
+pitch. Optional noise reduction processes that speed-adjusted stream before
+timeline fades and mixing, identically in playback and export. Silent spans retain their exact scaled sample positions rather than
+passing through atempo's waveform alignment; active spans are flushed and
+bounded to the source clock at those boundaries. A bounded output tail allows
+this without buffering entire clips. Consumers distinguish a finished audio
+producer from a drained queue so the final buffered samples cannot be lost.
+Audio seeks scale sample offsets before rounding, including sub-frame
+positions. Media probing and bounded first-frame thumbnails use the `ffmpeg-next` library on
 workers. `media/preview.rs` decodes and scales frames off the UI thread,
 maintaining a small frame buffer during playback and seeking to source frames
 after an edit. It also generates three representative thumbnails per video
@@ -148,7 +163,7 @@ absolutely positioned layers above the workspace. During playback
 `media/audio.rs` decodes each audible clip (linked audio on video tracks and
 any clip on audio tracks) to 48 kHz stereo and applies optional per-clip noise
 reduction on its worker before fades, volume, and mixing. Reverse audio feeds
-bounded, reversed PCM blocks into the same filter; frozen clips never create
+bounded, reversed PCM blocks through atempo before noise reduction; frozen clips never create
 decoder or denoiser slots. `playback.rs` streams
 the mix through rodio to the default output device; video pacing follows the
 consumed-sample clock so picture and sound stay aligned, skipping late video frames instead of delaying

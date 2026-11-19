@@ -452,6 +452,7 @@ mod tests {
             [(3, 12, 48, false), (72, 60, 24, false)]
         );
         assert_eq!(reloaded.tracks()[1].kind, TrackKind::Audio);
+        assert!(reloaded.tracks()[1].name.is_empty());
         assert_eq!(cuts(&reloaded, 1), [(72, 60, 24, false)]);
     }
 

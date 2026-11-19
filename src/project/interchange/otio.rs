@@ -403,7 +403,7 @@ pub(super) fn write(project: &Project, notes: &mut BTreeSet<String>) -> Result<S
         }
         tracks.push(track(&lane.name, kind, children));
         if !linked.is_empty() {
-            tracks.push(track(&lane.display_name("Video"), "Audio", linked));
+            tracks.push(track(&lane.name, "Audio", linked));
             notes.insert("Linked video sound was exported on separate audio tracks.".into());
         }
     }

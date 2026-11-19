@@ -915,6 +915,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id,
             clip: Clip {
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1069,6 +1070,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1143,6 +1145,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1263,6 +1266,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Clip {
+                lut: None,
                 id: 3,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1332,6 +1336,7 @@ mod tests {
         })));
         let mut layered = editor.project().tracks().to_vec();
         layered[0].clips = vec![Clip {
+            lut: None,
             id: 4,
             start_frame: 15,
             source_start_frame: 15,
@@ -1347,6 +1352,7 @@ mod tests {
             linked_audio: false,
         }];
         layered[1].clips = vec![Clip {
+            lut: None,
             id: 5,
             start_frame: 0,
             source_start_frame: 0,
@@ -1368,6 +1374,7 @@ mod tests {
             locked: false,
             hidden: false,
             clips: vec![Clip {
+                lut: None,
                 id: 6,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1484,6 +1491,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1563,6 +1571,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1734,6 +1743,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id,
             clip: Clip {
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1860,6 +1870,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Clip {
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,

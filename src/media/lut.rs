@@ -288,7 +288,7 @@ mod tests {
             let exact = Lut::parse(&text).unwrap();
             let mut pixels = Vec::new();
             for b in (0..=255).step_by(15) { for g in (0..=255).step_by(15) { for r in (0..=255).step_by(15) { pixels.extend([r, g, b, 137]); }}}
-            let image = Arc::new(FrameImage { width: (pixels.len() / 4) as u32, height: 1, pixels });
+            let image = Arc::new(FrameImage { picture: (0, 0, (pixels.len() / 4) as u32, 1), width: (pixels.len() / 4) as u32, height: 1, pixels });
             let result = exact.compile().apply(image.clone());
             for (src, dest) in image.pixels.as_chunks::<4>().0.iter().zip(result.pixels.as_chunks::<4>().0) {
                 let expected = exact.rgb([src[0], src[1], src[2]]);
@@ -308,6 +308,7 @@ mod tests {
             width: 1,
             height: 1,
             pixels: vec![254, 254, 254, 137],
+            picture: (0, 0, 1, 1),
         });
         let result = compiled.apply(image);
         assert_eq!(&result.pixels[..3], &exact.rgb([254; 3]));
@@ -331,6 +332,7 @@ mod tests {
             width: 2,
             height: 1,
             pixels: vec![128, 64, 200, 137, 255, 0, 64, 0],
+            picture: (0, 0, 2, 1),
         });
         assert_eq!(identity.compile().apply(image.clone()).pixels, image.pixels);
     }
@@ -391,6 +393,7 @@ mod tests {
         std::fs::write(&path, text).unwrap();
         let image = Arc::new(FrameImage {
             width: 1920,
+            picture: (0, 0, 1920, 1080),
             height: 1080,
             pixels: (0..1920 * 1080)
                 .flat_map(|i| {

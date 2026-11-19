@@ -162,6 +162,7 @@ impl Project {
                 if clip.duration_frames == 0
                     || clip.start_frame < end
                     || !clip_ids.insert(clip.id)
+                    || !clip.transform.valid()
                     || !clip.color.valid()
                     || !clip.volume.is_finite()
                     || !(0.0..=2.0).contains(&clip.volume)

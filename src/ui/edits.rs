@@ -271,6 +271,7 @@ pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Op
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         },
     ))
@@ -418,6 +419,7 @@ pub(crate) fn insert_media(
         fade_out_frames: 0,
         noise_reduction: false,
         linked_audio: media.kind == MediaKind::Video && media.has_audio,
+        keyframes: Vec::new(),
         transform: Transform::default(),
     };
     let end = start.checked_add(duration).ok_or("Clip range overflows")?;
@@ -658,6 +660,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         }
     }

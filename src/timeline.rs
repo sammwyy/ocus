@@ -121,6 +121,79 @@ pub struct Clip {
     pub color: ColorAdjust,
     #[serde(default, skip_serializing_if = "Transform::is_identity")]
     pub transform: Transform,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keyframes: Vec<Keyframe>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Keyframe {
+    /// Offset from the clip's timeline start, independent of media playback mode.
+    pub frame: u64,
+    pub scale: f32,
+    pub x: f32,
+    pub y: f32,
+    pub rotation: f32,
+    pub opacity: f32,
+}
+
+impl Keyframe {
+    pub fn new(frame: u64, transform: Transform) -> Self {
+        Self {
+            frame,
+            scale: transform.scale,
+            x: transform.x,
+            y: transform.y,
+            rotation: transform.rotation,
+            opacity: transform.opacity,
+        }
+    }
+
+    pub fn valid(&self) -> bool {
+        self.apply(Transform::default()).valid()
+    }
+
+    fn apply(&self, base: Transform) -> Transform {
+        Transform {
+            scale: self.scale,
+            x: self.x,
+            y: self.y,
+            rotation: self.rotation,
+            opacity: self.opacity,
+            ..base
+        }
+    }
+}
+
+pub fn valid_keyframes(keyframes: &[Keyframe]) -> bool {
+    keyframes.iter().all(Keyframe::valid)
+        && keyframes
+            .windows(2)
+            .all(|pair| pair[0].frame < pair[1].frame)
+}
+
+pub fn evaluate_transform(base: Transform, keyframes: &[Keyframe], frame: u64) -> Transform {
+    let Some(first) = keyframes.first() else {
+        return base;
+    };
+    if frame <= first.frame {
+        return first.apply(base);
+    }
+    for pair in keyframes.windows(2) {
+        let [left, right] = pair else { unreachable!() };
+        if frame <= right.frame {
+            let t = (frame - left.frame) as f32 / (right.frame - left.frame) as f32;
+            let lerp = |a: f32, b: f32| a + (b - a) * t;
+            return Transform {
+                scale: lerp(left.scale, right.scale),
+                x: lerp(left.x, right.x),
+                y: lerp(left.y, right.y),
+                rotation: lerp(left.rotation, right.rotation),
+                opacity: lerp(left.opacity, right.opacity),
+                ..base
+            };
+        }
+    }
+    keyframes.last().unwrap().apply(base)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -207,6 +280,29 @@ impl Clip {
 }
 
 impl Clip {
+    pub fn keyframes_for_range(&self, offset: i128) -> Vec<Keyframe> {
+        if self.keyframes.is_empty() {
+            return Vec::new();
+        }
+        let mut keys = Vec::new();
+        if offset > 0 {
+            keys.push(Keyframe::new(
+                0,
+                evaluate_transform(self.transform, &self.keyframes, offset as u64),
+            ));
+        }
+        keys.extend(self.keyframes.iter().filter_map(|key| {
+            let frame = i128::from(key.frame) - offset;
+            (frame >= 0 && frame <= i128::from(u64::MAX) && (offset <= 0 || frame > 0)).then_some({
+                Keyframe {
+                    frame: frame as u64,
+                    ..*key
+                }
+            })
+        }));
+        keys
+    }
+
     pub fn source_frame_at(&self, offset: u64) -> Option<u64> {
         self.playback.source_frame_at_speed(
             self.source_start_frame,
@@ -267,6 +363,14 @@ fn zero(value: &u64) -> bool {
 }
 
 impl Clip {
+    pub fn transform_at(&self, timeline_frame: u64) -> Transform {
+        evaluate_transform(
+            self.transform,
+            &self.keyframes,
+            timeline_frame.saturating_sub(self.start_frame),
+        )
+    }
+
     pub(crate) fn clamp_fades(&mut self) {
         self.fade_in_frames = self.fade_in_frames.min(self.duration_frames);
         self.fade_out_frames = self
@@ -414,6 +518,41 @@ mod playback_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn animation_advances_for_reverse_and_freeze_and_survives_ranges() {
+        use super::*;
+        for playback in [Playback::Forward, Playback::Reverse, Playback::Freeze] {
+            let mut clip: Clip = serde_json::from_value(serde_json::json!({
+                "id":1,"start_frame":100,"source_start_frame":50,"duration_frames":30,
+                "content":{"media":{"media_id":1}},"volume":1.0,"muted":false
+            }))
+            .unwrap();
+            clip.playback = playback;
+            clip.keyframes = vec![
+                Keyframe::new(0, Transform::default()),
+                Keyframe::new(
+                    20,
+                    Transform {
+                        x: 1.0,
+                        opacity: 0.0,
+                        ..Default::default()
+                    },
+                ),
+            ];
+            let middle = clip.transform_at(110);
+            assert_eq!((middle.x, middle.opacity), (0.5, 0.5));
+            let mut right = clip.clone();
+            right.keyframes = clip.keyframes_for_range(10);
+            right.source_start_frame = clip.source_start_for_range(10, 20).unwrap();
+            right.start_frame = 110;
+            right.duration_frames = 20;
+            assert_eq!(right.transform_at(110), middle);
+            assert_eq!(right.transform_at(115), clip.transform_at(115));
+            right.keyframes = right.keyframes_for_range(-5);
+            right.start_frame = 105;
+            assert_eq!(right.transform_at(115), clip.transform_at(115));
+        }
+    }
     use super::*;
 
     #[test]

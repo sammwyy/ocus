@@ -170,6 +170,7 @@ pub fn track(project: &Project, cues: &[Cue]) -> Result<Track, String> {
         id = id.checked_add(1).ok_or("No clip IDs available")?;
         let (text, parse_html) = markup(&cue.text);
         clips.push(Clip {
+            keyframes: Vec::new(),
             speed: 1.0,
             playback: crate::timeline::Playback::Forward,
             transform: Default::default(),

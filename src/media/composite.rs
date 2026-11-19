@@ -111,6 +111,7 @@ impl VisualPlan {
                                 start: clip.start_frame,
                                 source_start: clip.source_start_frame,
                                 duration: clip.duration_frames,
+                                keyframes: clip.keyframes.clone(),
                                 transform: clip.transform,
                             }))
                         }
@@ -268,7 +269,8 @@ impl Compositor {
                             source.color,
                         );
                         let image = apply_lut(&mut self.luts, source, image)?;
-                        let opaque = source.transform.is_identity()
+                        let transform = source.transform_at(position);
+                        let opaque = transform.is_identity()
                             && image.width == self.width
                             && image.height == self.height
                             && image.pixels.len() == pixels.len()
@@ -278,7 +280,7 @@ impl Compositor {
                                 .0
                                 .iter()
                                 .all(|pixel| pixel[3] == 255);
-                        pending.push(Layer::Media(image, source.transform));
+                        pending.push(Layer::Media(image, transform));
                         if opaque {
                             break 'layers;
                         }
@@ -355,8 +357,9 @@ impl Compositor {
                     source.color,
                 );
                 let image = apply_lut(&mut self.luts, source, image)?;
-                if !source.transform.is_identity() {
-                    draw_transformed(pixels, self.width, self.height, &image, source.transform);
+                let transform = source.transform_at(position);
+                if !transform.is_identity() {
+                    draw_transformed(pixels, self.width, self.height, &image, transform);
                     return Ok(());
                 }
                 for (dest, src) in pixels
@@ -941,6 +944,7 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         assert!(crate::media::proxy::generate(&path, &cancelled).unwrap());
         let source = FrameSource {
+            keyframes: Vec::new(),
             speed: 1.0,
             playback: crate::timeline::Playback::Forward,
             clip_id: 1,
@@ -1048,6 +1052,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 30,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             })]],
         };
@@ -1152,6 +1157,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 10,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             })]],
         };
@@ -1188,6 +1194,59 @@ mod tests {
     }
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn keyframed_opacity_and_position_change_composed_frames() {
+        use crate::timeline::Keyframe;
+        ffmpeg_next::init().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("animated.tga");
+        let mut tga = vec![0; 18];
+        tga[2] = 2;
+        tga[12..14].copy_from_slice(&4u16.to_le_bytes());
+        tga[14..16].copy_from_slice(&2u16.to_le_bytes());
+        tga[16] = 32;
+        tga[17] = 40;
+        tga.extend([0, 0, 200, 255].repeat(8));
+        fs::write(&path, tga).unwrap();
+        let source = FrameSource {
+            playback: crate::timeline::Playback::Forward,
+            path,
+            clip_id: 1,
+            kind: MediaKind::Image,
+            start: 0,
+            source_start: 20,
+            speed: 1.0,
+            duration: 11,
+            color: Default::default(),
+            lut: None,
+            transform: Transform::default(),
+            keyframes: vec![
+                Keyframe::new(0, Transform::default()),
+                Keyframe::new(
+                    10,
+                    Transform {
+                        x: 0.5,
+                        opacity: 0.5,
+                        ..Default::default()
+                    },
+                ),
+            ],
+        };
+        let plan = VisualPlan {
+            resolution: (4, 2),
+            tracks: vec![vec![VisualClip::Media(source)]],
+            transitions: HashMap::new(),
+            transitions_out: HashMap::new(),
+        };
+        let mut compositor = Compositor::new(plan, 4, 2, (30, 1));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let first = compositor.frame(0, &cancelled).unwrap().unwrap();
+        let last = compositor.frame(10, &cancelled).unwrap().unwrap();
+        assert_eq!(&first.pixels[..4], &[200, 0, 0, 255]);
+        assert_eq!(&last.pixels[..4], &[0, 0, 0, 255]);
+        assert_eq!(&last.pixels[12..16], &[100, 0, 0, 255]);
+    }
 
     #[test]
     fn title_background_is_optional_alpha_blended_and_resolution_scaled() {
@@ -1526,6 +1585,7 @@ mod tests {
                 source_start: 0,
                 duration: 90,
                 color: Default::default(),
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             }
         };
@@ -1633,6 +1693,7 @@ mod tests {
         let lut_path = dir.path().join("invert.cube");
         fs::write(&lut_path, "LUT_1D_SIZE 2\n1 1 1\n0 0 0\n").unwrap();
         let source = FrameSource {
+            keyframes: Vec::new(),
             speed: 1.0,
             playback: crate::timeline::Playback::Forward,
             lut: Some(lut_path.clone()),
@@ -1732,6 +1793,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 10,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         let plan = VisualPlan {
@@ -1832,6 +1894,7 @@ mod tests {
                 start,
                 source_start: 0,
                 duration,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             })
         };
@@ -2132,6 +2195,7 @@ mod tests {
                     start: 0,
                     source_start: 0,
                     duration: 2,
+                    keyframes: Vec::new(),
                     transform: Transform::default(),
                 }),
                 VisualClip::Media(FrameSource {
@@ -2145,6 +2209,7 @@ mod tests {
                     start: 2,
                     source_start: 0,
                     duration: 5,
+                    keyframes: Vec::new(),
                     transform: Transform::default(),
                 }),
             ]],
@@ -2458,6 +2523,7 @@ mod tests {
             tga.extend([color[2], color[1], color[0], color[3]].repeat(8));
             fs::write(&path, tga).unwrap();
             VisualClip::Media(FrameSource {
+                keyframes: Vec::new(),
                 speed: 1.0,
                 playback: Playback::Forward,
                 clip_id,
@@ -2550,6 +2616,7 @@ mod tests {
                 start,
                 source_start: 0,
                 duration,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             })
         };
@@ -2760,6 +2827,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 300,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             })]],
         };
@@ -2814,6 +2882,7 @@ mod tests {
                     start: 0,
                     source_start: 0,
                     duration: frames,
+                    keyframes: Vec::new(),
                     transform: Transform::default(),
                 })]],
             };
@@ -2915,6 +2984,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 3,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             })
         };
@@ -3134,6 +3204,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 3,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             })
         };

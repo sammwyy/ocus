@@ -127,7 +127,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [x] Import SRT files
 - [x] Subtitle styling (font, color, outline, background, position)
 - [x] Burn subtitles into the exported video
-- [ ] Basic keyframes for position, scale, rotation and opacity
+- [x] Basic keyframes for position, scale, rotation and opacity
 
 ### v0.8: Performance and safety
 - [x] Hardware accelerated encoding and decoding (NVENC, VAAPI, VideoToolbox)

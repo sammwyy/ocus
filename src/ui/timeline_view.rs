@@ -23,6 +23,37 @@ const LANE_GAP: f32 = 3.0;
 const MARKER_REACH: f32 = 6.0;
 const CLIP_HEADER: f32 = 17.0;
 
+fn paint_keyframe_marker(painter: &mut dyn Painter, x: f32, bounds: Rect) {
+    if bounds.width < 10.0 || bounds.height < 10.0 {
+        return;
+    }
+    let x = x.clamp(bounds.x + 5.0, bounds.x + bounds.width - 5.0);
+    let y = bounds.y + bounds.height - 10.0;
+    for (row, width) in [2.0, 4.0, 6.0, 8.0, 10.0, 10.0, 8.0, 6.0, 4.0, 2.0]
+        .into_iter()
+        .enumerate()
+    {
+        let rect = Rect {
+            x: x - width / 2.0,
+            y: y + row as f32,
+            width,
+            height: 1.0,
+        };
+        painter.fill_rect(rect, Color::rgb(24, 24, 28), 0.0);
+        if width > 2.0 {
+            painter.fill_rect(
+                Rect {
+                    x: rect.x + 1.0,
+                    width: width - 2.0,
+                    ..rect
+                },
+                Color::rgb(255, 232, 145),
+                0.0,
+            );
+        }
+    }
+}
+
 fn header_name(value: &str) -> String {
     let face = resolve("system-ui", FontWeight::Bold);
     let fits = |name: &str| {
@@ -66,6 +97,7 @@ impl ClipLook {
 }
 
 pub(super) struct LaneClip {
+    pub keyframes: Vec<u64>,
     pub playback: crate::timeline::Playback,
     pub transition_frames: u64,
     pub transition_out_frames: u64,
@@ -850,6 +882,12 @@ impl TimelineView {
                 );
             }
             _ => {}
+        }
+        for frame in &clip.keyframes {
+            let x = geometry.x(*frame);
+            if x >= left && x < right {
+                paint_keyframe_marker(painter, x, content);
+            }
         }
         for (frames, out) in [
             (clip.transition_frames, false),
@@ -1911,6 +1949,59 @@ impl Widget for TimelineView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct MarkerPainter(Vec<(Rect, Color)>);
+
+    impl Painter for MarkerPainter {
+        fn fill_rect(&mut self, rect: Rect, color: Color, _: f32) {
+            self.0.push((rect, color));
+        }
+
+        fn stroke_rect(&mut self, _: Rect, _: Color, _: f32, _: f32) {}
+
+        fn fill_text(&mut self, _: Rect, _: &str, _: Color, _: f32, _: TextAlign) {}
+    }
+
+    #[test]
+    fn filled_keyframe_markers_have_contrasting_outline_and_stay_inside_clip() {
+        let bounds = Rect {
+            x: 20.0,
+            y: 30.0,
+            width: 100.0,
+            height: 20.0,
+        };
+        for x in [20.0, 70.0, 119.0] {
+            let mut painter = MarkerPainter::default();
+            paint_keyframe_marker(&mut painter, x, bounds);
+            assert_eq!(painter.0.len(), 18);
+            assert_eq!(
+                painter
+                    .0
+                    .iter()
+                    .filter(|(_, color)| *color == Color::rgb(255, 232, 145))
+                    .count(),
+                8
+            );
+            for (rect, _) in painter.0 {
+                assert!(rect.x >= bounds.x && rect.x + rect.width <= bounds.x + bounds.width);
+                assert!(rect.y >= bounds.y && rect.y + rect.height <= bounds.y + bounds.height);
+            }
+        }
+        for (width, height) in [(0.0, 20.0), (9.0, 20.0), (100.0, 9.0)] {
+            let mut painter = MarkerPainter::default();
+            paint_keyframe_marker(
+                &mut painter,
+                20.0,
+                Rect {
+                    width,
+                    height,
+                    ..bounds
+                },
+            );
+            assert!(painter.0.is_empty());
+        }
+    }
 
     #[test]
     fn storyboard_visibility_excludes_subpixel_clips_and_hidden_lanes() {

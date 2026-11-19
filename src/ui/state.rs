@@ -976,8 +976,9 @@ impl UiState {
                     let frames: u64 = merged.iter().map(|(start, end)| end - start).sum();
                     let fps = self.frame_rate();
                     if self.edit(Command::RemoveSilences(merged)) {
+                        let part = if count == 1 { "part" } else { "parts" };
                         self.status.set(format!(
-                            "Removed {count} silent parts ({:.1} s)",
+                            "Removed {count} silent {part} ({:.1} s)",
                             frames as f64 * f64::from(fps.1) / f64::from(fps.0)
                         ));
                     }
@@ -4259,7 +4260,7 @@ mod tests {
             .collect();
         let revision = state.revision.peek();
         state.finish_silence_removal(revision, Ok(ranges));
-        assert!(state.status.peek().contains("Removed 1 silent parts"));
+        assert!(state.status.peek().contains("Removed 1 silent part ("));
         let edited = state.editor.borrow().project().tracks().to_vec();
         let clips: Vec<_> = edited.iter().flat_map(|track| &track.clips).collect();
         assert_eq!(clips.len(), 2);

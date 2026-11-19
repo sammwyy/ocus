@@ -1251,6 +1251,10 @@ fn stereo_samples(frame: &ffmpeg::frame::Audio, channels: u16) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::timeline::Transform;
+    use std::fs;
+
     #[test]
     fn silence_windows_threshold_padding_and_edges() {
         fn detect(parts: &[(f32, usize)]) -> Vec<(f64, f64)> {
@@ -1283,10 +1287,6 @@ mod tests {
         assert!(detect(&[]).is_empty());
         assert!(detect_silences(480, |_, _| Err("decode failed".into())).is_err());
     }
-
-    use super::*;
-    use crate::timeline::Transform;
-    use std::fs;
 
     #[test]
     fn finished_queue_drains_samples_pushed_after_an_empty_poll() {

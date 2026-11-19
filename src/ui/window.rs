@@ -3047,8 +3047,16 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         state,
                     )),
                     inline(with_help(
-                        secondary_button(None, "Remove silences", !state.busy.get(), state, UiState::remove_silences),
-                        Help::new("Remove pauses of at least half a second, keeping a little breathing room. Ripples unlocked tracks to keep picture and sound together."),
+                        secondary_button(
+                            None,
+                            "Remove silences",
+                            !state.busy.get(),
+                            state,
+                            UiState::remove_silences,
+                        ),
+                        Help::new(
+                            "Remove pauses of at least half a second, keeping a little breathing room. Ripples unlocked tracks to keep picture and sound together.",
+                        ),
                         state,
                     )),
                     fade_row(state, &clip, true),

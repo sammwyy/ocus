@@ -14,13 +14,25 @@ pub(crate) enum ThemeMode {
     Midnight,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Settings {
     pub theme: ThemeMode,
     pub accent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_export_directory: Option<PathBuf>,
+    pub hardware_acceleration: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            theme: ThemeMode::default(),
+            accent: None,
+            last_export_directory: None,
+            hardware_acceleration: true,
+        }
+    }
 }
 
 impl Settings {
@@ -169,6 +181,18 @@ mod tests {
         let settings: Settings = toml::from_str("theme = 'dark'\naccent = 'purple'").unwrap();
         assert_eq!(settings.last_export_directory, None);
         assert_eq!(settings.theme, ThemeMode::Dark);
+        assert!(settings.hardware_acceleration);
+    }
+
+    #[test]
+    fn software_only_preference_round_trips() {
+        let settings = Settings {
+            hardware_acceleration: false,
+            ..Settings::default()
+        };
+        let serialized = toml::to_string(&settings).unwrap();
+        assert!(serialized.contains("hardware_acceleration = false"));
+        assert_eq!(toml::from_str::<Settings>(&serialized).unwrap(), settings);
     }
 
     #[test]
@@ -225,6 +249,7 @@ mod tests {
             theme: ThemeMode::Light,
             accent: Some("orange".into()),
             last_export_directory: Some(directory.clone()),
+            ..Settings::default()
         };
         save(&path, &settings).unwrap();
         assert_eq!(load(&path).unwrap(), settings);

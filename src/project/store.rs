@@ -1,4 +1,6 @@
 use super::{Project, format};
+use crate::media::{Media, MediaKind};
+use crate::timeline::ClipContent;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
@@ -51,16 +53,33 @@ pub(super) fn migrate_media(project: &mut Project, path: Option<&Path>) -> io::R
         if info.kind != source.kind {
             continue;
         }
-        let original = source.clone();
-        let tracks = project.tracks.clone();
-        project.media[index].duration_us = info.duration_us;
-        project.media[index].has_audio = info.has_audio;
-        let count = project.repair_linked_audio();
-        if project.validate().is_ok() {
-            repaired += count;
-        } else {
-            project.media[index] = original;
-            project.tracks = tracks;
+        let replacement = Media {
+            duration_us: info.duration_us,
+            has_audio: info.has_audio,
+            ..source.clone()
+        };
+        let content = ClipContent::Media {
+            media_id: source.id,
+        };
+        if replacement.duration_us == Some(0)
+            || project.tracks.iter().any(|track| {
+                track.clips.iter().any(|clip| {
+                    clip.content == content
+                        && !project.media_clip_fits(&replacement, track.kind, clip)
+                })
+            })
+        {
+            continue;
+        }
+        let has_sound = replacement.kind == MediaKind::Video && replacement.has_audio;
+        project.media[index] = replacement;
+        if !has_sound {
+            for clip in project.tracks.iter_mut().flat_map(|track| &mut track.clips) {
+                if clip.content == content && clip.linked_audio {
+                    clip.linked_audio = false;
+                    repaired += 1;
+                }
+            }
         }
     }
     Ok(repaired)
@@ -197,6 +216,15 @@ mod tests {
         assert!(!loaded.media()[0].has_audio);
         assert!(!loaded.tracks()[0].clips[0].linked_audio);
         assert!(!Editor::new(loaded).is_dirty());
+        document["tracks"][2]["clips"] = document["tracks"][0]["clips"].clone();
+        document["tracks"][2]["clips"][0]["id"] = 2.into();
+        document["tracks"][2]["clips"][0]["linked_audio"] = false.into();
+        fs::write(&path, document.to_string()).unwrap();
+        let retained = load(&path).unwrap();
+        assert_eq!(retained.media()[0].duration_us, None);
+        assert!(retained.media()[0].has_audio);
+        assert!(retained.tracks()[0].clips[0].linked_audio);
+        document["tracks"][2]["clips"] = serde_json::json!([]);
         document["media"][0]["duration_us"] = 4_000_000.into();
         document["tracks"][0]["clips"][0]["duration_frames"] = 90.into();
         fs::write(&path, document.to_string()).unwrap();

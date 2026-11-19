@@ -443,9 +443,14 @@ impl Editor {
                 {
                     return None;
                 }
-                let linked_audio = self.project.tracks.iter().flat_map(|track| &track.clips)
-                    .filter(|clip| matches!(clip.content, ClipContent::Media { media_id } if media_id == media.id))
-                    .map(|clip| (clip.id, clip.linked_audio && media.kind == MediaKind::Video && media.has_audio))
+                let has_sound = media.kind == MediaKind::Video && media.has_audio;
+                let linked_audio = self
+                    .project
+                    .tracks
+                    .iter()
+                    .flat_map(|track| &track.clips)
+                    .filter(|clip| clip.content == ClipContent::Media { media_id: media.id })
+                    .map(|clip| (clip.id, clip.linked_audio && has_sound))
                     .collect();
                 self.execute(Command::RestoreMedia {
                     media,

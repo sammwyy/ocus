@@ -211,9 +211,14 @@ disk cache keys also include LUT file metadata. Media-bin thumbnails and source
 preview remain ungraded.
 
 Video-track media clips may store transform keyframes in clip-relative frames.
-Position, scale, rotation and opacity interpolate linearly, holding the first
-and last values outside their keyed range; crop remains static. Splits and trims
+Position, scale, rotation and opacity use the outgoing key's linear, hold or
+unit cubic-bezier easing. Hold keeps the left value until the next key.
+Bezier control coordinates must be finite, ordered on each axis and in the
+unit interval. The first and last values hold outside their keyed range;
+crop remains static. Splits and trims
 rebase keys, inserting an interpolated boundary key when trimming the start.
+Bezier segments are subdivided and normalized at new boundaries to preserve
+motion exactly. Linear easing is omitted from saved keys for compatibility.
 Moving a clip leaves keys unchanged. Speed changes keep timeline key offsets;
 shortening a clip replaces keys past its end with an interpolated final-frame
 key. Reverse and freeze affect the media only;

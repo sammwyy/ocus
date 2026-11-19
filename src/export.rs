@@ -3,6 +3,7 @@ pub mod presets;
 use crate::media::audio::{self, AudioPlan, AudioQueue};
 use crate::media::composite::{Compositor, VisualPlan};
 use crate::media::fitted_dimensions;
+use crate::media::hardware::{self, Backend};
 use crate::project::Project;
 use crate::project::export_settings::{
     AudioCodec, Container, EncodingSpeed, ExportSettings, VideoCodec,
@@ -188,87 +189,16 @@ fn render_video(
     );
     let time_base = ffmpeg::Rational(fps.denominator(), fps.numerator());
     let gif = settings.container == Container::Gif;
-    let (video_id, pixel) = if gif {
-        (ffmpeg::codec::Id::GIF, ffmpeg::format::Pixel::PAL8)
-    } else {
-        (
-            match settings.video_codec {
-                VideoCodec::H264 => ffmpeg::codec::Id::H264,
-                VideoCodec::Hevc => ffmpeg::codec::Id::HEVC,
-                VideoCodec::Vp9 => ffmpeg::codec::Id::VP9,
-            },
-            ffmpeg::format::Pixel::YUV420P,
-        )
-    };
-    let codec = ffmpeg::encoder::find(video_id)
-        .ok_or_else(|| format!("{video_id:?} encoder not available"))?;
-    let mut encoder = ffmpeg::codec::context::Context::new_with_codec(codec)
-        .encoder()
-        .video()
-        .map_err(|error| error.to_string())?;
-    encoder.set_width(settings.width);
-    encoder.set_height(settings.height);
-    encoder.set_format(pixel);
-    encoder.set_time_base(time_base);
-    encoder.set_frame_rate(Some(fps));
-    if !gif {
-        encoder.set_bit_rate(
-            settings
-                .video_quality
-                .map_or(settings.video_bitrate_kbps as usize * 1_000, |_| 0),
-        );
-    }
-    if output
+    let global_header = output
         .format()
         .flags()
-        .contains(ffmpeg::format::Flags::GLOBAL_HEADER)
-    {
-        encoder.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
-    }
-    let mut options = ffmpeg::Dictionary::new();
-    match (gif, settings.video_codec, settings.speed) {
-        (true, _, _) => {}
-        (false, VideoCodec::H264, speed) => options.set(
-            "preset",
-            match speed {
-                EncodingSpeed::Fast => "veryfast",
-                EncodingSpeed::Balanced => "medium",
-                EncodingSpeed::Quality => "slow",
-            },
-        ),
-        (false, VideoCodec::Hevc, speed) => options.set(
-            "preset",
-            match speed {
-                EncodingSpeed::Fast => "fast",
-                EncodingSpeed::Balanced => "medium",
-                EncodingSpeed::Quality => "slow",
-            },
-        ),
-        (false, VideoCodec::Vp9, speed) => {
-            options.set(
-                "deadline",
-                if speed == EncodingSpeed::Fast {
-                    "realtime"
-                } else {
-                    "good"
-                },
-            );
-            options.set(
-                "cpu-used",
-                match speed {
-                    EncodingSpeed::Fast => "6",
-                    EncodingSpeed::Balanced => "4",
-                    EncodingSpeed::Quality => "1",
-                },
-            );
-        }
-    }
-    if let Some(quality) = settings.video_quality.filter(|_| !gif) {
-        options.set("crf", &quality.to_string());
-    }
-    let encoder = encoder
-        .open_with(options)
-        .map_err(|error| error.to_string())?;
+        .contains(ffmpeg::format::Flags::GLOBAL_HEADER);
+    let VideoEncoder {
+        encoder,
+        codec,
+        pixel,
+        frames,
+    } = VideoEncoder::open(settings, time_base, global_header, hardware::enabled())?;
     let stream_index = {
         let mut stream = output
             .add_stream(codec)
@@ -290,6 +220,7 @@ fn render_video(
         .time_base();
     let mut muxer = Muxer {
         encoder,
+        frames,
         output,
         stream_index,
         output_base,
@@ -399,6 +330,204 @@ fn render_video(
         .map_err(|error| error.to_string())
 }
 
+struct VideoEncoder {
+    encoder: ffmpeg::encoder::video::Encoder,
+    codec: ffmpeg::Codec,
+    pixel: ffmpeg::format::Pixel,
+    frames: Option<hardware::Frames>,
+}
+
+impl VideoEncoder {
+    fn open(
+        settings: &ExportSettings,
+        time_base: ffmpeg::Rational,
+        global_header: bool,
+        accelerated: bool,
+    ) -> Result<Self, String> {
+        let gif = settings.container == Container::Gif;
+        if !gif && accelerated {
+            let opened = Backend::PLATFORM.iter().find_map(|&backend| {
+                let codec = ffmpeg::encoder::find_by_name(hardware_encoder(
+                    backend,
+                    settings.video_codec,
+                    settings.video_quality.is_some(),
+                )?)?;
+                Self::open_with(codec, Some(backend), settings, time_base, global_header).ok()
+            });
+            if let Some(opened) = opened {
+                return Ok(opened);
+            }
+        }
+        let id = if gif {
+            ffmpeg::codec::Id::GIF
+        } else {
+            match settings.video_codec {
+                VideoCodec::H264 => ffmpeg::codec::Id::H264,
+                VideoCodec::Hevc => ffmpeg::codec::Id::HEVC,
+                VideoCodec::Vp9 => ffmpeg::codec::Id::VP9,
+            }
+        };
+        let codec =
+            ffmpeg::encoder::find(id).ok_or_else(|| format!("{id:?} encoder not available"))?;
+        Self::open_with(codec, None, settings, time_base, global_header)
+    }
+
+    fn open_with(
+        codec: ffmpeg::Codec,
+        backend: Option<Backend>,
+        settings: &ExportSettings,
+        time_base: ffmpeg::Rational,
+        global_header: bool,
+    ) -> Result<Self, String> {
+        let gif = settings.container == Container::Gif;
+        let pixel = match backend {
+            _ if gif => ffmpeg::format::Pixel::PAL8,
+            Some(Backend::Vaapi) => ffmpeg::format::Pixel::NV12,
+            _ => ffmpeg::format::Pixel::YUV420P,
+        };
+        let mut encoder = ffmpeg::codec::context::Context::new_with_codec(codec)
+            .encoder()
+            .video()
+            .map_err(|error| error.to_string())?;
+        encoder.set_width(settings.width);
+        encoder.set_height(settings.height);
+        encoder.set_format(pixel);
+        encoder.set_time_base(time_base);
+        encoder.set_frame_rate(Some(ffmpeg::Rational(
+            time_base.denominator(),
+            time_base.numerator(),
+        )));
+        if !gif {
+            encoder.set_bit_rate(
+                settings
+                    .video_quality
+                    .map_or(settings.video_bitrate_kbps as usize * 1_000, |_| 0),
+            );
+        }
+        if global_header {
+            encoder.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
+        }
+        let frames = match backend {
+            Some(Backend::Vaapi) => {
+                let device =
+                    hardware::Device::get(Backend::Vaapi).ok_or("VAAPI device not available")?;
+                let frames = hardware::Frames::new(
+                    device,
+                    Backend::Vaapi,
+                    pixel,
+                    settings.width,
+                    settings.height,
+                )?;
+                encoder.set_format(Backend::Vaapi.pixel());
+                unsafe { (*encoder.as_mut_ptr()).hw_frames_ctx = frames.reference()? };
+                Some(frames)
+            }
+            _ => None,
+        };
+        let encoder = encoder
+            .open_with(encoder_options(settings, gif, backend))
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            encoder,
+            codec,
+            pixel,
+            frames,
+        })
+    }
+}
+
+fn hardware_encoder(backend: Backend, codec: VideoCodec, quality: bool) -> Option<&'static str> {
+    match (backend, codec) {
+        (Backend::Nvidia, VideoCodec::H264) => Some("h264_nvenc"),
+        (Backend::Nvidia, VideoCodec::Hevc) => Some("hevc_nvenc"),
+        (Backend::Vaapi, VideoCodec::H264) => Some("h264_vaapi"),
+        (Backend::Vaapi, VideoCodec::Hevc) => Some("hevc_vaapi"),
+        (Backend::Vaapi, VideoCodec::Vp9) => Some("vp9_vaapi"),
+        // VideoToolbox has no constant-quality mode on every Mac.
+        (Backend::VideoToolbox, VideoCodec::H264) if !quality => Some("h264_videotoolbox"),
+        (Backend::VideoToolbox, VideoCodec::Hevc) if !quality => Some("hevc_videotoolbox"),
+        _ => None,
+    }
+}
+
+fn encoder_options(
+    settings: &ExportSettings,
+    gif: bool,
+    backend: Option<Backend>,
+) -> ffmpeg::Dictionary<'static> {
+    let mut options = ffmpeg::Dictionary::new();
+    let speed = settings.speed;
+    let quality = settings.video_quality.filter(|_| !gif);
+    match (gif, backend, settings.video_codec) {
+        (true, _, _) => {}
+        (false, Some(Backend::Nvidia), _) => {
+            options.set(
+                "preset",
+                match speed {
+                    EncodingSpeed::Fast => "fast",
+                    EncodingSpeed::Balanced => "medium",
+                    EncodingSpeed::Quality => "slow",
+                },
+            );
+            if let Some(quality) = quality {
+                options.set("rc", "vbr");
+                options.set("cq", &quality.to_string());
+            }
+        }
+        (false, Some(Backend::Vaapi), _) => {
+            if let Some(quality) = quality {
+                options.set("rc_mode", "CQP");
+                options.set("qp", &quality.to_string());
+            }
+        }
+        (false, Some(Backend::VideoToolbox), _) => {
+            if speed == EncodingSpeed::Fast {
+                options.set("realtime", "1");
+            }
+        }
+        (false, None, VideoCodec::H264) => options.set(
+            "preset",
+            match speed {
+                EncodingSpeed::Fast => "veryfast",
+                EncodingSpeed::Balanced => "medium",
+                EncodingSpeed::Quality => "slow",
+            },
+        ),
+        (false, None, VideoCodec::Hevc) => options.set(
+            "preset",
+            match speed {
+                EncodingSpeed::Fast => "fast",
+                EncodingSpeed::Balanced => "medium",
+                EncodingSpeed::Quality => "slow",
+            },
+        ),
+        (false, None, VideoCodec::Vp9) => {
+            options.set(
+                "deadline",
+                if speed == EncodingSpeed::Fast {
+                    "realtime"
+                } else {
+                    "good"
+                },
+            );
+            options.set(
+                "cpu-used",
+                match speed {
+                    EncodingSpeed::Fast => "6",
+                    EncodingSpeed::Balanced => "4",
+                    EncodingSpeed::Quality => "1",
+                },
+            );
+        }
+    }
+    if backend.is_none()
+        && let Some(quality) = quality
+    {
+        options.set("crf", &quality.to_string());
+    }
+    options
+}
+
 fn gif_palette(
     settings: &ExportSettings,
     time_base: ffmpeg::Rational,
@@ -468,6 +597,7 @@ pub fn output_frames(end: u64, source: (u32, u32), target: (u32, u32)) -> Result
 
 struct Muxer {
     encoder: ffmpeg::encoder::video::Encoder,
+    frames: Option<hardware::Frames>,
     output: ffmpeg::format::context::Output,
     stream_index: usize,
     output_base: ffmpeg::Rational,
@@ -512,6 +642,10 @@ impl Muxer {
         frame.set_pts(Some(
             i64::try_from(position).map_err(|_| "Timeline is too long to export")?,
         ));
+        let frame = match &self.frames {
+            Some(frames) => frames.upload(&frame)?,
+            None => frame,
+        };
         self.encoder
             .send_frame(&frame)
             .map_err(|error| error.to_string())?;
@@ -808,6 +942,100 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
         println!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    mod hardware_encoding {
+        use crate::export::{Backend, VideoEncoder, encoder_options, hardware_encoder};
+        use crate::project::export_settings::{Container, ExportSettings, VideoCodec};
+        use ffmpeg_next as ffmpeg;
+
+        fn encoder_settings(codec: VideoCodec, container: Container) -> ExportSettings {
+            let mut settings = ExportSettings::for_project(
+                64,
+                36,
+                crate::project::FrameRate {
+                    numerator: 24,
+                    denominator: 1,
+                },
+            );
+            settings.video_codec = codec;
+            settings.container = container;
+            settings
+        }
+
+        #[test]
+        fn hardware_encoders_match_each_backend() {
+            let cases = [
+                (Backend::Nvidia, VideoCodec::H264, Some("h264_nvenc")),
+                (Backend::Nvidia, VideoCodec::Hevc, Some("hevc_nvenc")),
+                (Backend::Nvidia, VideoCodec::Vp9, None),
+                (Backend::Vaapi, VideoCodec::H264, Some("h264_vaapi")),
+                (Backend::Vaapi, VideoCodec::Hevc, Some("hevc_vaapi")),
+                (Backend::Vaapi, VideoCodec::Vp9, Some("vp9_vaapi")),
+                (
+                    Backend::VideoToolbox,
+                    VideoCodec::H264,
+                    Some("h264_videotoolbox"),
+                ),
+                (
+                    Backend::VideoToolbox,
+                    VideoCodec::Hevc,
+                    Some("hevc_videotoolbox"),
+                ),
+                (Backend::VideoToolbox, VideoCodec::Vp9, None),
+            ];
+            for (backend, codec, expected) in cases {
+                assert_eq!(hardware_encoder(backend, codec, false), expected);
+            }
+            assert_eq!(
+                hardware_encoder(Backend::VideoToolbox, VideoCodec::H264, true),
+                None
+            );
+            assert_eq!(
+                hardware_encoder(Backend::Nvidia, VideoCodec::H264, true),
+                Some("h264_nvenc")
+            );
+        }
+
+        #[test]
+        fn hardware_encoders_use_their_own_quality_options() {
+            let mut settings = encoder_settings(VideoCodec::H264, Container::Mp4);
+            settings.video_quality = Some(23);
+            let nvenc = encoder_options(&settings, false, Some(Backend::Nvidia));
+            assert_eq!(nvenc.get("cq"), Some("23"));
+            assert_eq!(nvenc.get("crf"), None);
+            let vaapi = encoder_options(&settings, false, Some(Backend::Vaapi));
+            assert_eq!(vaapi.get("qp"), Some("23"));
+            assert_eq!(vaapi.get("preset"), None);
+            let software = encoder_options(&settings, false, None);
+            assert_eq!(software.get("crf"), Some("23"));
+            assert_eq!(software.get("preset"), Some("veryfast"));
+        }
+
+        #[test]
+        fn encoder_falls_back_to_software_without_a_device() {
+            ffmpeg::init().unwrap();
+            let time_base = ffmpeg::Rational(1, 24);
+            let open = |settings: &ExportSettings, accelerated| {
+                VideoEncoder::open(settings, time_base, false, accelerated).unwrap()
+            };
+            let h264 = encoder_settings(VideoCodec::H264, Container::Mp4);
+            let software = open(&h264, false);
+            assert_eq!(software.codec.name(), "libx264");
+            assert!(software.frames.is_none());
+            let hardware = Backend::PLATFORM
+                .iter()
+                .filter(|backend| crate::media::hardware::Device::get(**backend).is_some())
+                .count();
+            let accelerated = open(&h264, true);
+            if hardware == 0 && Backend::PLATFORM != [Backend::VideoToolbox] {
+                assert_eq!(accelerated.codec.name(), "libx264");
+                assert_eq!(accelerated.pixel, ffmpeg::format::Pixel::YUV420P);
+            }
+            let gif = open(&encoder_settings(VideoCodec::H264, Container::Gif), true);
+            assert_eq!(gif.codec.name(), "gif");
+            assert!(gif.frames.is_none());
+        }
     }
 
     #[test]

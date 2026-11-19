@@ -69,7 +69,7 @@ enum DropAction {
         placement: (u64, u64),
     },
     Replace {
-        command: Command,
+        command: Box<Command>,
         selection: Vec<ClipRef>,
     },
     Nothing,
@@ -958,7 +958,7 @@ impl UiState {
                         ),
                         valid: true,
                         action: DropAction::Replace {
-                            command: Command::ReplaceTracks(plan.tracks),
+                            command: Box::new(Command::ReplaceTracks(plan.tracks)),
                             selection: plan.selection,
                         },
                     },
@@ -993,7 +993,7 @@ impl UiState {
                 self.insert_media_at(media_id, Some(placement));
             }
             DropAction::Replace { command, selection } => {
-                if self.edit(command) {
+                if self.edit(*command) {
                     self.select_clips(selection);
                 }
             }

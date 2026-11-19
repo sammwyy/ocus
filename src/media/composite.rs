@@ -76,7 +76,7 @@ impl VisualPlan {
         let tracks = project
             .tracks()
             .iter()
-            .filter(|track| track.kind == TrackKind::Video)
+            .filter(|track| track.kind == TrackKind::Video && !track.hidden)
             .map(|track| {
                 track
                     .clips
@@ -705,6 +705,28 @@ mod tests {
         }
     }
     static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn hidden_video_tracks_do_not_contribute_titles_or_decode_missing_media() {
+        let mut value = serde_json::to_value(Project::new("Hidden")).unwrap();
+        value["media"] = serde_json::json!([{"id":1,"path":"must-not-open.png","kind":"image","has_audio":false}]);
+        value["tracks"][0]["clips"] = serde_json::json!([{"id":1,"start_frame":0,"source_start_frame":0,"duration_frames":30,"content":{"media":{"media_id":1}},"volume":1.0,"muted":false}]);
+        value["tracks"][1]["clips"] = serde_json::json!([{"id":2,"start_frame":0,"source_start_frame":0,"duration_frames":30,"content":{"title":Title::default()},"volume":1.0,"muted":false}]);
+        value["tracks"][0]["hidden"] = true.into();
+        value["tracks"][1]["hidden"] = true.into();
+        let project: Project = serde_json::from_value(value.clone()).unwrap();
+        let plan = VisualPlan::from_project(&project);
+        assert!(plan.tracks.is_empty());
+        assert!(
+            Compositor::new(plan, 160, 90, (30, 1))
+                .frame(0, &Arc::new(AtomicBool::new(false)))
+                .unwrap()
+                .is_none()
+        );
+        value["tracks"][1]["hidden"] = false.into();
+        let project: Project = serde_json::from_value(value).unwrap();
+        assert_eq!(VisualPlan::from_project(&project).tracks.len(), 1);
+    }
 
     #[test]
     fn adjacent_video_continues_after_out_and_holds_at_source_eof() {

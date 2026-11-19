@@ -726,7 +726,7 @@ fn track_labels(project: &Project) -> Vec<(u64, String)> {
                 audio += 1;
                 format!("A{audio}")
             };
-            (track.id, label)
+            (track.id, track.display_name(&label))
         })
         .collect()
 }
@@ -869,6 +869,9 @@ fn program_layers<'a>(
     let mut lost_picture = None;
     let mut lost_sound = None;
     for track in project.tracks() {
+        if track.hidden {
+            continue;
+        }
         for clip in &track.clips {
             if clip.start_frame > frame || frame - clip.start_frame >= clip.duration_frames {
                 continue;
@@ -2005,7 +2008,7 @@ fn compatible_destinations(tracks: &[Track], track_id: u64, clip: &Clip) -> Vec<
     };
     tracks
         .iter()
-        .filter(|track| track.id != track_id && track.kind == source.kind)
+        .filter(|track| !track.locked && track.id != track_id && track.kind == source.kind)
         .map(|track| {
             let occupied = track.clips.iter().any(|other| {
                 clip.start_frame < other.start_frame.saturating_add(other.duration_frames)
@@ -2646,12 +2649,20 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
             track_id: track.id,
             kind: track.kind,
             label: label.clone(),
-            removable: project
+            locked: track.locked,
+            hidden: track.hidden,
+            base: project
                 .tracks()
                 .iter()
-                .filter(|other| other.kind == track.kind)
-                .count()
-                > 1,
+                .find(|other| other.kind == TrackKind::Video)
+                .is_some_and(|other| other.id == track.id),
+            removable: !track.locked
+                && project
+                    .tracks()
+                    .iter()
+                    .filter(|other| other.kind == track.kind)
+                    .count()
+                    > 1,
             clips: track
                 .clips
                 .iter()
@@ -3159,6 +3170,11 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
     );
 
     let lanes = timeline_lanes(state, project, fps);
+    for lane in &lanes {
+        for help in lane.toggle_help() {
+            help.register(state);
+        }
+    }
     let zoom = state.timeline_zoom.get();
     let span = state.visible_frames();
     let selected = !selection.is_empty();
@@ -3496,10 +3512,88 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 settings_modal(state, viewport)
             } else {
                 Box::new(Flex::row().size(0.0, 0.0)) as BoxedWidget
+            })
+            .child(if state.rename_track.get().is_some() {
+                rename_track_modal(state, viewport)
+            } else {
+                Box::new(Flex::row().size(0.0, 0.0)) as BoxedWidget
             }),
     );
     state.finish_tooltips();
     content
+}
+
+fn rename_track_modal(state: &UiState, viewport: Size) -> BoxedWidget {
+    let width = 380.0_f32.min((viewport.width - 24.0).max(200.0));
+    let height = 210.0;
+    let valid = crate::timeline::Track::valid_name(state.track_name.value().trim());
+    let submit = state.clone();
+    let close = state.clone();
+    Box::new(Layer {
+        style: Layer::at(0.0, 0.0, viewport.width, viewport.height),
+        on_click: Some(Rc::new(move || close.rename_track.set(None))),
+        children: vec![
+            Box::new(
+                Flex::row()
+                    .size(viewport.width, viewport.height)
+                    .background(Color::rgba(0, 0, 0, 180)),
+            ),
+            Box::new(Layer {
+                style: Layer::at(
+                    (viewport.width - width) / 2.0,
+                    (viewport.height - height) / 2.0,
+                    width,
+                    height,
+                ),
+                on_click: Some(Rc::new(|| {})),
+                children: vec![Box::new(
+                    Flex::column()
+                        .size(width, height)
+                        .padding(20.0)
+                        .gap(12.0)
+                        .background(panel_raised())
+                        .border(border(), 1.0)
+                        .corner_radius(12.0)
+                        .child(heading("Rename track", text_color(), 18.0))
+                        .child(text(
+                            "Up to 32 characters. Leave blank for V1 / A1.",
+                            muted(),
+                            11.0,
+                        ))
+                        .child(Box::new(
+                            TextInput::controlled(&state.track_name)
+                                .width(width - 40.0)
+                                .height(32.0)
+                                .on_submit(move || submit.apply_track_rename()),
+                        ))
+                        .child(text(
+                            if valid {
+                                ""
+                            } else {
+                                "Use 32 characters or fewer, without control characters."
+                            },
+                            TITLE,
+                            10.0,
+                        ))
+                        .child(Box::new(
+                            Flex::row()
+                                .gap(8.0)
+                                .child(spacer())
+                                .child(secondary_button(None, "Cancel", true, state, |s| {
+                                    s.rename_track.set(None)
+                                }))
+                                .child(secondary_button(
+                                    None,
+                                    "Rename",
+                                    valid,
+                                    state,
+                                    UiState::apply_track_rename,
+                                )),
+                        )),
+                )],
+            }),
+        ],
+    })
 }
 
 fn export_field(
@@ -4647,6 +4741,9 @@ mod tests {
         .map(|(id, kind)| Track {
             id: id as u64,
             kind,
+            name: String::new(),
+            locked: false,
+            hidden: false,
             clips: Vec::new(),
         })
         .collect::<Vec<_>>();
@@ -4673,6 +4770,9 @@ mod tests {
         let mut tracks = vec![Track {
             id: 0,
             kind: TrackKind::Video,
+            name: String::new(),
+            locked: false,
+            hidden: false,
             clips: Vec::new(),
         }];
         for (index, (start, duration)) in [(0, 10), (30, 10), (9, 2), (29, 2), (15, 5), (0, 40)]
@@ -4682,6 +4782,9 @@ mod tests {
             tracks.push(Track {
                 id: index as u64 + 1,
                 kind: TrackKind::Video,
+                name: String::new(),
+                locked: false,
+                hidden: false,
                 clips: vec![destination_clip(start, duration)],
             });
         }
@@ -5220,6 +5323,58 @@ mod tests {
             assert!(painter.labels.iter().any(|label| label == "Undo"));
             assert!(scene.hit_test(point).is_none());
         });
+    }
+
+    #[test]
+    fn track_toggle_hover_help_survives_window_rebuilds() {
+        for (width, height) in [(1280.0, 760.0), (2560.0, 1856.0)] {
+            let state = UiState::new();
+            for (track_id, hidden, locked, label) in [
+                (0, false, false, "Lock track"),
+                (0, false, true, "Unlock track"),
+                (0, false, false, "Hide track"),
+                (0, true, false, "Show track"),
+                (2, false, false, "Mute track"),
+                (2, true, false, "Unmute track"),
+            ] {
+                state.edit(Command::SetTrackHidden { track_id, hidden });
+                state.edit(Command::SetTrackLocked { track_id, locked });
+                render(&state, width, height);
+                let help = state.tooltip_controller((label, track_id));
+                creamui::reactive::with_context_scope(|| {
+                    creamui::reactive::provide_context(creamui::ThemeProvider::new(
+                        creamui::Theme::dark(),
+                    ));
+                    let viewport = Size { width, height };
+                    let mut painter = TestPainter::default();
+                    let scene =
+                        Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+                    let caption = if track_id == 0 { "V1" } else { "A1" };
+                    let header = painter
+                        .bounds
+                        .iter()
+                        .find(|(text, _)| text == caption)
+                        .unwrap()
+                        .1;
+                    let point = Point {
+                        x: state.timeline_rect.get().x
+                            + if matches!(label, "Lock track" | "Unlock track") {
+                                111.0
+                            } else {
+                                137.0
+                            },
+                        y: header.y + 9.0,
+                    };
+                    scene.hover_hit_test(point).unwrap().1(true);
+                });
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                render(&state, width, height);
+                let painter = render(&state, width, height);
+                assert!(help.visible(), "{label} at {width}×{height}");
+                assert!(painter.labels.iter().any(|text| text == label));
+                help.hover(false);
+            }
+        }
     }
 
     #[test]
@@ -6123,16 +6278,117 @@ mod tests {
         }
     }
 
+    #[test]
+    fn locked_lanes_refuse_pointer_and_marquee_selection() {
+        let state = UiState::new();
+        state.timeline_rect.set(TIMELINE);
+        assert!(state.add_title());
+        assert!(state.edit(Command::SetTrackLocked {
+            track_id: 0,
+            locked: true
+        }));
+        assert!(state.selected.peek().is_empty());
+        let timeline = view(&state);
+        press(&timeline, at(30.0), 50.0);
+        drag_to(&timeline, at(45.0), 50.0);
+        release(&timeline);
+        assert!(state.selected.peek().is_empty());
+        state.select_all();
+        assert!(state.selected.peek().is_empty());
+        assert!(state.editor.borrow().project().tracks()[0].locked);
+        assert_eq!(
+            state.editor.borrow().project().tracks()[0].clips[0].duration_frames,
+            90
+        );
+    }
+
+    #[test]
+    fn header_double_click_uses_local_coordinates_to_open_rename() {
+        let state = UiState::new();
+        state.timeline_rect.set(Rect {
+            x: 200.0,
+            y: 400.0,
+            ..TIMELINE
+        });
+        let timeline = view(&state);
+        let double_click = timeline.on_double_click_at().unwrap();
+        double_click(Point { x: 110.0, y: 45.0 });
+        assert!(state.rename_track.peek().is_none());
+        double_click(Point { x: 20.0, y: 45.0 });
+        assert_eq!(state.rename_track.peek(), Some(0));
+        state.track_name.set_value("x".repeat(33));
+        state.apply_track_rename();
+        assert_eq!(state.rename_track.peek(), Some(0));
+        assert!(state.editor.borrow().project().tracks()[0].name.is_empty());
+        state.track_name.set_value(" Picture ");
+        state.apply_track_rename();
+        assert!(state.rename_track.peek().is_none());
+        assert_eq!(state.editor.borrow().project().tracks()[0].name, "Picture");
+        state.undo();
+        assert!(state.editor.borrow().project().tracks()[0].name.is_empty());
+    }
+
+    #[test]
+    fn track_headers_ellipsize_names_and_keep_controls_in_bounds() {
+        let state = UiState::new();
+        assert!(state.edit(Command::RenameTrack {
+            track_id: 0,
+            name: "A very long but valid track name".into()
+        }));
+        for width in [680.0, 1000.0, 1280.0] {
+            let painter = render(&state, width, 760.0);
+            let (label, name) = painter
+                .bounds
+                .iter()
+                .find(|(label, _)| label.starts_with("A very"))
+                .unwrap();
+            assert!(label.ends_with('…'));
+            assert!(run_width(label, 12.0, "system-ui", true) <= name.width);
+            assert!(name.width <= super::super::timeline_view::HEADER_WIDTH - 100.0);
+            assert!(painter.labels.iter().any(|label| label == "BASE"));
+            creamui::reactive::with_context_scope(|| {
+                creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
+                    creamui::Theme::dark(),
+                ));
+                let mut timeline = view(&state);
+                let children = timeline.children();
+                assert_eq!(children.len(), 4);
+                for child in children {
+                    let layout = child.style().layout;
+                    assert_eq!(layout.size.width, Dimension::Length(50.0));
+                    let creamui::core::layout::LengthPercentageAuto::Length(x) = layout.inset.left
+                    else {
+                        panic!("header controls need an absolute x position");
+                    };
+                    assert!(x >= name.x);
+                    assert!(x + 50.0 <= super::super::timeline_view::HEADER_WIDTH - 30.0);
+                }
+            });
+        }
+        assert!(state.edit(Command::RenameTrack {
+            track_id: 0,
+            name: "W".repeat(32)
+        }));
+        let painter = render(&state, 680.0, 760.0);
+        let (label, name) = painter
+            .bounds
+            .iter()
+            .find(|(label, _)| label.starts_with("WW"))
+            .unwrap();
+        assert!(label.ends_with('…'));
+        assert!(run_width(label, 12.0, "system-ui", true) <= name.width);
+    }
+
     const TIMELINE: Rect = Rect {
         x: 0.0,
         y: 0.0,
-        width: 1128.0,
+        width: 1184.0,
         height: 240.0,
     };
 
     /// The timeline x for `frame` with a 1000 px wide, 300 frame view.
     fn at(frame: f32) -> f32 {
-        128.0 + frame * 1000.0 / 300.0
+        super::super::timeline_view::HEADER_WIDTH + frame * 1000.0 / 300.0
     }
 
     fn press(view: &TimelineView, x: f32, y: f32) {
@@ -6374,6 +6630,9 @@ mod tests {
                 track_id: 0,
                 kind: TrackKind::Video,
                 label: "V1".into(),
+                locked: false,
+                hidden: false,
+                base: true,
                 removable: false,
                 clips: vec![LaneClip {
                     transition_frames: 0,

@@ -1,7 +1,7 @@
 use super::UiState;
 use super::controls::{
-    AUDIO, Glyph, IMAGE, MARKER, MARKER_LINE, PLAYHEAD, STAGE, TITLE, VIDEO, accent, border,
-    draw_glyph, faint, fit, muted, panel, panel_raised, surface, text_color,
+    AUDIO, Glyph, Help, IMAGE, MARKER, MARKER_LINE, PLAYHEAD, STAGE, TITLE, VIDEO, accent, border,
+    draw_glyph, faint, fit, muted, panel, panel_raised, sized_icon_button, surface, text_color,
 };
 use super::edits::ClipRef;
 use super::interaction::Gesture;
@@ -10,16 +10,38 @@ use super::waveform::WaveformSlice;
 use crate::timeline::TrackKind;
 use creamui::core::layout::{Dimension, Style};
 use creamui::core::{Modifiers, Painter, Point, Rect, RgbaImage, TextAlign, Widget};
+use creamui::fonts::{FontWeight, LayoutSettings, cached_layout, resolve};
 use creamui::{Color, WheelInput};
 use std::rc::Rc;
 use std::sync::Arc;
 
-pub(super) const HEADER_WIDTH: f32 = 128.0;
+pub(super) const HEADER_WIDTH: f32 = 184.0;
 pub(super) const RULER_HEIGHT: f32 = 28.0;
 const LANE_GAP: f32 = 3.0;
 /// How close, in pixels, the pointer must be to a marker to pick it.
 const MARKER_REACH: f32 = 6.0;
 const CLIP_HEADER: f32 = 17.0;
+
+fn header_name(value: &str) -> String {
+    let face = resolve("system-ui", FontWeight::Bold);
+    let fits = |name: &str| {
+        cached_layout(&face, name, 12.0, &LayoutSettings::default())
+            .lines
+            .first()
+            .is_none_or(|line| line.width <= HEADER_WIDTH - 100.0)
+    };
+    let mut name = value.to_owned();
+    if fits(&name) {
+        return name;
+    }
+    while name.pop().is_some() {
+        let label = format!("{name}…");
+        if fits(&label) {
+            return label;
+        }
+    }
+    String::new()
+}
 /// Ctrl+wheel travel, in pixels, per zoom step.
 const ZOOM_TRAVEL: f32 = 24.0;
 
@@ -63,12 +85,33 @@ pub(super) struct Lane {
     pub track_id: u64,
     pub kind: TrackKind,
     pub label: String,
+    pub locked: bool,
+    pub hidden: bool,
+    pub base: bool,
     pub clips: Vec<LaneClip>,
     /// Another track of this kind exists, so this one may be deleted.
     pub removable: bool,
 }
 
 impl Lane {
+    pub(super) fn toggle_help(&self) -> [Help; 2] {
+        [
+            Help::new(if self.locked {
+                "Unlock track"
+            } else {
+                "Lock track"
+            })
+            .instance(self.track_id),
+            Help::new(match (self.kind, self.hidden) {
+                (TrackKind::Audio, true) => "Unmute track",
+                (TrackKind::Audio, false) => "Mute track",
+                (TrackKind::Video, true) => "Show track",
+                (TrackKind::Video, false) => "Hide track",
+            })
+            .instance(self.track_id),
+        ]
+    }
+
     fn linked(&self) -> bool {
         self.clips.iter().any(|clip| clip.linked_audio)
     }
@@ -405,6 +448,7 @@ impl TimelineView {
                     lane.track_id,
                     lane.clips
                         .iter()
+                        .filter(|_| !lane.locked)
                         .map(|clip| (clip.clip_id, clip.start, clip.duration))
                         .collect(),
                 )
@@ -522,66 +566,53 @@ impl TimelineView {
             height: header.height - strip,
             ..header
         };
-        let icon = Rect {
-            x: header.x + 12.0,
-            y: picture.y + (picture.height - 15.0) / 2.0,
-            width: 15.0,
-            height: 15.0,
-        };
-        draw_glyph(
-            painter,
-            if lane.kind == TrackKind::Video {
-                Glyph::Film
-            } else {
-                Glyph::Volume
-            },
-            icon,
-            color.mix(muted(), 0.4),
-        );
-        painter.fill_text_weight(
+        painter.fill_text_font(
             Rect {
-                x: icon.x + 22.0,
-                y: picture.y + picture.height / 2.0 - 14.0,
-                width: 40.0,
+                x: header.x + 12.0,
+                y: picture.y + 7.0,
+                width: HEADER_WIDTH - 100.0,
                 height: 15.0,
             },
-            &lane.label,
+            &header_name(&lane.label),
             text_color(),
             12.0,
             TextAlign::Start,
+            Some("system-ui"),
             true,
             false,
         );
-        if lane.kind == TrackKind::Video {
+        if lane.kind == TrackKind::Video && picture.height >= 38.0 {
             painter.fill_text(
                 Rect {
-                    x: header.x + 75.0,
-                    y: picture.y + picture.height / 2.0 - 13.0,
+                    x: header.x + 126.0,
+                    y: picture.y + 26.0,
                     width: 46.0,
-                    height: 13.0,
+                    height: 11.0,
                 },
-                if lane.label == "V1" { "BASE" } else { "ABOVE" },
+                if lane.base { "BASE" } else { "ABOVE" },
                 color.mix(muted(), 0.3),
                 9.0,
                 TextAlign::Start,
             );
         }
-        painter.fill_text(
-            Rect {
-                x: icon.x + 22.0,
-                y: picture.y + picture.height / 2.0,
-                width: HEADER_WIDTH - 50.0,
-                height: 13.0,
-            },
-            &match lane.clips.len() {
-                0 => "Empty".to_owned(),
-                1 => "1 clip".to_owned(),
-                count => format!("{count} clips"),
-            },
-            faint(),
-            10.0,
-            TextAlign::Start,
-        );
+        if picture.height >= 38.0 {
+            painter.fill_text(
+                Rect {
+                    x: header.x + 12.0,
+                    y: picture.y + 26.0,
+                    width: 58.0,
+                    height: 11.0,
+                },
+                &match lane.clips.len() {
+                    0 => "Empty".to_owned(),
+                    1 => "1 clip".to_owned(),
+                    count => format!("{count} clips"),
+                },
+                faint(),
+                10.0,
+                TextAlign::Start,
+            );
+        }
         if strip > 0.0 {
             let band = Rect {
                 y: picture.y + picture.height,
@@ -1216,6 +1247,84 @@ impl TimelineView {
 }
 
 impl Widget for TimelineView {
+    fn children(&mut self) -> Vec<creamui::core::BoxedWidget> {
+        let rect = self.state.timeline_rect.get();
+        let geometry = self.geometry(local(rect));
+        let mut children: Vec<creamui::core::BoxedWidget> = Vec::new();
+        for (lane, area) in self.lanes.iter().zip(&geometry.lanes) {
+            if area.y < RULER_HEIGHT || area.y + 27.0 > rect.height {
+                continue;
+            }
+            let id = lane.track_id;
+            let locked = lane.locked;
+            let hidden = lane.hidden;
+            let audio = lane.kind == TrackKind::Audio;
+            let [lock_help, visibility_help] = lane.toggle_help();
+            let lock = sized_icon_button(
+                Glyph::Lock,
+                lock_help,
+                22.0,
+                true,
+                locked,
+                &self.state,
+                move |state| {
+                    state.edit(crate::project::edit::Command::SetTrackLocked {
+                        track_id: id,
+                        locked: !locked,
+                    });
+                },
+            );
+            let visibility = sized_icon_button(
+                if audio {
+                    if hidden { Glyph::Mute } else { Glyph::Volume }
+                } else if hidden {
+                    Glyph::EyeOff
+                } else {
+                    Glyph::Eye
+                },
+                visibility_help,
+                22.0,
+                true,
+                hidden,
+                &self.state,
+                move |state| {
+                    state.edit(crate::project::edit::Command::SetTrackHidden {
+                        track_id: id,
+                        hidden: !hidden,
+                    });
+                },
+            );
+            children.push(Box::new(super::controls::Layer {
+                style: super::controls::Layer::at(100.0, area.y + 5.0, 50.0, 22.0),
+                on_click: None,
+                children: vec![Box::new(
+                    creamui::widgets::layout::Flex::row()
+                        .gap(4.0)
+                        .child(lock)
+                        .child(visibility),
+                )],
+            }));
+        }
+        children
+    }
+
+    fn on_double_click_at(&self) -> Option<Rc<dyn Fn(Point)>> {
+        let state = self.state.clone();
+        let weights = self.weights();
+        let ids: Vec<_> = self.lanes.iter().map(|lane| lane.track_id).collect();
+        let (start, span, scroll) = (self.start, self.span, self.scroll);
+        Some(Rc::new(move |point| {
+            let rect = state.timeline_rect.get();
+            let geometry = Geometry::new(local(rect), &weights, start, span, scroll);
+            if (12.0..HEADER_WIDTH - 100.0).contains(&point.x)
+                && let Some(index) = geometry.lane_at(point.y)
+                && point.y < geometry.lanes[index].y + 25.0
+            {
+                state.begin_track_rename(ids[index]);
+            }
+        }))
+    }
+
     fn style(&self) -> creamui::Style {
         Style {
             size: creamui::core::layout::Size {
@@ -1327,6 +1436,33 @@ impl Widget for TimelineView {
                     }
                 }
             }
+            if lane.hidden || lane.locked {
+                painter.fill_rect(
+                    Rect {
+                        x: geometry.left,
+                        width: geometry.width,
+                        ..*lane_rect
+                    },
+                    Color::rgba(10, 12, 15, 110),
+                    3.0,
+                );
+                if lane.locked {
+                    let mut x = geometry.left;
+                    while x < geometry.right() {
+                        painter.fill_rect(
+                            Rect {
+                                x,
+                                y: lane_rect.y + lane_rect.height - 3.0,
+                                width: 8.0,
+                                height: 2.0,
+                            },
+                            Color::rgba(180, 190, 200, 35),
+                            0.0,
+                        );
+                        x += 16.0;
+                    }
+                }
+            }
         }
         if geometry.add_track.y < geometry.bottom {
             self.paint_add_track(painter, geometry.add_track);
@@ -1381,6 +1517,7 @@ impl Widget for TimelineView {
     fn on_layout(&self, rect: Rect) -> bool {
         if self.state.timeline_rect.replace(rect) != rect {
             self.state.queue_storyboards();
+            return true;
         }
         false
     }

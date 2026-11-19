@@ -8212,6 +8212,7 @@ mod tests {
             let count = renders.clone();
             let reactive_state = state.clone();
             let _effect = creamui::reactive::create_effect(move || {
+                reactive_state.begin_tooltips();
                 let editor = reactive_state.editor.borrow();
                 let widget = inspector(&reactive_state, editor.project(), 300.0, false);
                 let mut painter = TestPainter::default();
@@ -8224,14 +8225,45 @@ mod tests {
                     &mut painter,
                 );
                 *observed.borrow_mut() = painter.labels;
+                reactive_state.finish_tooltips();
                 count.set(count.get() + 1);
             });
+            assert!(
+                state
+                    .tooltips
+                    .borrow()
+                    .contains_key(&("Remove keyframe at playhead", 0))
+            );
             let initial = renders.get();
             state.program.position.set(5);
             assert_eq!(renders.get(), initial + 1);
             assert!(labels.borrow().iter().any(|label| label == "25%"));
+            assert!(
+                state
+                    .tooltips
+                    .borrow()
+                    .contains_key(&("Add keyframe at playhead", 0))
+            );
+            assert!(
+                !state
+                    .tooltips
+                    .borrow()
+                    .contains_key(&("Remove keyframe at playhead", 0))
+            );
             state.seek(10);
             assert!(labels.borrow().iter().any(|label| label == "50%"));
+            assert!(
+                state
+                    .tooltips
+                    .borrow()
+                    .contains_key(&("Remove keyframe at playhead", 0))
+            );
+            assert!(
+                !state
+                    .tooltips
+                    .borrow()
+                    .contains_key(&("Add keyframe at playhead", 0))
+            );
             assert_eq!(
                 keyframe_offset(
                     &selected_clip(&state).unwrap().1,

@@ -810,6 +810,88 @@ impl UiState {
         });
     }
 
+    pub(super) fn normalize_loudness(&self) {
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let Some((track_id, clip_id)) = self.primary_clip() else {
+            return;
+        };
+        let editor = self.editor.borrow();
+        let project = editor.project();
+        let Some(track) = project.tracks().iter().find(|track| track.id == track_id) else {
+            return;
+        };
+        let Some(clip) = track.clips.iter().find(|clip| clip.id == clip_id).cloned() else {
+            return;
+        };
+        let ClipContent::Media { media_id } = clip.content else {
+            return;
+        };
+        let Some(media) = project.media().iter().find(|media| media.id == media_id) else {
+            return;
+        };
+        if !carries_sound(track.kind, &clip, media) {
+            return;
+        }
+        let path = media.path.clone();
+        let fps = self.frame_rate();
+        let revision = self.revision.peek();
+        drop(editor);
+        self.status.set("Analyzing clip loudness…".into());
+        let state = self.clone();
+        app.spawn_background(
+            move || audio::loudness(&path, clip.source_start_frame, clip.duration_frames, fps),
+            move |result| state.finish_normalization(revision, track_id, clip_id, result),
+        );
+    }
+
+    fn finish_normalization(
+        &self,
+        revision: u64,
+        track_id: u64,
+        clip_id: u64,
+        result: Result<audio::Loudness, String>,
+    ) {
+        if self.revision.peek() != revision {
+            return;
+        }
+        let muted = self
+            .editor
+            .borrow()
+            .project()
+            .tracks()
+            .iter()
+            .find(|track| track.id == track_id)
+            .and_then(|track| track.clips.iter().find(|clip| clip.id == clip_id))
+            .map(|clip| clip.muted);
+        let Some(muted) = muted else { return };
+        match result {
+            Ok(measurement) => {
+                let Some((volume, clamped)) = measurement.gain() else {
+                    self.status
+                        .set("Clip is silent or below the loudness gate; volume unchanged".into());
+                    return;
+                };
+                if self.edit(Command::SetClipAudio {
+                    track_id,
+                    clip_id,
+                    volume,
+                    muted,
+                }) {
+                    self.status.set(if clamped {
+                        "Raised to the maximum volume (+6 dB)".into()
+                    } else {
+                        "Loudness normalized (−14 LUFS target, −1 dB peak limit)".into()
+                    });
+                }
+            }
+            Err(error) => self
+                .status
+                .set(format!("Cannot normalize loudness: {error}")),
+        }
+    }
+
     pub fn edit(&self, command: Command) -> bool {
         if self.busy.peek() {
             return false;
@@ -3504,6 +3586,75 @@ mod tests {
         assert_eq!(media_frames(&media, (30, 1)), None);
         media.duration_us = None;
         assert_eq!(media_frames(&media, (30, 1)), Some(90));
+    }
+
+    #[test]
+    fn normalization_import_insert_is_undoable_and_ignores_stale_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("quiet.wav");
+        assert!(
+            std::process::Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=d=2:r=48000",
+                    "-af",
+                    "volume=0.25"
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (path, info, _) = inspect_source(&path).unwrap();
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: path.clone(),
+            kind: info.kind,
+            duration_us: info.duration_us,
+            has_audio: info.has_audio,
+        })));
+        state.insert_media_at(1, None).unwrap();
+        let (track_id, clip_id) = state.primary_clip().unwrap();
+        let volume = || {
+            state
+                .editor
+                .borrow()
+                .project()
+                .tracks()
+                .iter()
+                .find(|track| track.id == track_id)
+                .unwrap()
+                .clips[0]
+                .volume
+        };
+        let revision = state.revision.peek();
+        let measurement = audio::loudness(&path, 0, 60, (30, 1)).unwrap();
+        state.finish_normalization(revision, track_id, clip_id, Ok(measurement));
+        assert_eq!(volume(), 2.0);
+        assert!(state.status.peek().contains("maximum volume"));
+        state.undo();
+        assert_eq!(volume(), 1.0);
+        state.finish_normalization(revision, track_id, clip_id, Ok(measurement));
+        assert_eq!(volume(), 1.0);
+        let revision = state.revision.peek();
+        state.finish_normalization(
+            revision,
+            track_id,
+            clip_id,
+            Ok(audio::Loudness {
+                integrated: f64::NEG_INFINITY,
+                peak: 0.0,
+            }),
+        );
+        assert_eq!(volume(), 1.0);
+        assert!(state.status.peek().contains("silent"));
+        state.finish_normalization(revision, track_id, clip_id, Err("decode failed".into()));
+        assert!(state.status.peek().contains("decode failed"));
     }
 
     #[test]

@@ -67,6 +67,7 @@ impl ClipLook {
 
 pub(super) struct LaneClip {
     pub keyframes: Vec<u64>,
+    pub playback: crate::timeline::Playback,
     pub transition_frames: u64,
     pub transition_out_frames: u64,
     pub clip_id: u64,
@@ -920,7 +921,27 @@ impl TimelineView {
             base.mix(STAGE, if selected { 0.2 } else { 0.42 }),
             0.0,
         );
-        let label_space = body.width - 12.0;
+        let badge = match clip.playback {
+            crate::timeline::Playback::Forward => None,
+            crate::timeline::Playback::Reverse => Some(Glyph::Reverse),
+            crate::timeline::Playback::Freeze => Some(Glyph::Freeze),
+        }
+        .filter(|_| body.width >= 28.0);
+        if let Some(glyph) = badge {
+            draw_glyph(
+                painter,
+                glyph,
+                Rect {
+                    x: body.x + 5.0,
+                    y: body.y + 2.0,
+                    width: 14.0,
+                    height: 14.0,
+                },
+                text_color(),
+            );
+        }
+        let inset = if badge.is_some() { 24.0 } else { 6.0 };
+        let label_space = body.width - inset - 6.0;
         let duration = format!(
             "{:.1}s",
             clip.duration as f64 * f64::from(self.fps.1) / f64::from(self.fps.0.max(1))
@@ -928,7 +949,7 @@ impl TimelineView {
         let show_duration = label_space >= 120.0;
         painter.fill_text(
             Rect {
-                x: body.x + 6.0,
+                x: body.x + inset,
                 y: body.y + 1.0,
                 width: label_space.max(0.0),
                 height: CLIP_HEADER - 2.0,
@@ -971,7 +992,9 @@ impl TimelineView {
         } else {
             body
         };
-        if matches!(clip.look, ClipLook::Audio) || linked {
+        if clip.playback != crate::timeline::Playback::Freeze
+            && (matches!(clip.look, ClipLook::Audio) || linked)
+        {
             let sound = if linked {
                 Rect {
                     y: body.y + body.height,
@@ -1043,6 +1066,9 @@ impl TimelineView {
         sound: Rect,
         padding: f32,
     ) {
+        if clip.playback == crate::timeline::Playback::Freeze {
+            return;
+        }
         if let Some(waveform) = &clip.waveform {
             waveform.paint(
                 painter,
@@ -1093,6 +1119,11 @@ impl TimelineView {
         selected: bool,
     ) {
         painter.push_clip_rounded(sound, 4.0);
+        if clip.playback == crate::timeline::Playback::Freeze {
+            painter.fill_rect(sound, panel(), 0.0);
+            painter.pop_clip();
+            return;
+        }
         let tone = if clip.muted {
             0.82
         } else if selected {

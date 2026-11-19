@@ -9,7 +9,7 @@ use super::state::PlaybackMonitor;
 use super::timeline_view::{Geometry, Ghost, lane_weight};
 use crate::media::MediaKind;
 use crate::project::Command;
-use crate::timeline::{ClipContent, TrackKind};
+use crate::timeline::{ClipContent, Playback, TrackKind};
 use creamui::core::{Key, Modifiers, Point};
 use creamui::platform::Key as PlatformKey;
 use creamui::{Shortcut, ShortcutScope, WindowHandle};
@@ -98,6 +98,8 @@ pub(crate) enum Action {
     Paste,
     Duplicate,
     Split,
+    ReverseClip,
+    FreezeFrame,
     PlayPause,
     PlayPauseLastMonitor,
     StepBack,
@@ -149,6 +151,8 @@ const KEY_BINDINGS: &[(Key, bool, bool, Action)] = &[
     (Key::Char('d'), true, false, Action::Duplicate),
     (Key::Char('k'), true, false, Action::Split),
     (Key::Char('s'), false, false, Action::Split),
+    (Key::Char('r'), false, true, Action::ReverseClip),
+    (Key::Char('f'), false, true, Action::FreezeFrame),
     (Key::Char(' '), false, false, Action::PlayPauseLastMonitor),
     (Key::Char('k'), false, false, Action::PlayPause),
     (Key::Left, false, false, Action::StepBack),
@@ -210,6 +214,8 @@ impl Action {
             | Self::Paste
             | Self::Duplicate
             | Self::Split
+            | Self::ReverseClip
+            | Self::FreezeFrame
             | Self::AddTitle
             | Self::ToggleMarker => "Editing",
             Self::NudgeLeft | Self::NudgeRight | Self::ZoomIn | Self::ZoomOut => "Timeline",
@@ -232,6 +238,8 @@ impl Action {
             Self::Paste => "Paste",
             Self::Duplicate => "Duplicate",
             Self::Split => "Split at playhead",
+            Self::ReverseClip => "Reverse clip",
+            Self::FreezeFrame => "Add freeze frame",
             Self::PlayPause => "Play / pause",
             Self::PlayPauseLastMonitor => "Play / pause last used monitor",
             Self::StepBack => "Previous frame",
@@ -322,6 +330,119 @@ fn distance(a: Point, b: Point) -> f32 {
 }
 
 impl UiState {
+    pub(super) fn playback_reason(
+        &self,
+        target: ClipRef,
+        playback: Playback,
+    ) -> Option<&'static str> {
+        let editor = self.editor.borrow();
+        let project = editor.project();
+        let track = project.tracks().iter().find(|t| t.id == target.0)?;
+        if track.locked {
+            return Some("Unlock the track to change clip playback");
+        }
+        let clip = track.clips.iter().find(|c| c.id == target.1)?;
+        let ClipContent::Media { media_id } = clip.content else {
+            return Some("Titles use normal playback");
+        };
+        let media = project.media().iter().find(|m| m.id == media_id)?;
+        match playback {
+            Playback::Reverse if media.kind == MediaKind::Image => {
+                Some("Still images cannot be reversed")
+            }
+            Playback::Freeze if track.kind == TrackKind::Audio => {
+                Some("Audio clips cannot be frozen; select a video clip")
+            }
+            Playback::Freeze if media.kind != MediaKind::Video => {
+                Some("Still images already hold a single frame")
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn set_playback(&self, target: ClipRef, playback: Playback) {
+        if let Some(reason) = self.playback_reason(target, playback) {
+            self.status.set(reason.into());
+            return;
+        }
+        let same = self
+            .editor
+            .borrow()
+            .project()
+            .tracks()
+            .iter()
+            .find(|t| t.id == target.0)
+            .and_then(|t| t.clips.iter().find(|c| c.id == target.1))
+            .is_some_and(|c| c.playback == playback);
+        if !same {
+            self.edit(Command::SetPlayback {
+                track_id: target.0,
+                clip_id: target.1,
+                playback,
+            });
+        }
+    }
+
+    pub(super) fn reverse_clip(&self, target: ClipRef) {
+        let playback = self
+            .editor
+            .borrow()
+            .project()
+            .tracks()
+            .iter()
+            .find(|t| t.id == target.0)
+            .and_then(|t| t.clips.iter().find(|c| c.id == target.1))
+            .map(|c| c.playback);
+        if let Some(playback) = playback {
+            self.set_playback(
+                target,
+                if playback == Playback::Reverse {
+                    Playback::Forward
+                } else {
+                    Playback::Reverse
+                },
+            );
+        }
+    }
+
+    pub(super) fn can_freeze_frame(&self, target: ClipRef) -> bool {
+        if self.playback_reason(target, Playback::Freeze).is_some() {
+            return false;
+        }
+        let frame = self.program.position.peek();
+        self.editor
+            .borrow()
+            .project()
+            .tracks()
+            .iter()
+            .find(|t| t.id == target.0)
+            .and_then(|t| t.clips.iter().find(|c| c.id == target.1))
+            .is_some_and(|c| frame >= c.start_frame && frame - c.start_frame < c.duration_frames)
+    }
+
+    pub(super) fn freeze_frame(&self, target: ClipRef) {
+        if !self.can_freeze_frame(target) {
+            return;
+        }
+        let frame = self.program.position.peek();
+        let command =
+            crate::project::freeze_at(self.editor.borrow().project(), target.0, target.1, frame);
+        if let Some(command) = command {
+            let selected = if let Command::ReplaceTracks(tracks) = &command {
+                tracks
+                    .iter()
+                    .find(|t| t.id == target.0)
+                    .and_then(|t| t.clips.iter().find(|c| c.start_frame == frame))
+                    .map(|c| (target.0, c.id))
+            } else {
+                None
+            };
+            if self.edit(command) {
+                self.select_clip(selected);
+            }
+        }
+    }
+
     /// Wires window-level file drops, modifier tracking and shortcuts.
     pub(super) fn install_input(&self, window: &WindowHandle) {
         let state = self.clone();
@@ -429,6 +550,16 @@ impl UiState {
             Action::Paste if !busy => self.paste(None),
             Action::Duplicate if !busy => self.duplicate_selection(),
             Action::Split if !busy => self.split_at_playhead(),
+            Action::ReverseClip if !busy => {
+                if let Some(target) = self.primary_clip() {
+                    self.reverse_clip(target);
+                }
+            }
+            Action::FreezeFrame if !busy => {
+                if let Some(target) = self.primary_clip() {
+                    self.freeze_frame(target);
+                }
+            }
             Action::PlayPause => self.toggle_playback_monitor(if self.source.playing.peek() {
                 PlaybackMonitor::Source
             } else {
@@ -1023,6 +1154,8 @@ impl UiState {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum MenuCommand {
+    ReverseClip(ClipRef),
+    FreezeFrame(ClipRef),
     Action(Action),
     Seek(u64),
     PasteAt(u64),
@@ -1124,6 +1257,8 @@ impl UiState {
     pub fn run_menu(&self, command: MenuCommand) {
         self.close_menu();
         match command {
+            MenuCommand::ReverseClip(target) => self.reverse_clip(target),
+            MenuCommand::FreezeFrame(target) => self.freeze_frame(target),
             MenuCommand::Action(action) => self.run(action),
             MenuCommand::Seek(frame) => self.seek(frame),
             MenuCommand::PasteAt(frame) => self.paste(Some(frame)),
@@ -1552,6 +1687,20 @@ impl UiState {
                 MenuCommand::Action(Action::Split),
             )
             .enabled(!self.split_targets().is_empty()),
+            MenuEntry::new(
+                "Reverse clip",
+                Glyph::Reverse,
+                "Shift R",
+                MenuCommand::ReverseClip(clip),
+            )
+            .enabled(self.playback_reason(clip, Playback::Reverse).is_none()),
+            MenuEntry::new(
+                "Add freeze frame",
+                Glyph::Freeze,
+                "Shift F",
+                MenuCommand::FreezeFrame(clip),
+            )
+            .enabled(self.can_freeze_frame(clip)),
         ];
         if detachable {
             entries.push(MenuEntry::new(
@@ -1888,6 +2037,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id,
                 clip: Clip {
+                    playback: Playback::Forward,
                     transition_out: None,
                     id: track_id + 1,
                     lut: None,
@@ -1946,6 +2096,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 id: 1,
                 start_frame: 45,
@@ -2082,6 +2233,147 @@ mod tests {
         );
         assert_eq!(bound(Key::Char('k'), false, false), Some(Action::PlayPause));
         assert_eq!(bound(Key::Char('a'), true, false), Some(Action::SelectAll));
+        assert_eq!(
+            bound(Key::Char('r'), false, true),
+            Some(Action::ReverseClip)
+        );
+        assert_eq!(
+            bound(Key::Char('f'), false, true),
+            Some(Action::FreezeFrame)
+        );
+    }
+
+    #[test]
+    fn playback_actions_explain_and_preserve_locked_tracks() {
+        let state = UiState::new();
+        let source = tempfile::NamedTempFile::new().unwrap();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: source.path().into(),
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: true,
+        })));
+        state.insert_media(1);
+        let target = state.primary_clip().unwrap();
+        state.program.position.set(10);
+        assert!(state.edit(Command::SetTrackLocked {
+            track_id: target.0,
+            locked: true
+        }));
+        let before = state.editor.borrow().project().clone();
+        assert_eq!(
+            state.playback_reason(target, Playback::Reverse),
+            Some("Unlock the track to change clip playback")
+        );
+        assert!(!state.can_freeze_frame(target));
+        state.run(Action::ReverseClip);
+        state.run(Action::FreezeFrame);
+        assert_eq!(state.editor.borrow().project(), &before);
+    }
+
+    #[test]
+    fn playback_actions_toggle_freeze_at_playhead_and_undo() {
+        let state = UiState::new();
+        state.run(Action::ReverseClip);
+        state.run(Action::FreezeFrame);
+        let source = tempfile::NamedTempFile::new().unwrap();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: source.path().into(),
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: true,
+        })));
+        state.insert_media(1);
+        let original = state.editor.borrow().project().tracks()[0].clips[0].clone();
+        let target = (0, original.id);
+        let revision = state.revision.peek();
+        state.run(Action::ReverseClip);
+        assert_eq!(
+            state.editor.borrow().project().tracks()[0].clips[0].playback,
+            Playback::Reverse
+        );
+        assert!(state.revision.peek() > revision);
+        state.run(Action::ReverseClip);
+        assert_eq!(
+            state.editor.borrow().project().tracks()[0].clips[0],
+            original
+        );
+        state.run(Action::Undo);
+        assert_eq!(
+            state.editor.borrow().project().tracks()[0].clips[0].playback,
+            Playback::Reverse
+        );
+
+        state.program.position.set(original.duration_frames);
+        assert!(!state.can_freeze_frame(target));
+        let revision = state.revision.peek();
+        state.run(Action::FreezeFrame);
+        assert_eq!(state.revision.peek(), revision);
+        state.program.position.set(20);
+        assert!(state.can_freeze_frame(target));
+        state.run_menu(MenuCommand::FreezeFrame(target));
+        let clips = state.editor.borrow().project().tracks()[0].clips.clone();
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[0].playback, Playback::Reverse);
+        assert_eq!(clips[1].playback, Playback::Freeze);
+        assert_eq!(clips[1].start_frame, 20);
+        assert_eq!(clips[1].source_start_frame, original.duration_frames - 21);
+        assert_eq!(state.selected.peek(), vec![(0, clips[1].id)]);
+        state.run(Action::Undo);
+        assert_eq!(state.editor.borrow().project().tracks()[0].clips.len(), 1);
+        state.run(Action::Redo);
+        assert_eq!(state.editor.borrow().project().tracks()[0].clips, clips);
+
+        state.run(Action::Undo);
+        state.select_clip(Some(target));
+        state.program.position.set(0);
+        state.run(Action::FreezeFrame);
+        let clips = state.editor.borrow().project().tracks()[0].clips.clone();
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].playback, Playback::Freeze);
+        assert_eq!(clips[0].source_start_frame, original.duration_frames - 1);
+        state.run(Action::Undo);
+        assert_eq!(
+            state.editor.borrow().project().tracks()[0].clips[0].playback,
+            Playback::Reverse
+        );
+    }
+
+    #[test]
+    fn playback_actions_reject_stills_audio_freezes_and_titles() {
+        for kind in [MediaKind::Image, MediaKind::Audio] {
+            let state = UiState::new();
+            assert!(state.edit(Command::ImportMedia(Media {
+                id: 1,
+                path: "source".into(),
+                kind,
+                duration_us: (kind == MediaKind::Audio).then_some(2_000_000),
+                has_audio: kind == MediaKind::Audio,
+            })));
+            state.insert_media(1);
+            let target = state.primary_clip().unwrap();
+            assert!(state.playback_reason(target, Playback::Freeze).is_some());
+            assert!(!state.can_freeze_frame(target));
+            let revision = state.revision.peek();
+            state.run(Action::FreezeFrame);
+            assert_eq!(state.revision.peek(), revision);
+            if kind == MediaKind::Image {
+                state.run(Action::ReverseClip);
+                assert_eq!(state.revision.peek(), revision);
+                assert!(state.status.peek().contains("Still images"));
+            } else {
+                state.run(Action::ReverseClip);
+                assert!(state.revision.peek() > revision);
+            }
+        }
+        let state = UiState::new();
+        assert!(state.add_title());
+        let revision = state.revision.peek();
+        state.run(Action::ReverseClip);
+        state.run(Action::FreezeFrame);
+        assert_eq!(state.revision.peek(), revision);
     }
 
     #[test]
@@ -2098,6 +2390,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id,
                 clip: Clip {
+                    playback: crate::timeline::Playback::Forward,
                     lut: None,
                     id: clip_id,
                     start_frame: 0,
@@ -2161,6 +2454,7 @@ mod tests {
             has_audio: true,
         })));
         let detached = Clip {
+            playback: crate::timeline::Playback::Forward,
             lut: None,
             id: 1,
             start_frame: 0,
@@ -2435,6 +2729,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id,
                 clip: Clip {
+                    playback: crate::timeline::Playback::Forward,
                     lut: None,
                     id,
                     start_frame,

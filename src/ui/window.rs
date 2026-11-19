@@ -2,8 +2,8 @@ use super::controls::{
     AUDIO, DragOverlay, ExportMeter, Glyph, Help, IMAGE, Layer, PLAYHEAD, STAGE, Scrubber, TITLE,
     Thumb, VIDEO, ZoomSlider, accent, accent_button, background, border, chip, faint, fit, glyph,
     heading, icon_button, kind_color, list_row, media_item, menu_row, muted, panel, panel_raised,
-    play_button, secondary_button, segment, short_duration, sized_icon_button, surface,
-    surface_hover, text, text_color, timecode, tool_button, with_help,
+    play_button, playback_choice, secondary_button, segment, short_duration, sized_icon_button,
+    surface, surface_hover, text, text_color, timecode, tool_button, with_help,
 };
 use super::edits::ClipRef;
 use super::interaction::{Action, DragPayload, MenuState};
@@ -18,14 +18,13 @@ use super::{title_fonts, title_markup};
 use crate::export::queue::{Queue, Status as ExportStatus};
 use crate::media::audio::carries_sound;
 use crate::media::composite::title_outline_radius;
-use crate::media::preview::StoryboardKey;
 use crate::media::{Media, MediaKind};
 use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, VideoCodec};
 use crate::project::{Command, Project};
 use crate::settings::ThemeMode;
 use crate::timeline::{
-    Clip, ClipContent, ColorAdjust, SlideDirection, Title, Track, TrackKind, Transform, Transition,
-    TransitionKind,
+    Clip, ClipContent, ColorAdjust, Playback, SlideDirection, Title, Track, TrackKind, Transform,
+    Transition, TransitionKind,
 };
 use creamui::core::layout::{Dimension, Style};
 use creamui::core::{Painter, Point, Rect, TextAlign, Widget};
@@ -97,8 +96,8 @@ impl Widget for SourceWaveform {
             TextAlign::Start,
         );
         self.waveform.paint(painter, wave, wave, 1.0, AUDIO);
-        let progress =
-            (self.position as f64 / self.waveform.duration.max(1) as f64).clamp(0.0, 1.0);
+        let progress = (self.position as f64 / self.waveform.clip.duration_frames.max(1) as f64)
+            .clamp(0.0, 1.0);
         painter.fill_rect(
             Rect {
                 x: wave.x + (wave.width - 1.0) * progress as f32,
@@ -149,6 +148,44 @@ fn set_title_text(state: &UiState) {
     change_title(state, |title| title.text = state.title_text.peek());
 }
 
+fn playback_controls(state: &UiState, target: ClipRef, playback: Playback) -> BoxedWidget {
+    let mut choices = Flex::row()
+        .gap(2.0)
+        .padding(3.0)
+        .background(surface())
+        .corner_radius(7.0);
+    for (label, value, hint, shortcut) in [
+        ("Normal", Playback::Forward, "Play the clip forwards", None),
+        (
+            "Reverse",
+            Playback::Reverse,
+            "Play the clip backwards",
+            Some("Shift R"),
+        ),
+        (
+            "Freeze",
+            Playback::Freeze,
+            "Hold the first frame; audio is silent",
+            None,
+        ),
+    ] {
+        let reason = state.playback_reason(target, value);
+        let mut help = Help::new(reason.unwrap_or(hint));
+        if let Some(shortcut) = shortcut {
+            help = help.shortcut(shortcut);
+        }
+        choices = choices.child(playback_choice(
+            label,
+            help,
+            reason.is_none() && !state.busy.get(),
+            playback == value,
+            state,
+            move |state| state.set_playback(target, value),
+        ));
+    }
+    section("Playback", vec![Box::new(choices)])
+}
+
 fn adjust_timing(state: &UiState, source: bool, seconds: bool, increase: bool) {
     let Some((track_id, clip)) = selected_clip(state) else {
         return;
@@ -176,7 +213,13 @@ fn adjust_timing(state: &UiState, source: bool, seconds: bool, increase: bool) {
                 .find(|media| media.id == media_id)
                 .filter(|media| media.kind != MediaKind::Image)
                 .and_then(|media| media_frames(media, fps))
-                .map(|frames| frames.saturating_sub(clip.duration_frames))
+                .map(|frames| {
+                    frames.saturating_sub(if clip.playback == crate::timeline::Playback::Freeze {
+                        1
+                    } else {
+                        clip.duration_frames
+                    })
+                })
                 .unwrap_or(u64::MAX - clip.duration_frames),
             _ => return,
         };
@@ -594,7 +637,7 @@ fn set_clip_transform(state: &UiState, animated: bool, change: impl FnOnce(&mut 
     if let Some((track_id, clip)) = selected_clip(state) {
         let position = state.program.position.get();
         if animated && !clip.keyframes.is_empty() {
-            let Some(frame) = keyframe_source_frame(&clip, position) else {
+            let Some(frame) = keyframe_offset(&clip, position) else {
                 return;
             };
             let mut transform = clip.transform_at(position);
@@ -625,9 +668,28 @@ fn set_clip_transform(state: &UiState, animated: bool, change: impl FnOnce(&mut 
     }
 }
 
-fn keyframe_source_frame(clip: &Clip, position: u64) -> Option<u64> {
+fn keyframe_offset(clip: &Clip, position: u64) -> Option<u64> {
     (position >= clip.start_frame && position - clip.start_frame < clip.duration_frames)
-        .then(|| clip.source_start_frame + (position - clip.start_frame))
+        .then(|| position - clip.start_frame)
+}
+
+fn replace_clip_transform(state: &UiState, transform: Transform) {
+    let Some((track_id, selected)) = selected_clip(state) else {
+        return;
+    };
+    let mut tracks = state.editor.borrow().project().tracks().to_vec();
+    let Some(clip) = tracks
+        .iter_mut()
+        .find(|track| track.id == track_id)
+        .and_then(|track| track.clips.iter_mut().find(|clip| clip.id == selected.id))
+    else {
+        return;
+    };
+    clip.transform = transform;
+    clip.keyframes.clear();
+    if state.edit(Command::ReplaceTracks(tracks)) {
+        state.request_preview();
+    }
 }
 
 fn upsert_keyframe(
@@ -645,7 +707,7 @@ fn toggle_keyframe(state: &UiState) {
         return;
     };
     let position = state.program.position.get();
-    let Some(frame) = keyframe_source_frame(&clip, position) else {
+    let Some(frame) = keyframe_offset(&clip, position) else {
         return;
     };
     let mut keyframes = clip.keyframes.clone();
@@ -668,16 +730,65 @@ fn toggle_keyframe(state: &UiState) {
 }
 
 fn neighbouring_keyframe(clip: &Clip, position: u64, next: bool) -> Option<u64> {
-    let source = keyframe_source_frame(clip, position)?;
-    let mut frames = clip.keyframes.iter().map(|key| key.frame).filter(|frame| {
-        *frame >= clip.source_start_frame && *frame - clip.source_start_frame < clip.duration_frames
-    });
+    let source = keyframe_offset(clip, position)?;
+    let mut frames = clip
+        .keyframes
+        .iter()
+        .map(|key| key.frame)
+        .filter(|frame| *frame < clip.duration_frames);
     let frame = if next {
         frames.find(|frame| *frame > source)
     } else {
         frames.rfind(|frame| *frame < source)
     }?;
-    Some(clip.start_frame + (frame - clip.source_start_frame))
+    Some(clip.start_frame + frame)
+}
+
+fn picture_in_picture_section(state: &UiState, current: Transform, editable: bool) -> BoxedWidget {
+    let keyed = selected_clip(state).is_some_and(|(_, clip)| !clip.keyframes.is_empty());
+    const SCALE: f32 = 0.30;
+    const MARGIN: f32 = 0.04;
+    let offset = (1.0 - SCALE) / 2.0 - MARGIN;
+    let corners = [
+        ("Top left", -offset, -offset),
+        ("Top right", offset, -offset),
+        ("Bottom left", -offset, offset),
+        ("Bottom right", offset, offset),
+    ];
+    section(
+        "Picture-in-picture",
+        vec![
+            text(
+                "Replaces the transform and clears keyframes.",
+                muted(),
+                11.0,
+            ),
+            Box::new(
+                Grid::new().columns(2).gap(6.0).with_children(
+                    corners
+                        .into_iter()
+                        .map(|(label, x, y)| {
+                            let preset = Transform {
+                                scale: SCALE,
+                                x,
+                                y,
+                                ..Transform::default()
+                            };
+                            secondary_button(
+                                None,
+                                label,
+                                editable && (current != preset || keyed),
+                                state,
+                                move |s| {
+                                    replace_clip_transform(s, preset);
+                                },
+                            )
+                        })
+                        .collect(),
+                ),
+            ),
+        ],
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -698,7 +809,7 @@ fn transform_rows(state: &UiState, transform: Transform, inner: f32) -> Vec<Boxe
     let position = state.program.position.get();
     let inside = selected
         .as_ref()
-        .is_some_and(|clip| keyframe_source_frame(clip, position).is_some());
+        .is_some_and(|clip| keyframe_offset(clip, position).is_some());
     let keyed = selected
         .as_ref()
         .is_some_and(|clip| !clip.keyframes.is_empty());
@@ -805,7 +916,11 @@ fn transform_rows(state: &UiState, transform: Transform, inner: f32) -> Vec<Boxe
     ];
     let mut rows = Vec::new();
     let hint = if keyed {
-        format!("{} keyframes", selected.as_ref().unwrap().keyframes.len())
+        let count = selected.as_ref().unwrap().keyframes.len();
+        format!(
+            "{count} {}",
+            if count == 1 { "keyframe" } else { "keyframes" }
+        )
     } else {
         "No keyframes".into()
     };
@@ -839,7 +954,7 @@ fn transform_rows(state: &UiState, transform: Transform, inner: f32) -> Vec<Boxe
     };
     keys = keys.child(navigation(false));
     let at_key = selected.as_ref().is_some_and(|clip| {
-        keyframe_source_frame(clip, position)
+        keyframe_offset(clip, position)
             .is_some_and(|frame| clip.keyframes.iter().any(|key| key.frame == frame))
     });
     keys = keys.child(sized_icon_button(
@@ -906,9 +1021,11 @@ fn transform_rows(state: &UiState, transform: Transform, inner: f32) -> Vec<Boxe
     rows.push(inline(secondary_button(
         None,
         "Reset transform",
-        !transform.is_identity() && (!keyed || inside),
+        selected
+            .as_ref()
+            .is_some_and(|clip| !clip.transform.is_identity() || !clip.keyframes.is_empty()),
         state,
-        |state| set_clip_transform(state, true, |transform| *transform = Transform::default()),
+        |state| replace_clip_transform(state, Transform::default()),
     )));
     rows
 }
@@ -2522,11 +2639,8 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         subtitle = "Selection";
         rows.extend(selection_rows(state, project, inner));
     } else if let Some((track_id, clip)) = selected_clip(state) {
-        let track_kind = project
-            .tracks()
-            .iter()
-            .find(|track| track.id == track_id)
-            .map_or(TrackKind::Video, |track| track.kind);
+        let track = project.tracks().iter().find(|track| track.id == track_id);
+        let track_kind = track.map_or(TrackKind::Video, |track| track.kind);
         let media = match clip.content {
             ClipContent::Media { media_id } => {
                 project.media().iter().find(|media| media.id == media_id)
@@ -2552,7 +2666,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     .then(|| state.thumbnail_label(media))
                     .flatten(),
                 image: (track_kind == TrackKind::Video)
-                    .then(|| state.thumbnails.borrow().get(&media.path).cloned())
+                    .then(|| state.clip_thumbnail(&clip, media, fps))
                     .flatten(),
                 kind: if track_kind == TrackKind::Audio {
                     MediaKind::Audio
@@ -2571,6 +2685,9 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 .child(dot(color, 8.0))
                 .child(heading(fit(&name, inner - 20.0, 13.0), text_color(), 13.0)),
         ));
+        if track_kind == TrackKind::Video && matches!(clip.content, ClipContent::Media { .. }) {
+            rows.push(playback_controls(state, (track_id, clip.id), clip.playback));
+        }
         let mut timing = vec![
             property("Track", label_of(track_id)),
             property("Start", timecode(clip.start_frame, fps)),
@@ -2818,8 +2935,18 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     text("Color affects playback and export.", faint(), 10.0),
                 ],
             ));
+            rows.push(picture_in_picture_section(
+                state,
+                clip.transform,
+                !busy && track.is_some_and(|track| !track.locked),
+            ));
         }
-        if (track_kind == TrackKind::Audio || clip.linked_audio) && media.is_some() {
+        if clip.playback == Playback::Freeze {
+            rows.push(section(
+                "Audio",
+                vec![text("Frozen frames are silent", muted(), 11.0)],
+            ));
+        } else if (track_kind == TrackKind::Audio || clip.linked_audio) && media.is_some() {
             let volume = clip.volume;
             let audio_state = state.clone();
             rows.push(section(
@@ -2953,6 +3080,9 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     ),
                 ],
             ));
+        }
+        if track_kind == TrackKind::Audio && matches!(clip.content, ClipContent::Media { .. }) {
+            rows.push(playback_controls(state, (track_id, clip.id), clip.playback));
         }
         let destinations = compatible_destinations(project.tracks(), track_id, &clip);
         let mut move_buttons = Flex::row()
@@ -3302,13 +3432,11 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                         keyframes: clip
                             .keyframes
                             .iter()
-                            .filter(|key| {
-                                key.frame >= clip.source_start_frame
-                                    && key.frame - clip.source_start_frame < clip.duration_frames
-                            })
-                            .map(|key| clip.start_frame + (key.frame - clip.source_start_frame))
+                            .filter(|key| key.frame < clip.duration_frames)
+                            .map(|key| clip.start_frame + key.frame)
                             .collect(),
                         transition_frames,
+                        playback: clip.playback,
                         transition_out_frames,
                         clip_id: clip.id,
                         start: clip.start_frame,
@@ -3327,22 +3455,12 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                             (_, Some(media)) if media.kind == MediaKind::Image => ClipLook::Image,
                             _ => ClipLook::Video,
                         },
-                        images: media.filter(|_| video).and_then(|media| {
-                            state
-                                .storyboards
-                                .borrow()
-                                .get(&StoryboardKey {
-                                    path: media.path.clone(),
-                                    kind: media.kind,
-                                    source_start: clip.source_start_frame,
-                                    duration: clip.duration_frames,
-                                    fps,
-                                })
-                                .cloned()
-                        }),
+                        images: media
+                            .filter(|_| video)
+                            .and_then(|media| state.clip_storyboard(clip, media, fps)),
                         fallback: media
                             .filter(|_| video)
-                            .and_then(|media| state.thumbnails.borrow().get(&media.path).cloned()),
+                            .and_then(|media| state.clip_thumbnail(clip, media, fps)),
                         waveform: media
                             .filter(|media| {
                                 !state.missing_media.get().contains(&media.id)
@@ -3351,8 +3469,7 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                             .and_then(|media| state.waveform(&media.path))
                             .map(|peaks| WaveformSlice {
                                 peaks,
-                                start: clip.source_start_frame,
-                                duration: clip.duration_frames,
+                                clip: clip.clone(),
                                 fps,
                             }),
                         volume: clip.volume,
@@ -3732,8 +3849,26 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 Box::new(SourceWaveform {
                     waveform: WaveformSlice {
                         peaks,
-                        start: range.source_start,
-                        duration: range.duration,
+                        clip: Clip {
+                            keyframes: Vec::new(),
+                            transform: crate::timeline::Transform::default(),
+                            noise_reduction: false,
+                            lut: None,
+                            transition_out: None,
+                            color: Default::default(),
+                            id: 0,
+                            transition: None,
+                            start_frame: 0,
+                            source_start_frame: range.source_start,
+                            duration_frames: range.duration,
+                            content: ClipContent::Media { media_id: 0 },
+                            volume: 1.0,
+                            fade_in_frames: 0,
+                            fade_out_frames: 0,
+                            muted: false,
+                            linked_audio: false,
+                            playback: range.playback,
+                        },
                         fps,
                     },
                     position: source_position,
@@ -5824,11 +5959,16 @@ mod tests {
     }
 
     use super::*;
+    use crate::media::preview::{StoryboardKey, storyboard};
+    use crate::ui::state::clip_storyboard_key;
+    use crate::ui::timeline_view::RULER_HEIGHT;
     use creamui::core::{Painter, Point, Rect, Renderer, RgbaImage, TextAlign, Widget};
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
     fn destination_clip(start_frame: u64, duration_frames: u64) -> Clip {
         Clip {
+            playback: crate::timeline::Playback::Forward,
             lut: None,
             id: 10,
             start_frame,
@@ -5930,6 +6070,7 @@ mod tests {
         labels: Vec<String>,
         bounds: Vec<(String, Rect)>,
         images: Vec<Rect>,
+        image_ids: Vec<u64>,
         fills: Vec<(Rect, Color)>,
         strokes: Vec<(Rect, Color)>,
         text_colors: Vec<(String, Color)>,
@@ -5950,8 +6091,9 @@ mod tests {
             self.text_colors.push((text.to_owned(), color));
         }
 
-        fn draw_image(&mut self, rect: Rect, _: &RgbaImage, _: Option<Color>) {
+        fn draw_image(&mut self, rect: Rect, image: &RgbaImage, _: Option<Color>) {
             self.images.push(rect);
+            self.image_ids.push(image.id());
         }
     }
 
@@ -5965,6 +6107,284 @@ mod tests {
             Renderer::new().render(build(state, viewport), viewport, &mut painter);
         });
         painter
+    }
+
+    #[test]
+    fn clip_thumbnails_and_painted_filmstrips_follow_displayed_source_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frames.mkv");
+        assert!(
+            ProcessCommand::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "nullsrc=size=64x36:rate=30:duration=2,geq=lum=16+N*3:cb=128:cr=128",
+                    "-c:v",
+                    "ffv1",
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let state = UiState::new();
+        state.timeline_rect.set(TIMELINE);
+        let media = Media {
+            id: 1,
+            path,
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: true,
+        };
+        assert!(state.edit(Command::ImportMedia(media.clone())));
+        state.insert_media(1);
+        let target = state.primary_clip().unwrap();
+        assert!(state.edit(Command::Trim {
+            track_id: target.0,
+            clip_id: target.1,
+            start_frame: 0,
+            source_start_frame: 5,
+            duration_frames: 40
+        }));
+        let bin_image = Arc::new(RgbaImage::new(1, 1, vec![0, 0, 0, 255]).unwrap());
+        let lut = dir.path().join("invert.cube");
+        std::fs::write(&lut, "LUT_1D_SIZE 2\n1 1 1\n0 0 0\n").unwrap();
+        assert!(state.edit(Command::SetClipTransform {
+            track_id: target.0,
+            clip_id: target.1,
+            transform: Transform {
+                scale: 0.8,
+                rotation: 15.0,
+                x: 0.1,
+                opacity: 0.7,
+                crop_left: 0.1,
+                ..Default::default()
+            }
+        }));
+        assert!(state.edit(Command::SetClipColor {
+            track_id: target.0,
+            clip_id: target.1,
+            color: ColorAdjust {
+                brightness: 0.1,
+                ..Default::default()
+            }
+        }));
+        assert!(state.edit(Command::SetClipLut {
+            track_id: target.0,
+            clip_id: target.1,
+            path: Some(lut.clone())
+        }));
+        state
+            .thumbnails
+            .borrow_mut()
+            .insert(media.path.clone(), bin_image.clone());
+        for playback in [Playback::Forward, Playback::Reverse, Playback::Freeze] {
+            state.set_playback(target, playback);
+            let clip = selected_clip(&state).unwrap().1;
+            let key = clip_storyboard_key(&clip, &media, (30, 1)).unwrap();
+            assert!(
+                state.clip_thumbnail(&clip, &media, (30, 1)).is_none(),
+                "do not show source frame zero while loading"
+            );
+            let frames = storyboard(&key, Arc::new(AtomicBool::new(false)), false).unwrap();
+            let expected_frames: Vec<_> = [0, clip.duration_frames / 2, clip.duration_frames - 1]
+                .into_iter()
+                .map(|offset| clip.source_frame_at(offset).unwrap())
+                .collect();
+            for (index, frame) in frames.iter().enumerate() {
+                let expected = storyboard(
+                    &StoryboardKey {
+                        playback: Playback::Forward,
+                        source_start: expected_frames[index],
+                        duration: 1,
+                        ..key.clone()
+                    },
+                    Arc::new(AtomicBool::new(false)),
+                    false,
+                )
+                .unwrap();
+                assert_eq!(frame.pixels, expected[0].pixels);
+            }
+            let images: Vec<_> = frames
+                .into_iter()
+                .map(|frame| {
+                    Arc::new(RgbaImage::new(frame.width, frame.height, frame.pixels).unwrap())
+                })
+                .collect();
+            let first_id = images[0].id();
+            state.storyboards.borrow_mut().insert(key, Arc::new(images));
+            assert_eq!(
+                state.clip_thumbnail(&clip, &media, (30, 1)).unwrap().id(),
+                first_id
+            );
+            let mut inspector_painter = TestPainter::default();
+            creamui::reactive::with_context_scope(|| {
+                creamui::reactive::provide_context(creamui::ThemeProvider::new(
+                    creamui::Theme::dark(),
+                ));
+                let editor = state.editor.borrow();
+                Renderer::new().render(
+                    inspector(&state, editor.project(), 300.0, false),
+                    Size {
+                        width: 300.0,
+                        height: 2000.0,
+                    },
+                    &mut inspector_painter,
+                );
+            });
+            assert_eq!(inspector_painter.image_ids, vec![first_id]);
+            let mut timeline = view(&state);
+            timeline.span = 40;
+            let images = timeline.lanes[0].clips[0].images.as_ref().unwrap();
+            let mut painter = TestPainter::default();
+            timeline.paint(&mut painter, TIMELINE);
+            assert!(painter.image_ids.len() > 3);
+            assert!(!painter.image_ids.contains(&bin_image.id()));
+            let indices: Vec<_> = painter
+                .image_ids
+                .iter()
+                .map(|id| images.iter().position(|image| image.id() == *id).unwrap())
+                .collect();
+            assert!(indices.windows(2).all(|pair| pair[0] <= pair[1]));
+            if playback == Playback::Freeze {
+                assert!(painter.image_ids.iter().all(|id| *id == first_id));
+                assert!(
+                    inspector_painter
+                        .labels
+                        .iter()
+                        .any(|label| label == "Frozen frames are silent")
+                );
+                assert_eq!(
+                    inspector_painter
+                        .labels
+                        .iter()
+                        .filter(|label| *label == "100%")
+                        .count(),
+                    2
+                );
+                for label in ["Mute", "Detach audio to its own track"] {
+                    assert!(!inspector_painter.labels.iter().any(|text| text == label));
+                }
+                assert!(
+                    !painter
+                        .fills
+                        .iter()
+                        .any(|(rect, color)| rect.x >= 128.0 && *color == AUDIO.mix(panel(), 0.5))
+                );
+            }
+        }
+        let mut clip = selected_clip(&state).unwrap().1;
+        clip.playback = Playback::Forward;
+        clip.source_start_frame = 0;
+        clip.transform = Transform::default();
+        clip.color = Default::default();
+        clip.lut = None;
+        assert_eq!(
+            state.clip_thumbnail(&clip, &media, (30, 1)).unwrap().id(),
+            bin_image.id()
+        );
+        clip.color.brightness = 0.1;
+        assert!(state.clip_thumbnail(&clip, &media, (30, 1)).is_none());
+        clip.color = Default::default();
+        clip.transform.opacity = 0.5;
+        assert!(state.clip_thumbnail(&clip, &media, (30, 1)).is_none());
+        clip.transform = Transform::default();
+        clip.lut = Some(lut);
+        assert!(state.clip_thumbnail(&clip, &media, (30, 1)).is_none());
+        clip.duration_frames = 0;
+        assert!(state.clip_thumbnail(&clip, &media, (30, 1)).is_none());
+    }
+
+    #[test]
+    fn inspector_playback_choices_fit_small_and_large_widths() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "scene.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(10_000_000),
+            has_audio: true,
+        })));
+        state.insert_media(1);
+        let target = state.primary_clip().unwrap();
+        for playback in [Playback::Forward, Playback::Reverse, Playback::Freeze] {
+            state.set_playback(target, playback);
+            for width in [210.0, 360.0] {
+                let size = Size {
+                    width,
+                    height: 1000.0,
+                };
+                let mut painter = TestPainter::default();
+                creamui::reactive::with_context_scope(|| {
+                    creamui::reactive::provide_context(creamui::ThemeProvider::new(
+                        creamui::Theme::dark(),
+                    ));
+                    let editor = state.editor.borrow();
+                    Renderer::new().render(
+                        inspector(&state, editor.project(), width, false),
+                        size,
+                        &mut painter,
+                    );
+                });
+                for label in ["PLAYBACK", "Normal", "Reverse", "Freeze"] {
+                    let (_, rect) = painter
+                        .bounds
+                        .iter()
+                        .find(|(text, _)| text == label)
+                        .unwrap();
+                    assert!(
+                        rect.x >= 0.0 && rect.x + rect.width <= width,
+                        "{label}: {rect:?}"
+                    );
+                    assert!(
+                        rect.y >= 0.0 && rect.y + rect.height <= size.height,
+                        "{label}: {rect:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn timeline_playback_badges_fit_clip_headers_or_hide_when_too_narrow() {
+        let state = UiState::new();
+        state.timeline_rect.set(TIMELINE);
+        assert!(state.add_title());
+        let mut timeline = view(&state);
+        timeline.lanes[0].clips[0].name = "Clip".into();
+        for duration in [1, 12, 150] {
+            timeline.lanes[0].clips[0].duration = duration;
+            timeline.lanes[0].clips[0].playback = Playback::Forward;
+            let mut forward = TestPainter::default();
+            timeline.paint(&mut forward, TIMELINE);
+            for playback in [Playback::Reverse, Playback::Freeze] {
+                timeline.lanes[0].clips[0].playback = playback;
+                let mut painter = TestPainter::default();
+                timeline.paint(&mut painter, TIMELINE);
+                let added: Vec<_> = painter
+                    .fills
+                    .iter()
+                    .filter(|fill| !forward.fills.contains(fill))
+                    .collect();
+                if duration == 1 {
+                    assert!(added.is_empty());
+                } else {
+                    assert!(!added.is_empty());
+                    let x = at(0.0);
+                    let end = at(duration as f32);
+                    for (rect, _) in added {
+                        assert!(rect.x >= x && rect.x + rect.width <= end, "{rect:?}");
+                        assert!(
+                            rect.y >= RULER_HEIGHT && rect.y + rect.height <= RULER_HEIGHT + 20.0,
+                            "{rect:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -5982,7 +6402,7 @@ mod tests {
         let id = clip.id;
         assert!(state.edit(Command::InsertClip { track_id: 0, clip }));
         state.select_clip(Some((0, id)));
-        let painter = render(&state, 1280.0, 1600.0);
+        let painter = render(&state, 1280.0, 2600.0);
         for label in [
             "COLOR",
             "Brightness",
@@ -5998,7 +6418,7 @@ mod tests {
             color.contrast = 1.3;
             color.saturation = 0.0;
         });
-        let painter = render(&state, 1280.0, 1600.0);
+        let painter = render(&state, 1280.0, 2600.0);
         for label in ["+20", "130%", "0%"] {
             assert!(painter.labels.iter().any(|text| text == label), "{label}");
         }
@@ -6214,6 +6634,10 @@ mod tests {
             .next()
             .unwrap();
         let key = StoryboardKey {
+            transform_bits: StoryboardKey::transform_bits(crate::timeline::Transform::default()),
+            lut: None,
+            color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
+            playback: Playback::Forward,
             path,
             kind: MediaKind::Video,
             source_start: clip.source_start_frame,
@@ -7750,6 +8174,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 noise_reduction: false,
                 lut: None,
                 transition_out: None,
@@ -7777,6 +8202,44 @@ mod tests {
         let animated = selected_clip(&state).unwrap().1;
         assert_eq!(animated.keyframes.len(), 2);
         assert_eq!(animated.transform_at(5).x, 0.25);
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
+                creamui::Theme::dark(),
+            ));
+            let labels = Rc::new(std::cell::RefCell::new(Vec::new()));
+            let renders = Rc::new(std::cell::Cell::new(0));
+            let observed = labels.clone();
+            let count = renders.clone();
+            let reactive_state = state.clone();
+            let _effect = creamui::reactive::create_effect(move || {
+                let editor = reactive_state.editor.borrow();
+                let widget = inspector(&reactive_state, editor.project(), 300.0, false);
+                let mut painter = TestPainter::default();
+                Renderer::new().render(
+                    widget,
+                    Size {
+                        width: 300.0,
+                        height: 1900.0,
+                    },
+                    &mut painter,
+                );
+                *observed.borrow_mut() = painter.labels;
+                count.set(count.get() + 1);
+            });
+            let initial = renders.get();
+            state.program.position.set(5);
+            assert_eq!(renders.get(), initial + 1);
+            assert!(labels.borrow().iter().any(|label| label == "25%"));
+            state.seek(10);
+            assert!(labels.borrow().iter().any(|label| label == "50%"));
+            assert_eq!(
+                keyframe_offset(
+                    &selected_clip(&state).unwrap().1,
+                    state.program.position.peek()
+                ),
+                Some(10)
+            );
+        });
         assert_eq!(neighbouring_keyframe(&animated, 5, false), Some(0));
         assert_eq!(neighbouring_keyframe(&animated, 5, true), Some(10));
         set_clip_transform(&state, true, |transform| transform.opacity = 0.5);
@@ -7785,6 +8248,12 @@ mod tests {
         assert_eq!(selected_clip(&state).unwrap().1.transform.crop_left, 0.1);
         state.program.position.set(30);
         let before = selected_clip(&state).unwrap().1;
+        replace_clip_transform(&state, Transform::default());
+        let reset = selected_clip(&state).unwrap().1;
+        assert!(reset.keyframes.is_empty());
+        assert!(reset.transform.is_identity());
+        state.run(Action::Undo);
+        assert_eq!(selected_clip(&state).unwrap().1, before);
         toggle_keyframe(&state);
         set_clip_transform(&state, true, |transform| transform.scale = 2.0);
         assert_eq!(selected_clip(&state).unwrap().1, before);
@@ -7845,6 +8314,12 @@ mod tests {
                 .iter()
                 .any(|l| l == "TRANSFORM")
         );
+        assert!(
+            !render(&state, 1280.0, 1000.0)
+                .labels
+                .iter()
+                .any(|l| l == "PICTURE-IN-PICTURE")
+        );
         let title = selected_clip(&state).unwrap();
         assert!(!state.edit(Command::SetClipTransform {
             track_id: title.0,
@@ -7865,6 +8340,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id,
                 clip: Clip {
+                    playback: crate::timeline::Playback::Forward,
                     id: id + 100,
                     noise_reduction: false,
                     lut: None,
@@ -7892,6 +8368,13 @@ mod tests {
                     .any(|l| l == "TRANSFORM"),
                 kind == MediaKind::Video
             );
+            assert_eq!(
+                render(&state, 1280.0, 1950.0)
+                    .labels
+                    .iter()
+                    .any(|l| l == "PICTURE-IN-PICTURE"),
+                kind == MediaKind::Video
+            );
             if kind == MediaKind::Audio {
                 assert!(!state.edit(Command::SetClipTransform {
                     track_id,
@@ -7903,6 +8386,107 @@ mod tests {
                 }));
             }
         }
+    }
+
+    #[test]
+    fn picture_in_picture_presets_compose_in_each_corner_and_are_undoable() {
+        use crate::media::composite::{Compositor, VisualPlan};
+        use std::sync::atomic::AtomicBool;
+
+        let state = UiState::new();
+        let fixture = tempfile::tempdir().unwrap();
+        let previous = Transform {
+            rotation: 90.0,
+            crop_left: 0.25,
+            opacity: 0.5,
+            ..Transform::default()
+        };
+        for (track_id, rgb) in [(0, [255, 0, 0]), (1, [0, 255, 0])] {
+            let id = track_id + 1;
+            let path = fixture.path().join(format!("{id}.ppm"));
+            let mut ppm = b"P6\n100 50\n255\n".to_vec();
+            ppm.extend(rgb.repeat(100 * 50));
+            std::fs::write(&path, ppm).unwrap();
+            assert!(state.edit(Command::ImportMedia(Media {
+                id,
+                path,
+                kind: MediaKind::Image,
+                duration_us: None,
+                has_audio: false,
+            })));
+            assert!(state.edit(Command::InsertClip {
+                track_id,
+                clip: Clip {
+                    keyframes: Vec::new(),
+                    id,
+                    content: ClipContent::Media { media_id: id },
+                    transform: if track_id == 1 {
+                        previous
+                    } else {
+                        Transform::default()
+                    },
+                    ..destination_clip(0, 30)
+                },
+            }));
+        }
+        state.select_clip(Some((1, 2)));
+        toggle_keyframe(&state);
+        let keyed = selected_clip(&state).unwrap().1.keyframes;
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
+                creamui::Theme::dark(),
+            ));
+            for (label, x, y) in [
+                ("Top left", 4, 2),
+                ("Top right", 66, 2),
+                ("Bottom left", 4, 33),
+                ("Bottom right", 66, 33),
+            ] {
+                let mut painter = TestPainter::default();
+                let scene = Renderer::new().render(
+                    inspector(&state, state.editor.borrow().project(), 220.0, false),
+                    Size {
+                        width: 220.0,
+                        height: 1600.0,
+                    },
+                    &mut painter,
+                );
+                assert!(painter.labels.iter().any(|l| l == "PICTURE-IN-PICTURE"));
+                let (_, button) = painter.bounds.iter().find(|(l, _)| l == label).unwrap();
+                assert!(button.x >= 0.0 && button.x + button.width <= 220.0);
+                scene
+                    .hit_test(Point {
+                        x: button.x + button.width / 2.0,
+                        y: button.y + button.height / 2.0,
+                    })
+                    .unwrap()();
+
+                let transform = selected_clip(&state).unwrap().1.transform;
+                assert!(selected_clip(&state).unwrap().1.keyframes.is_empty());
+                assert_eq!(transform.scale, 0.3);
+                let plan = VisualPlan::from_project(state.editor.borrow().project());
+                let frame = Compositor::new(plan, 100, 50, (30, 1))
+                    .frame(0, &Arc::new(AtomicBool::new(false)))
+                    .unwrap()
+                    .unwrap();
+                for (index, pixel) in frame.pixels.as_chunks::<4>().0.iter().enumerate() {
+                    let overlay = (x..x + 30).contains(&(index % 100))
+                        && (y..y + 15).contains(&(index / 100));
+                    let expected = if overlay {
+                        [0, 255, 0, 255]
+                    } else {
+                        [255, 0, 0, 255]
+                    };
+                    assert_eq!(*pixel, expected, "{label}, pixel {index}");
+                }
+                state.run(Action::Undo);
+                assert_eq!(selected_clip(&state).unwrap().1.transform, previous);
+                assert_eq!(selected_clip(&state).unwrap().1.keyframes, keyed);
+                state.run(Action::Redo);
+                assert_eq!(selected_clip(&state).unwrap().1.transform, transform);
+                state.run(Action::Undo);
+            }
+        });
     }
 
     #[test]
@@ -8238,6 +8822,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 id: 1,
                 start_frame: 0,
@@ -8284,6 +8869,7 @@ mod tests {
                 removable: false,
                 clips: vec![LaneClip {
                     keyframes: Vec::new(),
+                    playback: Playback::Forward,
                     transition_frames: 0,
                     transition_out_frames: 0,
                     clip_id: 7,

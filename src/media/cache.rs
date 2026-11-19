@@ -78,13 +78,27 @@ fn storyboard_selected(
         MediaKind::Image => 1,
         MediaKind::Audio => 2,
     });
+    params.push(match request.playback {
+        crate::timeline::Playback::Forward => 0,
+        crate::timeline::Playback::Reverse => 1,
+        crate::timeline::Playback::Freeze => 2,
+    });
     params.extend(request.source_start.to_le_bytes());
     params.extend(request.duration.to_le_bytes());
     params.extend(request.fps.0.to_le_bytes());
     params.extend(request.fps.1.to_le_bytes());
-    let entry = root
-        .zip(key(&request.path, &params))
-        .map(|(root, key)| root.join("frames").join(key));
+    for channel in request.color_bits {
+        params.extend(channel.to_le_bytes());
+    }
+    for value in request.transform_bits {
+        params.extend(value.to_le_bytes());
+    }
+    let entry = root.and_then(|root| {
+        if let Some(lut) = &request.lut {
+            params.extend(key(lut, b"lut")?.as_bytes());
+        }
+        Some(root.join("frames").join(key(&request.path, &params)?))
+    });
     let expected = if request.kind == MediaKind::Image {
         1
     } else {
@@ -264,6 +278,10 @@ mod tests {
                 .success()
         );
         StoryboardKey {
+            transform_bits: StoryboardKey::transform_bits(crate::timeline::Transform::default()),
+            lut: None,
+            color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
+            playback: crate::timeline::Playback::Forward,
             path,
             kind: MediaKind::Video,
             source_start: 0,
@@ -327,6 +345,62 @@ mod tests {
             &cold,
             &storyboard_in(Some(&blocked), &request, cancel(false)).unwrap(),
         );
+    }
+
+    #[test]
+    fn storyboard_cache_separates_playback_directions_and_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = fixture(dir.path(), "64x36");
+        let root = dir.path().join("cache");
+        let lut = dir.path().join("invert.cube");
+        fs::write(&lut, "LUT_1D_SIZE 2\n1 1 1\n0 0 0\n").unwrap();
+        for graded in [false, true] {
+            request.color_bits = if graded {
+                [0.1f32, 0.6, 0.4]
+            } else {
+                [0.0f32, 1.0, 1.0]
+            }
+            .map(f32::to_bits);
+            request.lut = graded.then(|| lut.clone());
+            for playback in [
+                crate::timeline::Playback::Forward,
+                crate::timeline::Playback::Reverse,
+                crate::timeline::Playback::Freeze,
+            ] {
+                request.playback = playback;
+                let cold =
+                    super::super::preview::storyboard(&request, cancel(false), false).unwrap();
+                let cached = storyboard_in(Some(&root), &request, cancel(false)).unwrap();
+                same(&cold, &cached);
+                same(
+                    &cold,
+                    &storyboard_in(Some(&root), &request, cancel(false)).unwrap(),
+                );
+            }
+        }
+        assert_eq!(fs::read_dir(root.join("frames")).unwrap().count(), 6);
+        let before = storyboard_in(Some(&root), &request, cancel(false)).unwrap();
+        fs::write(&lut, "LUT_1D_SIZE 2\n0 0 0\n1 1 1\n# identity\n").unwrap();
+        let after = storyboard_in(Some(&root), &request, cancel(false)).unwrap();
+        assert_ne!(before[0].pixels, after[0].pixels);
+        assert_eq!(fs::read_dir(root.join("frames")).unwrap().count(), 7);
+        request.transform_bits = StoryboardKey::transform_bits(crate::timeline::Transform {
+            opacity: 0.0,
+            ..Default::default()
+        });
+        let hidden = storyboard_in(Some(&root), &request, cancel(false)).unwrap();
+        assert_ne!(after[0].pixels, hidden[0].pixels);
+        assert!(hidden.iter().all(|image| {
+            image
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == [0, 0, 0, 255])
+        }));
+        assert_eq!(fs::read_dir(root.join("frames")).unwrap().count(), 8);
+        fs::remove_file(&lut).unwrap();
+        assert!(storyboard_in(Some(&root), &request, cancel(false)).is_err());
     }
 
     #[test]

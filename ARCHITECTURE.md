@@ -147,7 +147,9 @@ an audio track. Context menus and the drag label are UI overlays drawn as
 absolutely positioned layers above the workspace. During playback
 `media/audio.rs` decodes each audible clip (linked audio on video tracks and
 any clip on audio tracks) to 48 kHz stereo and applies optional per-clip noise
-reduction on its worker before fades, volume, and mixing. `playback.rs` streams
+reduction on its worker before fades, volume, and mixing. Reverse audio feeds
+bounded, reversed PCM blocks into the same filter; frozen clips never create
+decoder or denoiser slots. `playback.rs` streams
 the mix through rodio to the default output device; video pacing follows the
 consumed-sample clock so picture and sound stay aligned, skipping late video frames instead of delaying
 the timeline when composition is slower than playback. Source preview decodes
@@ -185,13 +187,20 @@ and three 256-entry domain index/weight tables for per-pixel trilinear
 interpolation (1D LUTs use per-channel linear tables). Extreme lattice values
 use exact interpolation to avoid floating-point cancellation errors. Relative
 LUT paths resolve beside the project file, like media paths. Caches live only
-as long as the compositor. Alpha is unchanged. Source preview and thumbnails
-remain ungraded.
+as long as the compositor or storyboard worker. Alpha is unchanged. Clip
+filmstrips and Inspector thumbnails follow playback mapping and use the same
+color-then-LUT order, followed by the shared scale, position, rotation, crop,
+and opacity transform over black. Their cache keys include transform and color
+settings and LUT paths;
+disk cache keys also include LUT file metadata. Media-bin thumbnails and source
+preview remain ungraded.
 
-Video-track media clips may store transform keyframes in source-frame units.
+Video-track media clips may store transform keyframes in clip-relative frames.
 Position, scale, rotation and opacity interpolate linearly, holding the first
-and last values outside their keyed range; crop remains static. Source-frame
-coordinates preserve animation through splits, trims and moves. The optional
+and last values outside their keyed range; crop remains static. Splits and trims
+rebase keys, inserting an interpolated boundary key when trimming the start.
+Moving a clip leaves keys unchanged. Reverse and freeze affect the media only;
+transform animation continues along the clip's timeline. The optional
 keyframes field is omitted when empty, retaining version 1 compatibility.
 `SetClipKeyframes` validates and records each animation edit for undo/redo.
 Preview and export evaluate the same keyframes in the shared compositor,

@@ -327,6 +327,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 id: 1,
                 start_frame: 0,

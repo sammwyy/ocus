@@ -2,11 +2,12 @@ use super::edits::{self, ClipRef, CopiedClip};
 use super::interaction::{DragState, Gesture, MenuState};
 use crate::export::{self, ExportControl, presets};
 use crate::media::audio::{self, AudioPlan, AudioSource, Clock, Waveform, carries_sound};
+use crate::media::cache::{storyboard, thumbnail};
 use crate::media::composite::VisualPlan;
 use crate::media::preview::{
-    FrameImage, FrameSource, PreviewEvent, PreviewPlan, StoryboardKey, decode_sequence, storyboard,
+    FrameImage, FrameSource, PreviewEvent, PreviewPlan, StoryboardKey, decode_sequence,
 };
-use crate::media::{Media, MediaKind, MediaProbe, Thumbnail, probe, thumbnail};
+use crate::media::{Media, MediaKind, MediaProbe, Thumbnail, probe};
 use crate::playback::{self, Session};
 use crate::project::export_settings::{
     AudioCodec, Container, EncodingSpeed, ExportSettings, LastExport, VideoCodec,
@@ -113,7 +114,15 @@ pub(crate) const ZOOM_SECONDS: [u64; 16] = [
 ];
 const DEFAULT_ZOOM: usize = 5;
 
+/// An empty cached filmstrip marks a preview that could not be generated.
 pub(crate) type Storyboard = Arc<Vec<Arc<RgbaImage>>>;
+
+type InspectedSource = Result<ImportedSource, String>;
+
+enum ImportEvent {
+    Progress(usize, PathBuf),
+    Complete(Vec<(PathBuf, InspectedSource)>),
+}
 
 fn storyboard_requests(
     keys: &[(StoryboardKey, bool)],
@@ -171,23 +180,46 @@ pub(super) enum PlaybackMonitor {
     Source,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum PreviewState {
+    Ready,
+    Loading,
+    Failed(String),
+}
+
 /// One GPU preview surface with its own position and decode stream.
 #[derive(Clone)]
 pub(crate) struct Monitor {
     pub slot: GpuFrameSlot,
     pub playing: Signal<bool>,
     pub position: Signal<u64>,
+    pub(super) preview: Signal<PreviewState>,
+    failure_status: Rc<RefCell<Option<String>>>,
     cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
     serial: Rc<Cell<u64>>,
     audio: Rc<RefCell<Option<Session>>>,
 }
 
 impl Monitor {
+    fn begin_preview(&self, visual: bool) {
+        self.preview.set(if visual {
+            PreviewState::Loading
+        } else {
+            PreviewState::Ready
+        });
+    }
+
+    fn frame_ready(&self) {
+        self.preview.set(PreviewState::Ready);
+    }
+
     fn new() -> Self {
         Self {
             slot: GpuFrameSlot::new(),
             playing: Signal::new(false),
             position: Signal::new(0),
+            preview: Signal::new(PreviewState::Ready),
+            failure_status: Rc::new(RefCell::new(None)),
             cancel: Rc::new(RefCell::new(None)),
             serial: Rc::new(Cell::new(0)),
             audio: Rc::new(RefCell::new(None)),
@@ -256,11 +288,13 @@ pub(crate) struct UiState {
     pub media_filter: Signal<MediaFilter>,
     pub media_view: Signal<MediaView>,
     pub status: Signal<String>,
+    pub autosave_error: Signal<Option<String>>,
     pub dirty: Signal<bool>,
     pub busy: Signal<bool>,
     pub exporting: Signal<bool>,
     pub export_total: Signal<u64>,
     pub export_modal: Signal<bool>,
+    pub export_error: Signal<Option<String>>,
     pub export_page: Signal<ExportPage>,
     pub export_draft: Signal<ExportSettings>,
     pub export_preset: Signal<String>,
@@ -277,6 +311,7 @@ pub(crate) struct UiState {
     pub export_quality: TextController,
     pub export_scroll: ScrollController,
     pub thumbnails: Rc<RefCell<HashMap<PathBuf, Arc<RgbaImage>>>>,
+    pub thumbnail_loading: Signal<HashSet<PathBuf>>,
     pub storyboards: Rc<RefCell<HashMap<StoryboardKey, Storyboard>>>,
     waveforms: Waveforms,
     pub media_scroll: ScrollController,
@@ -413,11 +448,13 @@ impl UiState {
             media_filter: Signal::new(MediaFilter::All),
             media_view: Signal::new(MediaView::Grid),
             status: Signal::new("Ready · Project not saved".into()),
+            autosave_error: Signal::new(None),
             dirty: Signal::new(false),
             busy: Signal::new(false),
             exporting: Signal::new(false),
             export_total: Signal::new(0),
             export_modal: Signal::new(false),
+            export_error: Signal::new(None),
             export_page: Signal::new(ExportPage::Presets),
             export_draft: Signal::new(ExportSettings::for_project(
                 1920,
@@ -441,6 +478,7 @@ impl UiState {
             export_quality: TextController::default(),
             export_scroll: ScrollController::default(),
             thumbnails: Rc::new(RefCell::new(HashMap::new())),
+            thumbnail_loading: Signal::new(HashSet::new()),
             storyboards: Rc::new(RefCell::new(HashMap::new())),
             waveforms: Waveforms::default(),
             media_scroll: ScrollController::default(),
@@ -481,6 +519,21 @@ impl UiState {
 
     pub fn connect(&self, app: AppHandle) {
         *self.app.borrow_mut() = Some(app.clone());
+        if let Some(results) = self
+            .autosaver
+            .as_ref()
+            .and_then(|saver| saver.take_results())
+        {
+            let state = self.clone();
+            app.spawn_stream(
+                move |emit| {
+                    while let Ok(result) = results.recv() {
+                        emit(result);
+                    }
+                },
+                move |result| state.finish_autosave(result),
+            );
+        }
         if let Some(path) = presets::path() {
             let state = self.clone();
             app.spawn_background(
@@ -496,6 +549,31 @@ impl UiState {
                 },
             );
         }
+    }
+
+    fn finish_autosave(&self, result: Result<(), String>) {
+        self.autosave_error.set(
+            result
+                .err()
+                .map(|error| format!("Autosave failed: {error}")),
+        );
+    }
+
+    pub(super) fn show_file_error(&self, title: &'static str, reason: String) {
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        app.spawn_background(
+            move || {
+                MessageDialog::new()
+                    .set_level(MessageLevel::Error)
+                    .set_title(title)
+                    .set_description(reason)
+                    .set_buttons(MessageButtons::Ok)
+                    .show()
+            },
+            |_| {},
+        );
     }
 
     pub fn connect_window(&self, window: WindowHandle) {
@@ -515,12 +593,38 @@ impl UiState {
         let state = self.clone();
         app.spawn_background(
             move || {
-                let (snapshot, repaired) = recovery::read_with_repairs(&dir)?;
-                let missing = missing_sources(&snapshot.project);
-                Some((snapshot, missing, repaired))
+                recovery::read_with_repairs(&dir).map(|snapshot| {
+                    snapshot.map(|(snapshot, repaired)| {
+                        let missing = missing_sources(&snapshot.project);
+                        (snapshot, missing, repaired)
+                    })
+                })
             },
-            move |result| {
-                state.finish_recovery(revision, result);
+            move |result| match result {
+                Ok(snapshot) => state.finish_recovery(revision, snapshot),
+                Err(reason) => {
+                    state.status.set(format!("Recovery failed: {reason}"));
+                    if let Some(app) = state.app.borrow().clone() {
+                        let state = state.clone();
+                        app.spawn_background(
+                            move || {
+                                MessageDialog::new()
+                                    .set_level(MessageLevel::Warning)
+                                    .set_title("Could not recover unsaved work")
+                                    .set_description(format!(
+                                        "{reason}\nThe recovery file will be discarded."
+                                    ))
+                                    .set_buttons(MessageButtons::Ok)
+                                    .show()
+                            },
+                            move |_| {
+                                if !state.busy.peek() && state.revision.peek() == revision {
+                                    state.clear_recovery();
+                                }
+                            },
+                        );
+                    }
+                }
             },
         );
     }
@@ -711,6 +815,88 @@ impl UiState {
         });
     }
 
+    pub(super) fn normalize_loudness(&self) {
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let Some((track_id, clip_id)) = self.primary_clip() else {
+            return;
+        };
+        let editor = self.editor.borrow();
+        let project = editor.project();
+        let Some(track) = project.tracks().iter().find(|track| track.id == track_id) else {
+            return;
+        };
+        let Some(clip) = track.clips.iter().find(|clip| clip.id == clip_id).cloned() else {
+            return;
+        };
+        let ClipContent::Media { media_id } = clip.content else {
+            return;
+        };
+        let Some(media) = project.media().iter().find(|media| media.id == media_id) else {
+            return;
+        };
+        if !carries_sound(track.kind, &clip, media) {
+            return;
+        }
+        let path = media.path.clone();
+        let fps = self.frame_rate();
+        let revision = self.revision.peek();
+        drop(editor);
+        self.status.set("Analyzing clip loudness…".into());
+        let state = self.clone();
+        app.spawn_background(
+            move || audio::loudness(&path, clip.source_start_frame, clip.duration_frames, fps),
+            move |result| state.finish_normalization(revision, track_id, clip_id, result),
+        );
+    }
+
+    fn finish_normalization(
+        &self,
+        revision: u64,
+        track_id: u64,
+        clip_id: u64,
+        result: Result<audio::Loudness, String>,
+    ) {
+        if self.revision.peek() != revision {
+            return;
+        }
+        let muted = self
+            .editor
+            .borrow()
+            .project()
+            .tracks()
+            .iter()
+            .find(|track| track.id == track_id)
+            .and_then(|track| track.clips.iter().find(|clip| clip.id == clip_id))
+            .map(|clip| clip.muted);
+        let Some(muted) = muted else { return };
+        match result {
+            Ok(measurement) => {
+                let Some((volume, clamped)) = measurement.gain() else {
+                    self.status
+                        .set("Clip is silent or below the loudness gate; volume unchanged".into());
+                    return;
+                };
+                if self.edit(Command::SetClipAudio {
+                    track_id,
+                    clip_id,
+                    volume,
+                    muted,
+                }) {
+                    self.status.set(if clamped {
+                        "Raised to the maximum volume (+6 dB)".into()
+                    } else {
+                        "Loudness normalized (−14 LUFS target, −1 dB peak limit)".into()
+                    });
+                }
+            }
+            Err(error) => self
+                .status
+                .set(format!("Cannot normalize loudness: {error}")),
+        }
+    }
+
     pub fn edit(&self, command: Command) -> bool {
         if self.busy.peek() {
             return false;
@@ -885,7 +1071,9 @@ impl UiState {
         if self.program.playing.peek() {
             self.pause();
         }
-        if self.program.position.peek() != frame {
+        if self.program.position.peek() != frame
+            || matches!(self.program.preview.peek(), PreviewState::Failed(_))
+        {
             self.focus_frame(frame);
         }
     }
@@ -1197,7 +1385,9 @@ impl UiState {
     }
 
     pub fn seek_source(&self, frame: u64) {
-        if self.source.position.peek() == frame {
+        if self.source.position.peek() == frame
+            && !matches!(self.source.preview.peek(), PreviewState::Failed(_))
+        {
             return;
         }
         self.last_playback_monitor.set(PlaybackMonitor::Source);
@@ -1266,6 +1456,7 @@ impl UiState {
     }
 
     fn request_source_preview(&self) {
+        self.source.preview.set(PreviewState::Ready);
         if self
             .selected_media
             .peek()
@@ -1332,6 +1523,7 @@ impl UiState {
         follow_timeline: bool,
     ) {
         monitor.cancel();
+        monitor.preview.set(PreviewState::Ready);
         let Some(window) = self.window.borrow().clone() else {
             return;
         };
@@ -1350,6 +1542,15 @@ impl UiState {
         }
         if !plan.sources.is_empty() && !self.preview_available.peek() {
             return;
+        }
+        let visual = plan
+            .sources
+            .iter()
+            .any(|source| start >= source.start && start - source.start < source.duration)
+            || (follow_timeline && self.program_has_title(start));
+        monitor.begin_preview(visual && self.preview_available.peek());
+        if visual {
+            monitor.slot.clear(&window);
         }
         let serial = monitor.serial.get();
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -1407,8 +1608,7 @@ impl UiState {
                         return;
                     }
                     PreviewEvent::Failed(error) => {
-                        state.stop(&monitor);
-                        state.status.set(format!("Preview failed: {error}"));
+                        state.fail_preview(&monitor, error);
                         return;
                     }
                 };
@@ -1418,15 +1618,55 @@ impl UiState {
                     image
                 };
                 match image.map(|image| upload_preview_frame(&window, image)) {
-                    Some(Ok(texture)) => monitor.slot.publish(texture, &window),
-                    Some(Err(error)) => {
-                        state.stop(&monitor);
-                        state.status.set(format!("Preview failed: {error}"));
+                    Some(Ok(texture)) => {
+                        monitor.slot.publish(texture, &window);
+                        state.preview_frame_ready(&monitor);
                     }
-                    None => monitor.slot.clear(&window),
+                    Some(Err(error)) => {
+                        state.fail_preview(&monitor, error);
+                    }
+                    None => {
+                        monitor.slot.clear(&window);
+                        state.preview_frame_ready(&monitor);
+                    }
                 }
             },
         );
+    }
+
+    fn program_has_title(&self, frame: u64) -> bool {
+        self.editor.borrow().project().tracks().iter().any(|track| {
+            track.kind == TrackKind::Video
+                && track.clips.iter().any(|clip| {
+                    matches!(clip.content, ClipContent::Title(_))
+                        && frame >= clip.start_frame
+                        && frame - clip.start_frame < clip.duration_frames
+                })
+        })
+    }
+
+    fn preview_frame_ready(&self, monitor: &Monitor) {
+        monitor.frame_ready();
+        if let Some(failure) = monitor.failure_status.borrow_mut().take()
+            && self.status.peek() == failure
+        {
+            self.status.set("Preview ready".into());
+        }
+    }
+
+    fn fail_preview(&self, monitor: &Monitor, error: String) {
+        self.stop(monitor);
+        monitor.preview.set(PreviewState::Failed(error.clone()));
+        let status = format!("Preview failed: {error}");
+        *monitor.failure_status.borrow_mut() = Some(status.clone());
+        self.status.set(status);
+    }
+
+    pub(super) fn retry_preview(&self, target: PlaybackMonitor) {
+        match target {
+            PlaybackMonitor::Program => self.request_preview(),
+            PlaybackMonitor::Source => self.request_source_preview(),
+        }
     }
 
     /// Starts a sound session for a playing stream and returns the clock
@@ -1483,6 +1723,8 @@ impl UiState {
     }
 
     fn reset_monitors(&self) {
+        self.program.preview.set(PreviewState::Ready);
+        self.source.preview.set(PreviewState::Ready);
         self.last_playback_monitor.set(PlaybackMonitor::Program);
         self.pause();
         self.pause_source();
@@ -1611,24 +1853,21 @@ impl UiState {
                 if state.storyboard_serial.get() != serial {
                     return;
                 }
-                match result {
-                    Ok(frames) if !frames.is_empty() => {
-                        let images: Vec<_> = frames
-                            .into_iter()
-                            .filter_map(|frame| {
-                                RgbaImage::new(frame.width, frame.height, frame.pixels)
-                                    .map(Arc::new)
-                            })
-                            .collect();
-                        if !images.is_empty() {
-                            state.storyboards.borrow_mut().insert(key, Arc::new(images));
-                            state.ui_revision.update(|revision| *revision += 1);
-                        }
-                    }
-                    _ => {}
-                }
+                state.finish_storyboard(key, result);
             },
         );
+    }
+
+    fn finish_storyboard(&self, key: StoryboardKey, result: Result<Vec<FrameImage>, String>) {
+        let images = result
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|frame| {
+                RgbaImage::new(frame.width, frame.height, frame.pixels).map(Arc::new)
+            })
+            .collect();
+        self.storyboards.borrow_mut().insert(key, Arc::new(images));
+        self.ui_revision.update(|revision| *revision += 1);
     }
 
     fn storyboard_requests(&self) -> Vec<StoryboardKey> {
@@ -1759,6 +1998,7 @@ impl UiState {
         self.export_modal.set(false);
         self.project_path.set(None);
         self.thumbnails.borrow_mut().clear();
+        self.thumbnail_loading.set(HashSet::new());
         self.cancel_storyboards();
         self.storyboards.borrow_mut().clear();
         self.reset_monitors();
@@ -1817,7 +2057,10 @@ impl UiState {
                     Ok(_) => state
                         .status
                         .set("Open cancelled: project changed while loading".into()),
-                    Err(error) => state.status.set(format!("Open failed: {error}")),
+                    Err(error) => {
+                        state.show_file_error("Open failed", error.to_string());
+                        state.status.set(format!("Open failed: {error}"));
+                    }
                 }
             },
         );
@@ -1850,6 +2093,7 @@ impl UiState {
         }
         self.export_modal.set(false);
         self.thumbnails.borrow_mut().clear();
+        self.thumbnail_loading.set(HashSet::new());
         self.cancel_storyboards();
         self.storyboards.borrow_mut().clear();
         self.project_path.set(path);
@@ -1998,6 +2242,11 @@ impl UiState {
         result: std::io::Result<()>,
     ) {
         self.busy.set(false);
+        if let Err(error) = &result {
+            self.show_file_error("Save failed", error.to_string());
+        } else {
+            self.autosave_error.set(None);
+        }
         let saved_current = result.is_ok() && self.editor.borrow().revision() == revision;
         self.status.set(match result {
             Ok(()) => {
@@ -2072,6 +2321,7 @@ impl UiState {
         if self.busy.peek() || !export::can_render(self.editor.borrow().project()) {
             return;
         }
+        self.export_error.set(None);
         let (settings, path, has_last) = {
             let editor = self.editor.borrow();
             let project = editor.project();
@@ -2407,22 +2657,28 @@ impl UiState {
     }
 
     pub fn submit_export(&self) {
+        self.export_error.set(None);
         let settings = match self.export_form() {
             Ok(settings) => settings,
             Err(error) => {
-                self.status.set(error);
+                self.set_export_error(error);
                 return;
             }
         };
         let mut path = PathBuf::from(self.export_path.peek().trim());
         if !path.is_absolute() {
-            self.status.set("Choose an absolute output path".into());
+            self.set_export_error("Choose an absolute output path".into());
             return;
         }
         if path.extension().is_none() {
             path.set_extension(settings.container.extension());
         }
         self.start_export(path, settings, false);
+    }
+
+    fn set_export_error(&self, reason: String) {
+        self.export_error.set(Some(reason.clone()));
+        self.status.set(reason);
     }
 
     pub fn quick_export(&self) {
@@ -2444,8 +2700,9 @@ impl UiState {
 
     fn start_export(&self, path: PathBuf, settings: ExportSettings, quick: bool) {
         if self.has_missing_timeline_media() {
-            self.status
-                .set("Cannot export: relink the missing media used in your timeline first".into());
+            self.set_export_error(
+                "Cannot export: relink the missing media used in your timeline first".into(),
+            );
             return;
         }
         if self.busy.peek() || !export::can_render(self.editor.borrow().project()) {
@@ -2456,11 +2713,11 @@ impl UiState {
             path: path.clone(),
         };
         if let Err(error) = last.validate() {
-            self.status.set(error);
+            self.set_export_error(error);
             return;
         }
         let Some(app) = self.app.borrow().clone() else {
-            self.status.set("Export requires a running app".into());
+            self.set_export_error("Export requires a running app".into());
             return;
         };
         let project = self.editor.borrow().project().clone();
@@ -2483,6 +2740,7 @@ impl UiState {
             end
         });
         self.export_modal.set(false);
+        self.export_error.set(None);
         *self.export_control.borrow_mut() = Some(control.clone());
         self.exporting.set(true);
         self.busy.set(true);
@@ -2504,6 +2762,13 @@ impl UiState {
                 state.exporting.set(false);
                 state.export_control.borrow_mut().take();
                 state.busy.set(false);
+                if let Err(error) = &result
+                    && error != "Export cancelled"
+                {
+                    state
+                        .export_error
+                        .set(Some(format!("Export failed: {error}")));
+                }
                 if result
                     .as_ref()
                     .is_err_and(|error| error != "Export cancelled")
@@ -2685,20 +2950,28 @@ impl UiState {
             return;
         }
         self.busy.set(true);
-        self.status.set(format!("Probing {} files…", paths.len()));
+        self.import_progress(0, paths.len(), &paths[0]);
+        let total = paths.len();
         let state = self.clone();
         let dialog_app = app.clone();
-        app.spawn_background(
-            move || {
-                paths
-                    .into_iter()
-                    .map(|path| {
-                        let result = inspect_import(&path);
-                        (path, result)
-                    })
-                    .collect::<Vec<_>>()
+        app.spawn_stream(
+            move |emit| {
+                let mut results = Vec::new();
+                for (index, path) in paths.into_iter().enumerate() {
+                    let result = inspect_import(&path);
+                    emit(ImportEvent::Progress(index + 1, path.clone()));
+                    results.push((path, result));
+                }
+                emit(ImportEvent::Complete(results));
             },
-            move |results| {
+            move |event| {
+                let results = match event {
+                    ImportEvent::Progress(completed, path) => {
+                        state.import_progress(completed, total, &path);
+                        return;
+                    }
+                    ImportEvent::Complete(results) => results,
+                };
                 state.busy.set(false);
                 let total = results.len();
                 let mut imported = 0;
@@ -2766,24 +3039,20 @@ impl UiState {
                                         "Source rejected by project validation".into(),
                                     ));
                                 }
-                                if let Some(thumb) = thumb
-                                    && state
-                                        .editor
-                                        .borrow()
-                                        .project()
-                                        .media()
-                                        .iter()
-                                        .any(|media| media.id == id && media.path == path)
-                                    && let Some(image) =
-                                        RgbaImage::new(thumb.width, thumb.height, thumb.pixels)
+                                if state
+                                    .editor
+                                    .borrow()
+                                    .project()
+                                    .media()
+                                    .iter()
+                                    .any(|media| media.id == id && media.path == path)
                                 {
-                                    let mut thumbnails = state.thumbnails.borrow_mut();
+                                    let thumbnails = state.thumbnails.borrow();
                                     if thumbnails.len() < MAX_THUMBNAILS
                                         || thumbnails.contains_key(&path)
                                     {
-                                        thumbnails.insert(path, Arc::new(image));
                                         drop(thumbnails);
-                                        state.ui_revision.update(|revision| *revision += 1);
+                                        state.finish_thumbnail(path, thumb);
                                     }
                                 }
                             } else {
@@ -2822,6 +3091,15 @@ impl UiState {
                 }
             },
         );
+    }
+
+    fn import_progress(&self, completed: usize, total: usize, path: &Path) {
+        let name = path
+            .file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy();
+        self.status
+            .set(format!("Importing {completed} of {total} · {name}"));
     }
 
     fn place_imported_media(
@@ -2871,33 +3149,66 @@ impl UiState {
             .filter(|media| missing.contains(&media.id))
             .map(|media| media.path.clone())
             .collect();
+        let sources: Vec<_> = sources
+            .into_iter()
+            .filter(|path| !missing_paths.contains(path))
+            .collect();
+        self.thumbnail_loading
+            .update(|pending| pending.extend(sources.iter().cloned()));
         app.spawn_background(
             move || {
                 sources
                     .into_iter()
-                    .filter(|path| !missing_paths.contains(path))
-                    .filter_map(|path| thumbnail(&path).ok().map(|image| (path, image)))
+                    .map(|path| {
+                        let image = thumbnail(&path).ok();
+                        (path, image)
+                    })
                     .collect::<Vec<_>>()
             },
             move |results| {
                 let editor = state.editor.borrow();
-                let mut thumbnails = state.thumbnails.borrow_mut();
                 for (path, thumb) in results {
                     if editor
                         .project()
                         .media()
                         .iter()
                         .any(|media| media.path == path)
-                        && let Some(image) = RgbaImage::new(thumb.width, thumb.height, thumb.pixels)
                     {
-                        thumbnails.insert(path, Arc::new(image));
+                        state.finish_thumbnail(path, thumb);
                     }
                 }
-                drop(thumbnails);
                 drop(editor);
                 state.ui_revision.update(|revision| *revision += 1);
             },
         );
+    }
+
+    fn finish_thumbnail(&self, path: PathBuf, thumb: Option<Thumbnail>) {
+        self.thumbnail_loading.update(|pending| {
+            pending.remove(&path);
+        });
+        let image = thumb.and_then(|thumb| RgbaImage::new(thumb.width, thumb.height, thumb.pixels));
+        let mut thumbnails = self.thumbnails.borrow_mut();
+        if let Some(image) = image {
+            thumbnails.insert(path, Arc::new(image));
+        } else {
+            thumbnails.remove(&path);
+        }
+        drop(thumbnails);
+        self.ui_revision.update(|revision| *revision += 1);
+    }
+
+    pub(super) fn thumbnail_label(&self, media: &Media) -> Option<&'static str> {
+        if media.kind == MediaKind::Audio
+            || self.missing_media.get().contains(&media.id)
+            || self.thumbnails.borrow().contains_key(&media.path)
+        {
+            None
+        } else if self.thumbnail_loading.get().contains(&media.path) {
+            Some("Loading…")
+        } else {
+            Some("No preview")
+        }
     }
 
     pub fn insert_media(&self, media_id: u64) {
@@ -3197,6 +3508,197 @@ mod tests {
     }
 
     #[test]
+    fn export_validation_preserves_a_dedicated_error() {
+        let state = UiState::new();
+        state.set_export_draft(state.export_draft.peek());
+        state.export_path.set_value("relative.mp4");
+        state.submit_export();
+        assert_eq!(
+            state.export_error.peek().as_deref(),
+            Some("Choose an absolute output path")
+        );
+        state.export_width.set_value("invalid");
+        state.submit_export();
+        assert!(state.export_error.peek().unwrap().contains("width"));
+        state.set_export_error("Export failed: encoder unavailable".into());
+        state.status.set("Other operation".into());
+        assert_eq!(
+            state.export_error.peek().as_deref(),
+            Some("Export failed: encoder unavailable")
+        );
+    }
+
+    #[test]
+    fn import_progress_advances_with_each_completed_file() {
+        let state = UiState::new();
+        state.import_progress(1, 3, Path::new("/media/one.mp4"));
+        assert_eq!(state.status.peek(), "Importing 1 of 3 · one.mp4");
+        state.import_progress(2, 3, Path::new("/media/two.mp4"));
+        assert_eq!(state.status.peek(), "Importing 2 of 3 · two.mp4");
+        state.import_progress(3, 3, Path::new("/media/three.mp4"));
+        assert_eq!(state.status.peek(), "Importing 3 of 3 · three.mp4");
+    }
+
+    #[test]
+    fn thumbnail_completion_distinguishes_pending_failed_and_ready() {
+        let state = UiState::new();
+        let media = Media {
+            id: 1,
+            path: "video.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(1_000_000),
+            has_audio: false,
+        };
+        state
+            .thumbnail_loading
+            .set(HashSet::from([media.path.clone()]));
+        assert_eq!(state.thumbnail_label(&media), Some("Loading…"));
+        state.finish_thumbnail(media.path.clone(), None);
+        assert_eq!(state.thumbnail_label(&media), Some("No preview"));
+        assert!(state.thumbnail_loading.peek().is_empty());
+        state.finish_thumbnail(
+            media.path.clone(),
+            Some(Thumbnail {
+                width: 1,
+                height: 1,
+                pixels: vec![255; 4],
+            }),
+        );
+        assert_eq!(state.thumbnail_label(&media), None);
+        state.finish_thumbnail(
+            media.path.clone(),
+            Some(Thumbnail {
+                width: 1,
+                height: 1,
+                pixels: Vec::new(),
+            }),
+        );
+        assert_eq!(state.thumbnail_label(&media), Some("No preview"));
+        state.missing_media.set(HashSet::from([1]));
+        assert_eq!(state.thumbnail_label(&media), None);
+        assert_eq!(
+            state.thumbnail_label(&Media {
+                kind: MediaKind::Audio,
+                ..media
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn storyboard_failures_and_empty_results_are_cached_without_requeueing() {
+        let state = UiState::new();
+        let key = storyboard_ranges()[0].0.clone();
+        for result in [Err("decode failed".into()), Ok(Vec::new())] {
+            state.finish_storyboard(key.clone(), result);
+            assert!(state.storyboards.borrow()[&key].is_empty());
+            let requests = storyboard_requests(
+                &[(key.clone(), true)],
+                &mut state.storyboards.borrow_mut(),
+                &mut Vec::new(),
+            );
+            assert!(requests.is_empty());
+        }
+        state.finish_storyboard(
+            key.clone(),
+            Ok(vec![FrameImage {
+                width: 1,
+                height: 1,
+                pixels: vec![255; 4],
+            }]),
+        );
+        assert_eq!(state.storyboards.borrow()[&key].len(), 1);
+    }
+
+    #[test]
+    fn autosave_error_survives_other_status_updates_until_success() {
+        let state = UiState::new();
+        state.finish_autosave(Err("disk full".into()));
+        state.status.set("Playing".into());
+        assert_eq!(
+            state.autosave_error.peek().as_deref(),
+            Some("Autosave failed: disk full")
+        );
+        state.finish_autosave(Ok(()));
+        assert_eq!(state.autosave_error.peek(), None);
+        state.finish_autosave(Err("disk full".into()));
+        let revision = state.editor.borrow().revision();
+        state.finish_save(
+            "film.ocus".into(),
+            revision,
+            None,
+            None,
+            Err(std::io::Error::other("denied")),
+        );
+        assert!(state.autosave_error.peek().is_some());
+        state.finish_save("film.ocus".into(), revision, None, None, Ok(()));
+        assert_eq!(state.autosave_error.peek(), None);
+    }
+
+    #[test]
+    fn successful_preview_frame_clears_only_its_stale_failure_status() {
+        let state = UiState::new();
+        for monitor in [&state.source, &state.program] {
+            state.status.set("Ready".into());
+            state.preview_frame_ready(monitor);
+            assert_eq!(state.status.peek(), "Ready");
+
+            state.fail_preview(monitor, "Decode failed".into());
+            monitor.begin_preview(true);
+            state.preview_frame_ready(monitor);
+            assert_eq!(monitor.preview.peek(), PreviewState::Ready);
+            assert_eq!(state.status.peek(), "Preview ready");
+
+            state.fail_preview(monitor, "Upload failed".into());
+            monitor.begin_preview(true);
+            state.status.set("Project saved".into());
+            state.preview_frame_ready(monitor);
+            assert_eq!(monitor.preview.peek(), PreviewState::Ready);
+            assert_eq!(state.status.peek(), "Project saved");
+        }
+        state.fail_preview(&state.source, "Source decode failed".into());
+        state.fail_preview(&state.program, "Program decode failed".into());
+        state.preview_frame_ready(&state.source);
+        assert_eq!(state.status.peek(), "Preview failed: Program decode failed");
+        state.preview_frame_ready(&state.program);
+        assert_eq!(state.status.peek(), "Preview ready");
+    }
+
+    #[test]
+    fn monitor_preview_transitions_clear_errors_and_loading() {
+        let state = UiState::new();
+        for (target, monitor) in [
+            (PlaybackMonitor::Source, &state.source),
+            (PlaybackMonitor::Program, &state.program),
+        ] {
+            monitor.begin_preview(true);
+            assert_eq!(monitor.preview.peek(), PreviewState::Loading);
+            monitor.frame_ready();
+            assert_eq!(monitor.preview.peek(), PreviewState::Ready);
+            state.fail_preview(monitor, "Decode failed".into());
+            assert_eq!(
+                monitor.preview.peek(),
+                PreviewState::Failed("Decode failed".into())
+            );
+            assert_eq!(state.status.peek(), "Preview failed: Decode failed");
+            assert!(!monitor.playing.peek());
+            state.retry_preview(target);
+            assert_eq!(monitor.preview.peek(), PreviewState::Ready);
+            state.fail_preview(monitor, "Upload failed".into());
+            match target {
+                PlaybackMonitor::Source => state.seek_source(0),
+                PlaybackMonitor::Program => state.seek(0),
+            }
+            assert_eq!(monitor.preview.peek(), PreviewState::Ready);
+            monitor.begin_preview(false);
+            assert_eq!(monitor.preview.peek(), PreviewState::Ready);
+        }
+        state.fail_preview(&state.source, "Decode failed".into());
+        state.select_media(1);
+        assert_eq!(state.source.preview.peek(), PreviewState::Ready);
+    }
+
+    #[test]
     fn next_play_retries_failed_audio_output() {
         for source in [false, true] {
             let state = UiState::new();
@@ -3259,6 +3761,75 @@ mod tests {
         assert_eq!(media_frames(&media, (30, 1)), None);
         media.duration_us = None;
         assert_eq!(media_frames(&media, (30, 1)), Some(90));
+    }
+
+    #[test]
+    fn normalization_import_insert_is_undoable_and_ignores_stale_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("quiet.wav");
+        assert!(
+            std::process::Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=d=2:r=48000",
+                    "-af",
+                    "volume=0.25"
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (path, info, _) = inspect_source(&path).unwrap();
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: path.clone(),
+            kind: info.kind,
+            duration_us: info.duration_us,
+            has_audio: info.has_audio,
+        })));
+        state.insert_media_at(1, None).unwrap();
+        let (track_id, clip_id) = state.primary_clip().unwrap();
+        let volume = || {
+            state
+                .editor
+                .borrow()
+                .project()
+                .tracks()
+                .iter()
+                .find(|track| track.id == track_id)
+                .unwrap()
+                .clips[0]
+                .volume
+        };
+        let revision = state.revision.peek();
+        let measurement = audio::loudness(&path, 0, 60, (30, 1)).unwrap();
+        state.finish_normalization(revision, track_id, clip_id, Ok(measurement));
+        assert_eq!(volume(), 2.0);
+        assert!(state.status.peek().contains("maximum volume"));
+        state.undo();
+        assert_eq!(volume(), 1.0);
+        state.finish_normalization(revision, track_id, clip_id, Ok(measurement));
+        assert_eq!(volume(), 1.0);
+        let revision = state.revision.peek();
+        state.finish_normalization(
+            revision,
+            track_id,
+            clip_id,
+            Ok(audio::Loudness {
+                integrated: f64::NEG_INFINITY,
+                peak: 0.0,
+            }),
+        );
+        assert_eq!(volume(), 1.0);
+        assert!(state.status.peek().contains("silent"));
+        state.finish_normalization(revision, track_id, clip_id, Err("decode failed".into()));
+        assert!(state.status.peek().contains("decode failed"));
     }
 
     #[test]
@@ -3385,20 +3956,20 @@ mod tests {
         let mut state = UiState::with_recovery_dir(Some(dir.clone()));
         assert!(state.edit(Command::RenameProject("Recovered film".into())));
         drop(state.autosaver.take());
-        let snapshot = recovery::read(&dir).unwrap();
+        let snapshot = recovery::read(&dir).unwrap().unwrap();
         assert_eq!(snapshot.project.name(), "Recovered film");
 
         state.autosaver = Some(Rc::new(recovery::Autosaver::new(dir.clone())));
         let revision = state.editor.borrow().revision();
         state.finish_save("film.ocus".into(), revision, None, None, Ok(()));
         drop(state.autosaver.take());
-        assert!(recovery::read(&dir).is_none());
+        assert!(recovery::read(&dir).unwrap().is_none());
 
         state.autosaver = Some(Rc::new(recovery::Autosaver::new(dir.clone())));
         assert!(state.edit(Command::RenameProject("Discard me".into())));
         assert!(state.apply_unsaved_choice(UnsavedChoice::Discard, |_| {}));
         drop(state.autosaver.take());
-        assert!(recovery::read(&dir).is_none());
+        assert!(recovery::read(&dir).unwrap().is_none());
 
         let original = PathBuf::from("original.ocus");
         state.install_project(
@@ -3633,6 +4204,7 @@ mod tests {
                     content: ClipContent::Media { media_id: 1 },
                     volume: 1.0,
                     muted: false,
+                    transition: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
                     linked_audio: false,
@@ -4504,6 +5076,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: true,
+                transition: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
                 linked_audio: false,

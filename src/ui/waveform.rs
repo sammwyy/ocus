@@ -14,8 +14,8 @@ fn frame_at(x: f32, full: Rect, clip: &Clip) -> f64 {
     let fraction = ((f64::from(x) - f64::from(full.x)) / f64::from(full.width)).clamp(0.0, 1.0);
     let first = clip.source_frame_at(0).unwrap_or(0) as f64;
     match clip.playback {
-        Playback::Forward => first + clip.duration_frames as f64 * fraction,
-        Playback::Reverse => first + 1.0 - clip.duration_frames as f64 * fraction,
+        Playback::Forward => first + clip.duration_frames as f64 * clip.speed * fraction,
+        Playback::Reverse => first + 1.0 - clip.duration_frames as f64 * clip.speed * fraction,
         Playback::Freeze => first,
     }
 }
@@ -88,6 +88,23 @@ mod tests {
             assert_eq!(frame_at(x, full, &clip), expected);
         }
         assert_eq!(frame_at(200.0, zoomed, &clip), 45.0);
+        for speed in [0.5, 2.0] {
+            clip.speed = speed;
+            for playback in [Playback::Forward, Playback::Reverse] {
+                clip.playback = playback;
+                let begin = frame_at(full.x, full, &clip);
+                let end = frame_at(full.x + full.width, full, &clip);
+                assert_eq!((begin - end).abs(), 60.0 * speed);
+                assert_eq!(
+                    frame_at(200.0, zoomed, &clip),
+                    if playback == Playback::Forward {
+                        30.0 + 45.0 * speed
+                    } else {
+                        30.0 + 15.0 * speed
+                    }
+                );
+            }
+        }
         clip.playback = Playback::Freeze;
         assert_eq!(frame_at(200.0, zoomed, &clip), 30.0);
     }

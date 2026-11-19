@@ -108,6 +108,13 @@ clip and applies to the Program monitor and export. Source playback and
 waveforms still show the original audio. Previously saved references without
 probe metadata can be re-imported.
 
+Select a video or audio clip and use **Inspector → Speed** to choose 0.25x,
+0.5x, 1x, 1.5x, 2x or 4x. Slower clips become longer and faster clips shorter,
+keeping the source range unless the next clip leaves too little room. Linked
+audio follows the picture and keeps its pitch in preview and export. Changed
+speeds appear as small timeline badges and can be undone. Still images and
+titles do not have playback speed.
+
 The workspace has two GPU monitors: **Source** shows the selected timeline
 clip's trimmed range, or the whole file selected in the media bin, and
 **Program** shows the sequence at the playhead. Each has its own scrub bar,

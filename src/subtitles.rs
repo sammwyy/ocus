@@ -171,6 +171,7 @@ pub fn track(project: &Project, cues: &[Cue]) -> Result<Track, String> {
         let (text, parse_html) = markup(&cue.text);
         clips.push(Clip {
             keyframes: Vec::new(),
+            speed: 1.0,
             playback: crate::timeline::Playback::Forward,
             transform: Default::default(),
             noise_reduction: false,

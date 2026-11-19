@@ -146,11 +146,7 @@ pub(super) fn clip_storyboard_key(
         path: media.path.clone(),
         kind: media.kind,
         source_start: first.min(last),
-        duration: if clip.playback == Playback::Freeze {
-            1
-        } else {
-            clip.duration_frames
-        },
+        duration: first.abs_diff(last).saturating_add(1),
         fps,
     })
 }
@@ -913,7 +909,7 @@ impl UiState {
         self.status.set("Analyzing clip loudness…".into());
         let state = self.clone();
         app.spawn_background(
-            move || audio::loudness(&path, clip.source_start_frame, clip.duration_frames, fps),
+            move || audio::loudness(&path, clip.source_start_frame, clip.source_span(), fps),
             move |result| state.finish_normalization(revision, track_id, clip_id, result),
         );
     }
@@ -1257,7 +1253,7 @@ impl UiState {
                 path: media.path.clone(),
                 kind: media.kind,
                 source_start: clip.source_start_frame,
-                duration: clip.duration_frames,
+                duration: clip.source_span(),
             });
         }
         let media_id = self.selected_media.peek()?;
@@ -1529,6 +1525,7 @@ impl UiState {
                 };
                 if track.kind == TrackKind::Video {
                     sources.push(FrameSource {
+                        speed: clip.speed,
                         playback: clip.playback,
                         lut: clip.lut.clone(),
                         color: clip.color,
@@ -1592,6 +1589,7 @@ impl UiState {
                 .iter()
                 .filter(|range| range.kind != MediaKind::Audio)
                 .map(|range| FrameSource {
+                    speed: 1.0,
                     playback: range.playback,
                     lut: None,
                     color: Default::default(),
@@ -1614,6 +1612,7 @@ impl UiState {
                 .iter()
                 .filter(|range| range.kind != MediaKind::Image)
                 .map(|range| AudioSource {
+                    speed: 1.0,
                     playback: range.playback,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
@@ -4149,6 +4148,7 @@ mod tests {
         );
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                speed: clip.speed,
                 playback: clip.playback,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
@@ -4485,6 +4485,7 @@ mod tests {
                     content: ClipContent::Media { media_id: 1 },
                     volume: 1.0,
                     muted: false,
+                    speed: 1.0,
                     color: Default::default(),
                     transition: None,
                     transition_out: None,
@@ -5341,6 +5342,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: true,
+                speed: 1.0,
                 color: Default::default(),
                 transition: None,
                 transition_out: None,

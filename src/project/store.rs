@@ -344,6 +344,7 @@ mod tests {
                 }),
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 color: Default::default(),
                 transition: None,
                 transition_out: None,

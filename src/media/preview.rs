@@ -20,6 +20,7 @@ pub struct FrameSource {
     pub start: u64,
     pub source_start: u64,
     pub duration: u64,
+    pub speed: f64,
     pub transform: Transform,
     pub keyframes: Vec<crate::timeline::Keyframe>,
 }
@@ -36,14 +37,14 @@ impl FrameSource {
 
 impl FrameSource {
     fn source_frame_at(&self, position: u64) -> Option<u64> {
-        self.playback.source_frame_at(
+        self.playback.source_frame_at_speed(
             self.source_start,
             self.duration,
             position.checked_sub(self.start)?,
+            self.speed,
         )
     }
 }
-
 #[derive(Clone)]
 pub struct FrameImage {
     pub picture: (u32, u32, u32, u32),
@@ -123,6 +124,7 @@ pub fn storyboard(
     };
     let [brightness, contrast, saturation] = key.color_bits.map(f32::from_bits);
     let source = FrameSource {
+        speed: 1.0,
         playback: key.playback,
         lut: key.lut.clone(),
         color: ColorAdjust {
@@ -664,9 +666,14 @@ impl FrameReader {
                             i128::from(self.time_base.denominator()) * i128::from(self.fps.1);
                         (base >= 0 && denominator > 0)
                             .then(|| {
+                                // Allow half a container tick for timestamp rounding.
                                 u64::try_from(
-                                    base * i128::from(self.time_base.numerator())
+                                    (base
+                                        * i128::from(self.time_base.numerator())
                                         * i128::from(self.fps.0)
+                                        + i128::from(self.time_base.numerator())
+                                            * i128::from(self.fps.0)
+                                            / 2)
                                         / denominator,
                                 )
                                 .ok()
@@ -702,6 +709,7 @@ mod tests {
 
     fn proxy_source(path: PathBuf, duration: u64) -> FrameSource {
         FrameSource {
+            speed: 1.0,
             playback: crate::timeline::Playback::Forward,
             lut: None,
             color: ColorAdjust::default(),
@@ -758,6 +766,29 @@ mod tests {
             assert!(super::super::proxy::generate(&path, &cancelled).unwrap());
             let proxy = super::super::proxy::ready(&path).unwrap();
             let source = proxy_source(path, if late { 45 } else { 30 });
+            for speed in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] {
+                for playback in [Playback::Forward, Playback::Reverse] {
+                    let sped = FrameSource {
+                        playback,
+                        speed,
+                        start: 10,
+                        source_start: 3,
+                        duration: ((source.duration - 3) as f64 / speed).floor() as u64,
+                        ..source.clone()
+                    };
+                    let mut originals = VideoLayers::new((30, 1), (160, 90));
+                    let mut proxies = VideoLayers::new((30, 1), (160, 90));
+                    proxies.use_proxies = true;
+                    for position in sped.start..sped.start + sped.duration {
+                        let expected = originals.layer_at(&sped, position, &cancelled).unwrap();
+                        let actual = proxies.layer_at(&sped, position, &cancelled).unwrap();
+                        assert!(
+                            expected.pixels[0].abs_diff(actual.pixels[0]) <= 3,
+                            "late={late}, {playback:?} {speed}x at {position}"
+                        );
+                    }
+                }
+            }
             let mut sequential_original = FrameReader::open_selected(
                 &source,
                 0,
@@ -985,6 +1016,32 @@ mod tests {
     }
 
     #[test]
+    fn speed_maps_timeline_offsets_to_source_frames() {
+        for speed in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] {
+            let source = super::FrameSource {
+                keyframes: Vec::new(),
+                playback: crate::timeline::Playback::Forward,
+                transform: Transform::default(),
+                color: Default::default(),
+                lut: None,
+                clip_id: 1,
+                path: "video.mp4".into(),
+                kind: super::MediaKind::Video,
+                start: 10,
+                source_start: 30,
+                duration: 60,
+                speed,
+            };
+            for offset in [0, 1, 3, 17, 59] {
+                assert_eq!(
+                    source.source_frame_at(10 + offset).unwrap(),
+                    30 + (offset as f64 * speed).floor() as u64
+                );
+            }
+        }
+    }
+
+    #[test]
     fn reverse_and_freeze_match_forward_frames_and_seek() {
         ffmpeg::init().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -1027,6 +1084,7 @@ mod tests {
             };
             let mut source = FrameSource {
                 keyframes: Vec::new(),
+                speed: 1.0,
                 transform: crate::timeline::Transform::default(),
                 lut: None,
                 color: Default::default(),
@@ -1068,6 +1126,25 @@ mod tests {
                     frames[69 - k as usize].pixels
                 );
             }
+            for speed in [0.25, 0.5, 1.5, 2.0, 4.0] {
+                source.speed = speed;
+                source.duration = (70.0_f64 / speed).floor() as u64;
+                let span = (source.duration as f64 * speed).ceil() as usize;
+                let mut layers = VideoLayers::new((30, 1), (64, 36));
+                for offset in 0..source.duration {
+                    let target = span - 1 - (offset as f64 * speed).floor() as usize;
+                    assert_eq!(
+                        layers
+                            .layer_at(&source, 10 + offset, &cancelled)
+                            .unwrap()
+                            .pixels,
+                        frames[target].pixels,
+                        "reverse {speed}x offset {offset}, late {late}"
+                    );
+                }
+            }
+            source.speed = 1.0;
+            source.duration = 70;
             source.playback = Playback::Freeze;
             let mut freeze = VideoLayers::new((30, 1), (64, 36));
             let held = freeze.layer_at(&source, 10, &cancelled).unwrap();
@@ -1135,6 +1212,7 @@ mod tests {
         );
         let mut source = FrameSource {
             keyframes: Vec::new(),
+            speed: 1.0,
             transform: crate::timeline::Transform::default(),
             lut: None,
             color: Default::default(),
@@ -1221,6 +1299,7 @@ mod tests {
             assert!(reference.status.success());
             let source = FrameSource {
                 playback: crate::timeline::Playback::Forward,
+                speed: 1.0,
                 lut: None,
                 color: Default::default(),
                 clip_id: 1,
@@ -1266,6 +1345,7 @@ mod tests {
                 color: Default::default(),
                 clip_id: 1,
                 path: root.join(format!("{name}.mp4")),
+                speed: 1.0,
                 kind: MediaKind::Video,
                 start: 0,
                 source_start: 0,
@@ -1313,6 +1393,7 @@ mod tests {
         data.extend((0..8 * 6 * 3).map(|value| value as u8));
         fs::write(&path, data).unwrap();
         let source = FrameSource {
+            speed: 1.0,
             playback: crate::timeline::Playback::Forward,
             lut: None,
             color: Default::default(),
@@ -1360,6 +1441,7 @@ mod tests {
             );
             let frames = u64::from(fps.0 / fps.1);
             let source = FrameSource {
+                speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
                 color: Default::default(),
@@ -1424,6 +1506,7 @@ mod tests {
                 .success()
         );
         let source = FrameSource {
+            speed: 1.0,
             playback: crate::timeline::Playback::Forward,
             lut: None,
             color: Default::default(),
@@ -1499,6 +1582,7 @@ mod tests {
                 (180, 320)
             };
             let source = FrameSource {
+                speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
                 color: Default::default(),
@@ -1560,6 +1644,7 @@ mod tests {
             data.extend(vec![255; width * height * 3]);
             fs::write(&path, data).unwrap();
             let source = FrameSource {
+                speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
                 color: Default::default(),
@@ -1651,6 +1736,7 @@ mod tests {
         ffmpeg::init().unwrap();
         let cancelled = Arc::new(AtomicBool::new(false));
         let source = FrameSource {
+            speed: 1.0,
             playback: crate::timeline::Playback::Forward,
             lut: None,
             color: Default::default(),
@@ -1680,6 +1766,65 @@ mod tests {
     }
 
     #[test]
+    fn millisecond_timestamps_do_not_skip_source_frames_at_changed_speeds() {
+        let directory = tempfile::tempdir().unwrap();
+        let original = directory.path().join("original.y4m");
+        let quantized = directory.path().join("quantized.mkv");
+        let mut bytes = b"YUV4MPEG2 W2 H2 F30:1 Ip A1:1 C420jpeg\n".to_vec();
+        for shade in (32..224).step_by(8) {
+            bytes.extend(b"FRAME\n");
+            bytes.extend([shade, shade, shade, shade, 128, 128]);
+        }
+        fs::write(&original, bytes).unwrap();
+        assert!(
+            Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(&original)
+                .args(["-c:v", "ffv1"])
+                .arg(&quantized)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let cancelled = Arc::new(AtomicBool::new(false));
+        for speed in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] {
+            let source = FrameSource {
+                playback: crate::timeline::Playback::Forward,
+                transform: Transform::default(),
+                color: Default::default(),
+                lut: None,
+                clip_id: 1,
+                path: quantized.clone(),
+                keyframes: Vec::new(),
+                kind: MediaKind::Video,
+                start: 0,
+                source_start: 0,
+                duration: (24.0_f64 / speed) as u64,
+                speed,
+            };
+            let mut reference = FrameReader::open(
+                &FrameSource {
+                    path: original.clone(),
+                    ..source.clone()
+                },
+                0,
+                (30, 1),
+                (2, 2),
+                cancelled.clone(),
+            )
+            .unwrap();
+            let mut layers = VideoLayers::new((30, 1), (2, 2));
+            for position in 0..source.duration {
+                let expected = reference
+                    .frame_at(source.source_frame_at(position).unwrap(), &cancelled)
+                    .unwrap();
+                let actual = layers.layer_at(&source, position, &cancelled).unwrap();
+                assert_eq!(actual.pixels, expected.pixels, "{speed}x at {position}");
+            }
+        }
+    }
+
+    #[test]
     fn seek_and_play_use_source_timestamps() {
         let path = std::env::temp_dir().join(format!("ocus-preview-{}.y4m", std::process::id()));
         let mut source = b"YUV4MPEG2 W2 H2 F30:1 Ip A1:1 C420jpeg\n".to_vec();
@@ -1689,6 +1834,7 @@ mod tests {
         }
         fs::write(&path, source).unwrap();
         let clips = [FrameSource {
+            speed: 1.0,
             playback: crate::timeline::Playback::Forward,
             lut: None,
             color: Default::default(),
@@ -1796,6 +1942,7 @@ mod tests {
         let cut = PreviewPlan {
             use_proxies: false,
             sources: vec![FrameSource {
+                speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
                 color: Default::default(),

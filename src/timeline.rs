@@ -10,6 +10,26 @@ pub enum Playback {
 }
 
 impl Playback {
+    pub fn source_frame_at_speed(
+        self,
+        start: u64,
+        duration: u64,
+        offset: u64,
+        speed: f64,
+    ) -> Option<u64> {
+        if offset >= duration {
+            return None;
+        }
+        if self == Self::Freeze {
+            return Some(start);
+        }
+        self.source_frame_at(
+            start,
+            (duration as f64 * speed).ceil() as u64,
+            (offset as f64 * speed).floor() as u64,
+        )
+    }
+
     pub fn source_frame_at(self, start: u64, duration: u64, offset: u64) -> Option<u64> {
         if offset >= duration {
             return None;
@@ -80,6 +100,8 @@ pub struct Clip {
     pub start_frame: u64,
     pub source_start_frame: u64,
     pub duration_frames: u64,
+    #[serde(default = "default_speed", skip_serializing_if = "normal_speed")]
+    pub speed: f64,
     pub content: ClipContent,
     pub volume: f32,
     #[serde(default, skip_serializing_if = "zero")]
@@ -227,6 +249,36 @@ impl Transform {
     }
 }
 
+fn default_speed() -> f64 {
+    1.0
+}
+
+fn normal_speed(speed: &f64) -> bool {
+    *speed == 1.0
+}
+
+impl Clip {
+    pub fn source_offset(&self, timeline_frames: u64) -> u64 {
+        (timeline_frames as f64 * self.speed).floor() as u64
+    }
+
+    pub fn source_span(&self) -> u64 {
+        if self.playback == Playback::Freeze {
+            1
+        } else {
+            (self.duration_frames as f64 * self.speed).ceil() as u64
+        }
+    }
+
+    pub fn timeline_span(&self, source_frames: u64) -> u64 {
+        (source_frames as f64 / self.speed).floor() as u64
+    }
+
+    pub fn valid_speed(&self) -> bool {
+        self.speed.is_finite() && (0.25..=4.0).contains(&self.speed)
+    }
+}
+
 impl Clip {
     pub fn keyframes_for_range(&self, offset: i128) -> Vec<Keyframe> {
         if self.keyframes.is_empty() {
@@ -252,21 +304,28 @@ impl Clip {
     }
 
     pub fn source_frame_at(&self, offset: u64) -> Option<u64> {
-        self.playback
-            .source_frame_at(self.source_start_frame, self.duration_frames, offset)
+        self.playback.source_frame_at_speed(
+            self.source_start_frame,
+            self.duration_frames,
+            offset,
+            self.speed,
+        )
     }
 
     pub fn source_start_for_range(&self, offset: u64, duration: u64) -> Option<u64> {
+        if offset.checked_add(duration)? > self.duration_frames {
+            return None;
+        }
         self.source_start_frame.checked_add(match self.playback {
-            Playback::Forward => offset,
+            Playback::Forward => self.source_offset(offset),
             Playback::Reverse => self
-                .duration_frames
-                .checked_sub(offset.checked_add(duration)?)?,
+                .source_span()
+                .checked_sub(self.source_offset(offset))?
+                .checked_sub((duration as f64 * self.speed).ceil() as u64)?,
             Playback::Freeze => 0,
         })
     }
 }
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transition {
     pub kind: TransitionKind,

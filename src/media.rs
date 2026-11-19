@@ -331,6 +331,16 @@ fn stream_duration_us(stream: &ffmpeg::Stream<'_>) -> Option<u64> {
         .filter(|duration| *duration > 0)
 }
 
+pub(crate) fn still_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["png", "jpg", "jpeg", "webp", "bmp", "ppm", "tif", "tiff"]
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+        })
+}
+
 pub fn probe(path: &Path) -> Result<MediaProbe, String> {
     if !path.is_file() {
         return Err("Source is not a regular file".into());
@@ -354,16 +364,8 @@ pub fn probe(path: &Path) -> Result<MediaProbe, String> {
                 .contains(ffmpeg::format::stream::Disposition::ATTACHED_PIC)
         });
     let audio = input.streams().best(ffmpeg::media::Type::Audio);
-    let still = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            ["png", "jpg", "jpeg", "webp", "bmp", "ppm", "tif", "tiff"]
-                .iter()
-                .any(|known| extension.eq_ignore_ascii_case(known))
-        });
     let kind = if video.is_some() {
-        if still {
+        if still_image_path(path) {
             MediaKind::Image
         } else {
             MediaKind::Video

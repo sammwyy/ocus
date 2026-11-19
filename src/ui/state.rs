@@ -15,7 +15,8 @@ use crate::playback::{self, Session};
 use crate::project::export_settings::{
     AudioCodec, Container, EncodingSpeed, ExportSettings, LastExport, VideoCodec,
 };
-use crate::project::{Command, Editor, Project, recovery, store};
+use crate::project::interchange::{self, Format, Imported};
+use crate::project::{Command, Editor, FrameRate, Project, VideoSettings, recovery, store};
 use crate::settings::{self, Settings, ThemeMode};
 use crate::timeline::{Clip, ClipContent, Playback, Title, TrackKind, Transform};
 use creamui::core::{Modifiers, Point, Rect, RgbaImage};
@@ -75,6 +76,11 @@ enum UnsavedChoice {
 }
 
 type AfterSave = Box<dyn FnOnce(&UiState)>;
+
+enum TimelineImport {
+    ChooseEdlRate { drop: bool },
+    Ready(Box<Imported>),
+}
 
 enum ExportEvent {
     Destination(PathBuf),
@@ -309,6 +315,7 @@ pub(crate) struct UiState {
     last_playback_monitor: Rc<Cell<PlaybackMonitor>>,
     pub preview_available: Signal<bool>,
     pub project_path: Signal<Option<PathBuf>>,
+    pub edl_rate_prompt: Signal<Option<(PathBuf, bool)>>,
     pub title_text: TextController,
     pub rename_track: Signal<Option<u64>>,
     pub track_name: TextController,
@@ -474,6 +481,7 @@ impl UiState {
             last_playback_monitor: Rc::new(Cell::new(PlaybackMonitor::Program)),
             preview_available: Signal::new(false),
             project_path: Signal::new(None),
+            edl_rate_prompt: Signal::new(None),
             title_text: TextController::default(),
             rename_track: Signal::new(None),
             track_name: TextController::default(),
@@ -2268,6 +2276,228 @@ impl UiState {
             if self.settle_unsaved_changes(move |state| state.load_path(retry)) {
                 self.load_path(path);
             }
+        }
+    }
+
+    pub(super) fn import_timeline_dialog(&self) {
+        if self.busy.peek() {
+            return;
+        }
+        let Some(path) = FileDialog::new()
+            .set_title("Import timeline as a new project")
+            .add_filter("Timeline interchange", &["otio", "edl"])
+            .pick_file()
+        else {
+            return;
+        };
+        self.import_timeline(path, None);
+    }
+
+    pub(super) fn select_edl_rate(&self, numerator: u32, denominator: u32) {
+        if let Some((path, _)) = self.edl_rate_prompt.peek() {
+            self.edl_rate_prompt.set(None);
+            self.import_timeline(
+                path,
+                Some(FrameRate {
+                    numerator,
+                    denominator,
+                }),
+            );
+        }
+    }
+
+    pub(super) fn cancel_edl_rate_prompt(&self) {
+        self.edl_rate_prompt.set(None);
+        self.status.set("Timeline import cancelled".into());
+    }
+
+    fn import_timeline(&self, path: PathBuf, rate: Option<FrameRate>) {
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let revision = self.revision.peek();
+        self.busy.set(true);
+        self.status.set("Importing timeline…".into());
+        let state = self.clone();
+        app.spawn_background(
+            {
+                let path = path.clone();
+                move || {
+                    if rate.is_none()
+                        && let Some(drop) = interchange::edl_rate_needed(&path)?
+                    {
+                        return Ok(TimelineImport::ChooseEdlRate { drop });
+                    }
+                    interchange::load(
+                        &path,
+                        &rate.unwrap_or_else(|| VideoSettings::default().frame_rate),
+                    )
+                    .map(|imported| TimelineImport::Ready(Box::new(imported)))
+                }
+            },
+            move |result| {
+                state.busy.set(false);
+                match result {
+                    Ok(TimelineImport::ChooseEdlRate { drop })
+                        if state.revision.peek() == revision =>
+                    {
+                        state.edl_rate_prompt.set(Some((path, drop)));
+                        state.status.set("Choose the EDL frame rate".into());
+                    }
+                    Ok(TimelineImport::Ready(imported)) if state.revision.peek() == revision => {
+                        if !state.dirty.peek() {
+                            state.install_imported_timeline(*imported);
+                        } else {
+                            match state.ask_unsaved_changes() {
+                                UnsavedChoice::Discard => {
+                                    state.install_imported_timeline(*imported)
+                                }
+                                UnsavedChoice::Save => {
+                                    state.save_then(Some(Box::new(move |state| {
+                                        state.install_imported_timeline(*imported);
+                                    })))
+                                }
+                                UnsavedChoice::Cancel => {
+                                    state.status.set("Timeline import cancelled".into())
+                                }
+                            }
+                        }
+                    }
+                    Ok(_) => state
+                        .status
+                        .set("Import cancelled: project changed while loading".into()),
+                    Err(error) => {
+                        state.show_file_error("Timeline import failed", error.clone());
+                        state.status.set(format!("Timeline import failed: {error}"));
+                    }
+                }
+            },
+        );
+    }
+
+    fn install_imported_timeline(&self, imported: Imported) {
+        let missing = imported.missing.len();
+        let mut notes = imported.notes;
+        if missing > 0 {
+            notes.push(format!(
+                "{missing} media files not found. Relink them from the Media bin."
+            ));
+        }
+        self.install_project(
+            imported.project,
+            None,
+            true,
+            imported.missing.into_iter().collect(),
+        );
+        self.update_recovery();
+        self.status.set(if missing == 0 {
+            "Timeline imported · Save as an Ocus project to keep it".into()
+        } else {
+            format!("Timeline imported · {missing} media files missing")
+        });
+        self.timeline_file_notes("Timeline imported", notes);
+    }
+
+    pub(super) fn export_timeline_dialog(&self, format: Format) {
+        if self.busy.peek() || self.sequence_end() == 0 {
+            return;
+        }
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let extension = format.extension();
+        let mut dialog = FileDialog::new()
+            .set_title(format!("Export {} timeline", format.label()))
+            .add_filter(format.label(), &[extension])
+            .set_file_name(format!("timeline.{extension}"));
+        if let Some(directory) = self.project_path.peek().as_deref().and_then(Path::parent) {
+            dialog = dialog.set_directory(directory);
+        }
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+        match path.extension().and_then(|ext| ext.to_str()) {
+            Some(ext) if ext.eq_ignore_ascii_case(extension) => self.export_timeline(path, format),
+            None if path.extension().is_none() => {
+                let path = path.with_extension(extension);
+                self.busy.set(true);
+                let state = self.clone();
+                app.spawn_background(
+                    {
+                        let path = path.clone();
+                        move || path.exists()
+                    },
+                    move |exists| {
+                        state.busy.set(false);
+                        if !exists
+                            || MessageDialog::new()
+                                .set_level(MessageLevel::Warning)
+                                .set_title("Replace timeline file?")
+                                .set_description(format!(
+                                    "{} already exists. Replace it?",
+                                    path.display()
+                                ))
+                                .set_buttons(MessageButtons::YesNo)
+                                .show()
+                                == MessageDialogResult::Yes
+                        {
+                            state.export_timeline(path, format);
+                        }
+                    },
+                );
+            }
+            _ => self.show_file_error(
+                "Wrong file extension",
+                format!("Use .{extension} for a {} timeline.", format.label()),
+            ),
+        }
+    }
+
+    fn export_timeline(&self, path: PathBuf, format: Format) {
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let project = self.editor.borrow().project().clone();
+        self.busy.set(true);
+        self.status
+            .set(format!("Exporting {} timeline…", format.label()));
+        let state = self.clone();
+        let output = path.display().to_string();
+        app.spawn_background(
+            move || interchange::save(&path, &project, format),
+            move |result| {
+                state.busy.set(false);
+                match result {
+                    Ok(notes) => {
+                        state
+                            .status
+                            .set(format!("Exported {} timeline: {output}", format.label()));
+                        state.timeline_file_notes("Timeline exported", notes);
+                    }
+                    Err(error) => {
+                        state.show_file_error("Timeline export failed", error.clone());
+                        state.status.set(format!("Timeline export failed: {error}"));
+                    }
+                }
+            },
+        );
+    }
+
+    fn timeline_file_notes(&self, title: &'static str, notes: Vec<String>) {
+        if !notes.is_empty()
+            && let Some(app) = self.app.borrow().clone()
+        {
+            app.spawn_background(
+                move || {
+                    MessageDialog::new()
+                        .set_level(MessageLevel::Warning)
+                        .set_title(title)
+                        .set_description(notes.join("\n"))
+                        .set_buttons(MessageButtons::Ok)
+                        .show()
+                },
+                |_| {},
+            );
         }
     }
 

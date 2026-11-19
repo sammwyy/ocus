@@ -168,7 +168,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [ ] Effects written as WGSL shaders, used as the base for a future plugin system
 
 **Interoperability**
-- [ ] Import and export OpenTimelineIO (OTIO) and EDL
+- [x] Import and export OpenTimelineIO (OTIO) and EDL
 
 **Release quality**
 - [ ] Stable installers for Windows, macOS and Linux

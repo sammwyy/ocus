@@ -48,6 +48,23 @@ cargo run --locked
 
 Projects reference your original media rather than copying it. If you move a source, use **Relink…** in the media bin to search a folder, or right-click the missing source and choose **Relink file…** to find a renamed file. Save the updated project to keep the new paths.
 
+### Exchange timelines with another editor
+
+Use **Timeline files** in the title bar to import or export `.otio` or `.edl`.
+Import opens the timeline as a new, unsaved project; **Save** creates an editable
+`.ocus` file. The interchange files reference your original media; they do not
+copy or render it. Relative media paths are resolved next to the timeline file,
+and missing files can be relinked from the Media bin.
+
+Use **OpenTimelineIO** for multitrack cuts and gaps. Linked video sound exports
+on separate audio tracks. Use **CMX3600 EDL** for cuts with at most one video
+and one audio event playing at a time. On EDL import, choose the original
+timeline's frame rate if the file does not declare one, and include a media
+filename or path using a `* FROM CLIP NAME:` or `* SOURCE FILE:` comment.
+Interchange is not a substitute for saving an Ocus project: titles,
+transitions and retimed clips are not supported, and Ocus reports when other
+settings like color adjustments or audio fades are omitted.
+
 ### Keyboard shortcuts
 
 These shortcuts apply when a text field isn't focused. Use **Cmd** in place of **Ctrl** on macOS.

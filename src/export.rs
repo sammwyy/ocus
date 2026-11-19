@@ -1001,6 +1001,125 @@ mod tests {
     }
 
     #[test]
+    fn export_uses_full_resolution_original_even_when_proxy_is_ready() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("original.mp4");
+        assert!(
+            std::process::Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=red:s=2048x1152:r=30:d=0.1",
+                    "-c:v",
+                    "mpeg4",
+                    "-threads",
+                    "2"
+                ])
+                .arg(&source)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            crate::media::proxy::generate(&source, &std::sync::atomic::AtomicBool::new(false))
+                .unwrap()
+        );
+        let proxy = crate::media::proxy::ready(&source).unwrap();
+        assert!(
+            std::process::Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=blue:s=1280x720:r=30:d=0.1",
+                    "-c:v",
+                    "mjpeg",
+                    "-threads",
+                    "2",
+                    "-f",
+                    "nut"
+                ])
+                .arg(&proxy)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut document: serde_json::Value =
+            serde_json::from_str(&format::to_json(&Project::new("Original export")).unwrap())
+                .unwrap();
+        document["settings"]["width"] = 2048.into();
+        document["settings"]["height"] = 1152.into();
+        let mut editor = Editor::new(format::from_json(&document.to_string()).unwrap());
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: source,
+            kind: MediaKind::Video,
+            duration_us: Some(100_000),
+            has_audio: false
+        })));
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 0,
+            clip: Clip {
+                noise_reduction: false,
+                color: Default::default(),
+                lut: None,
+                transition_out: None,
+                id: 1,
+                start_frame: 0,
+                source_start_frame: 0,
+                duration_frames: 3,
+                content: ClipContent::Media { media_id: 1 },
+                volume: 1.0,
+                muted: false,
+                transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
+                linked_audio: false,
+            }
+        }));
+        let target = directory.path().join("export.mp4");
+        super::render(editor.project(), &target).unwrap();
+        let input = ffmpeg::format::input(&target).unwrap();
+        let video = input.streams().best(ffmpeg::media::Type::Video).unwrap();
+        let decoder = ffmpeg::codec::context::Context::from_parameters(video.parameters())
+            .unwrap()
+            .decoder()
+            .video()
+            .unwrap();
+        assert_eq!((decoder.width(), decoder.height()), (2048, 1152));
+        let output = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(&target)
+            .args([
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=1:1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(
+            output.stdout[0] > 200 && output.stdout[2] < 40,
+            "export used proxy instead of red original: {:?}",
+            output.stdout
+        );
+        fs::remove_file(proxy).unwrap();
+    }
+
+    #[test]
     #[ignore = "manual real-export audio measurement; set OCUS_DOWNMIX_EVIDENCE"]
     fn exports_center_only_surround_audio() {
         let dir = std::path::PathBuf::from(std::env::var("OCUS_DOWNMIX_EVIDENCE").unwrap());
@@ -1059,6 +1178,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             }
         }));
@@ -1214,6 +1334,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             },
         }));
@@ -1289,6 +1410,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             },
         }));
@@ -1410,6 +1532,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             },
         }));
@@ -1480,6 +1603,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         }];
         layered[1].clips = vec![Clip {
@@ -1496,6 +1620,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         }];
         layered.push(Track {
@@ -1525,6 +1650,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             }],
         });
@@ -1636,6 +1762,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             },
         }));
@@ -1722,6 +1849,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             },
         }));
@@ -1888,6 +2016,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             },
         }));
@@ -2015,6 +2144,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             },
         }));

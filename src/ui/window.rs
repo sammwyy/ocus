@@ -799,6 +799,16 @@ fn fade_row(state: &UiState, clip: &Clip, incoming: bool) -> Box<dyn Widget> {
     )
 }
 
+fn toggle_clip_noise_reduction(state: &UiState) {
+    if let Some((track_id, clip)) = selected_clip(state) {
+        state.edit(Command::SetClipNoiseReduction {
+            track_id,
+            clip_id: clip.id,
+            enabled: !clip.noise_reduction,
+        });
+    }
+}
+
 fn media_name(media: &Media) -> String {
     media.path.file_name().map_or_else(
         || media.path.display().to_string(),
@@ -1578,6 +1588,13 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
             );
             let badge = if missing {
                 Some("Missing".into())
+            } else if let Some(status) = state
+                .proxy_status
+                .get()
+                .get(&media.path)
+                .filter(|status| !status.is_empty())
+            {
+                Some(status.clone())
             } else {
                 media
                     .duration_us
@@ -1655,7 +1672,17 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                                     if missing {
                                         "Missing · Relink to restore".into()
                                     } else {
-                                        media_details(media)
+                                        let status = state
+                                            .proxy_status
+                                            .get()
+                                            .get(&media.path)
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        if status.is_empty() {
+                                            media_details(media)
+                                        } else {
+                                            format!("{} · {status}", media_details(media))
+                                        }
                                     },
                                     muted(),
                                     10.0,
@@ -2459,6 +2486,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         }
         if (track_kind == TrackKind::Audio || clip.linked_audio) && media.is_some() {
             let volume = clip.volume;
+            let audio_state = state.clone();
             rows.push(section(
                 "Audio",
                 vec![
@@ -2539,6 +2567,16 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         state,
                         |s| set_clip_audio(s, |clip| (clip.volume, !clip.muted)),
                     )),
+                    Box::new(
+                        Flex::row()
+                            .gap(8.0)
+                            .align(Align::Center)
+                            .child(Box::new(Checkbox::new(clip.noise_reduction, move || {
+                                toggle_clip_noise_reduction(&audio_state);
+                            })))
+                            .child(text("Noise reduction", text_color(), 11.0)),
+                    ),
+                    text("Best for speech with background noise.", faint(), 10.0),
                     inline(with_help(
                         secondary_button(
                             None,
@@ -4584,7 +4622,7 @@ fn open_project_link(url: &'static str, state: &UiState) {
     }
 }
 
-fn performance_settings(state: &UiState, hardware: bool, width: f32) -> BoxedWidget {
+fn performance_settings(state: &UiState, hardware: bool, proxies: bool, width: f32) -> BoxedWidget {
     let backends = crate::media::hardware::Backend::PLATFORM
         .iter()
         .map(|backend| backend.name())
@@ -4622,7 +4660,27 @@ fn performance_settings(state: &UiState, hardware: bool, width: f32) -> BoxedWid
                 ),
                 muted(),
                 11.0,
-            )),
+            ))
+            .child(Box::new(
+                Flex::row()
+                    .gap(10.0)
+                    .align(Align::Center)
+                    .child(Box::new(Checkbox::new(proxies, {
+                        let state = state.clone();
+                        move || state.toggle_proxies()
+                    })))
+                    .child(heading("Use proxies for preview", text_color(), 11.0)),
+            ))
+            .child(text(
+                fit(
+                    "Edit 4K footage smoothly with lightweight copies.",
+                    width,
+                    11.0,
+                ),
+                muted(),
+                11.0,
+            ))
+            .child(text("Export always uses the originals.", muted(), 11.0)),
     )
 }
 
@@ -4940,6 +4998,7 @@ fn settings_modal(state: &UiState, viewport: Size) -> BoxedWidget {
                                                 SettingsPage::Performance => performance_settings(
                                                     state,
                                                     settings.hardware_acceleration,
+                                                    settings.use_proxies,
                                                     content_width,
                                                 ),
                                                 SettingsPage::About => {
@@ -5241,6 +5300,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         }
     }
@@ -6710,6 +6770,63 @@ mod tests {
     }
 
     #[test]
+    fn proxy_preference_is_only_in_performance_and_remains_clickable() {
+        let state = UiState::new();
+        state.open_settings();
+        let appearance = render(&state, 1280.0, 760.0);
+        assert!(
+            !appearance
+                .labels
+                .iter()
+                .any(|label| label == "Use proxies for preview")
+        );
+        state.settings_page.set(SettingsPage::Performance);
+        let enabled = state.settings.peek().use_proxies;
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let viewport = Size {
+                width: 1280.0,
+                height: 760.0,
+            };
+            let mut painter = TestPainter::default();
+            let scene = Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+            assert!(
+                painter
+                    .labels
+                    .iter()
+                    .any(|label| label == "Hardware acceleration")
+            );
+            assert!(
+                painter
+                    .labels
+                    .iter()
+                    .any(|label| label == "Edit 4K footage smoothly with lightweight copies.")
+            );
+            assert!(
+                painter
+                    .labels
+                    .iter()
+                    .any(|label| label == "Export always uses the originals.")
+            );
+            let label = painter
+                .bounds
+                .iter()
+                .find(|(label, _)| label == "Use proxies for preview")
+                .unwrap()
+                .1;
+            scene
+                .hit_test(Point {
+                    x: label.x - 16.0,
+                    y: label.y + label.height / 2.0,
+                })
+                .expect("proxy checkbox must be clickable")();
+        });
+        assert_eq!(state.settings.peek().use_proxies, !enabled);
+        state.toggle_proxies();
+        assert_eq!(state.settings.peek().use_proxies, enabled);
+    }
+
+    #[test]
     fn performance_settings_toggle_hardware_acceleration() {
         let state = UiState::new();
         state.open_settings();
@@ -7422,7 +7539,8 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
-                linked_audio: false
+                noise_reduction: false,
+                linked_audio: false,
             }
         }));
         state.select_clip(Some((0, 1)));
@@ -7622,6 +7740,7 @@ mod tests {
         let painter = render(&state, 1440.0, 900.0);
         assert!(painter.labels.iter().any(|text| text == "Title 1"));
         assert!(painter.labels.iter().any(|text| text == "Title clip"));
+        assert!(!painter.labels.iter().any(|text| text == "Noise reduction"));
         state.title_text.set_value("Opening scene");
         set_title_text(&state);
         assert_eq!(
@@ -7677,10 +7796,34 @@ mod tests {
         );
         let painter = render(&state, 1440.0, 1600.0);
         assert!(painter.labels.iter().any(|label| label == "0.5 s"));
+        assert!(
+            painter
+                .labels
+                .iter()
+                .any(|label| label == "Noise reduction")
+        );
+        assert!(!selected_clip(&state).unwrap().1.noise_reduction);
+        toggle_clip_noise_reduction(&state);
+        assert!(selected_clip(&state).unwrap().1.noise_reduction);
+        state.undo();
+        assert!(!selected_clip(&state).unwrap().1.noise_reduction);
+        state.redo();
+        assert!(selected_clip(&state).unwrap().1.noise_reduction);
         set_clip_audio(&state, |clip| (clip.volume - 0.5, true));
+        assert!(selected_clip(&state).unwrap().1.noise_reduction);
         let painter = render(&state, 1440.0, 900.0);
         assert!(painter.labels.iter().any(|label| label == "50%"));
         assert!(painter.labels.iter().any(|label| label == "Unmute"));
+        let (track_id, clip) = selected_clip(&state).unwrap();
+        assert!(state.edit(Command::SetTrackLocked {
+            track_id,
+            locked: true,
+        }));
+        assert!(!state.edit(Command::SetClipNoiseReduction {
+            track_id,
+            clip_id: clip.id,
+            enabled: false,
+        }));
     }
 
     #[test]

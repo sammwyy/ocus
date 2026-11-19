@@ -267,6 +267,7 @@ pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Op
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         },
     ))
@@ -410,6 +411,7 @@ pub(crate) fn insert_media(
         transition_out: None,
         fade_in_frames: 0,
         fade_out_frames: 0,
+        noise_reduction: false,
         linked_audio: media.kind == MediaKind::Video && media.has_audio,
     };
     let end = start.checked_add(duration).ok_or("Clip range overflows")?;
@@ -525,6 +527,7 @@ pub(crate) fn detach_audio(project: &Project, selection: &[ClipRef]) -> Option<P
         });
         clip.fade_in_frames = 0;
         clip.fade_out_frames = 0;
+        clip.noise_reduction = false;
         kept.push((track_id, clip_id));
         id = id.checked_add(1)?;
     }
@@ -606,6 +609,7 @@ pub(crate) fn link_audio(project: &Project, selection: &[ClipRef]) -> Option<Pla
         clip.muted = sound.muted;
         clip.fade_in_frames = sound.fade_in_frames;
         clip.fade_out_frames = sound.fade_out_frames;
+        clip.noise_reduction = sound.noise_reduction;
     }
     Some(Planned {
         tracks,
@@ -642,6 +646,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         }
     }
@@ -901,6 +906,11 @@ mod tests {
             fade_in_frames: 15,
             fade_out_frames: 15,
         }));
+        assert!(editor.apply(Command::SetClipNoiseReduction {
+            track_id: 1,
+            clip_id: 1,
+            enabled: true,
+        }));
 
         let split = split_clips(editor.project(), &[(1, 1)], 75).unwrap();
         assert!(editor.apply(Command::ReplaceTracks(split)));
@@ -909,6 +919,7 @@ mod tests {
         let rippled = ripple_remove_clips(editor.project(), &[(1, 2)]).unwrap();
         assert!(editor.apply(Command::ReplaceTracks(rippled)));
         let pieces = &editor.project().tracks()[1].clips;
+        assert!(pieces.iter().all(|c| c.noise_reduction));
         assert_eq!(
             pieces
                 .iter()
@@ -933,6 +944,7 @@ mod tests {
                 .iter()
                 .all(|clip| clip.fade_in_frames == 0 && clip.fade_out_frames == 0)
         );
+        assert!(audio.iter().all(|c| c.noise_reduction));
         assert_eq!(
             audio
                 .iter()
@@ -944,7 +956,7 @@ mod tests {
             editor.project().tracks()[1]
                 .clips
                 .iter()
-                .all(|c| !c.linked_audio)
+                .all(|c| !c.linked_audio && !c.noise_reduction)
         );
         assert_eq!(detached.selection.len(), 4);
 
@@ -964,7 +976,7 @@ mod tests {
             editor.project().tracks()[1]
                 .clips
                 .iter()
-                .all(|c| c.linked_audio)
+                .all(|c| c.linked_audio && c.noise_reduction)
         );
     }
 

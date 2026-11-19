@@ -193,6 +193,7 @@ pub(crate) struct Monitor {
     pub playing: Signal<bool>,
     pub position: Signal<u64>,
     pub(super) preview: Signal<PreviewState>,
+    failure_status: Rc<RefCell<Option<String>>>,
     cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
     serial: Rc<Cell<u64>>,
     audio: Rc<RefCell<Option<Session>>>,
@@ -217,6 +218,7 @@ impl Monitor {
             playing: Signal::new(false),
             position: Signal::new(0),
             preview: Signal::new(PreviewState::Ready),
+            failure_status: Rc::new(RefCell::new(None)),
             cancel: Rc::new(RefCell::new(None)),
             serial: Rc::new(Cell::new(0)),
             audio: Rc::new(RefCell::new(None)),
@@ -1528,14 +1530,14 @@ impl UiState {
                 match image.map(|image| upload_preview_frame(&window, image)) {
                     Some(Ok(texture)) => {
                         monitor.slot.publish(texture, &window);
-                        monitor.frame_ready();
+                        state.preview_frame_ready(&monitor);
                     }
                     Some(Err(error)) => {
                         state.fail_preview(&monitor, error);
                     }
                     None => {
                         monitor.slot.clear(&window);
-                        monitor.frame_ready();
+                        state.preview_frame_ready(&monitor);
                     }
                 }
             },
@@ -1553,10 +1555,21 @@ impl UiState {
         })
     }
 
+    fn preview_frame_ready(&self, monitor: &Monitor) {
+        monitor.frame_ready();
+        if let Some(failure) = monitor.failure_status.borrow_mut().take()
+            && self.status.peek() == failure
+        {
+            self.status.set("Preview ready".into());
+        }
+    }
+
     fn fail_preview(&self, monitor: &Monitor, error: String) {
         self.stop(monitor);
         monitor.preview.set(PreviewState::Failed(error.clone()));
-        self.status.set(format!("Preview failed: {error}"));
+        let status = format!("Preview failed: {error}");
+        *monitor.failure_status.borrow_mut() = Some(status.clone());
+        self.status.set(status);
     }
 
     pub(super) fn retry_preview(&self, target: PlaybackMonitor) {
@@ -3405,6 +3418,35 @@ mod tests {
         assert!(state.autosave_error.peek().is_some());
         state.finish_save("film.ocus".into(), revision, None, None, Ok(()));
         assert_eq!(state.autosave_error.peek(), None);
+    }
+
+    #[test]
+    fn successful_preview_frame_clears_only_its_stale_failure_status() {
+        let state = UiState::new();
+        for monitor in [&state.source, &state.program] {
+            state.status.set("Ready".into());
+            state.preview_frame_ready(monitor);
+            assert_eq!(state.status.peek(), "Ready");
+
+            state.fail_preview(monitor, "Decode failed".into());
+            monitor.begin_preview(true);
+            state.preview_frame_ready(monitor);
+            assert_eq!(monitor.preview.peek(), PreviewState::Ready);
+            assert_eq!(state.status.peek(), "Preview ready");
+
+            state.fail_preview(monitor, "Upload failed".into());
+            monitor.begin_preview(true);
+            state.status.set("Project saved".into());
+            state.preview_frame_ready(monitor);
+            assert_eq!(monitor.preview.peek(), PreviewState::Ready);
+            assert_eq!(state.status.peek(), "Project saved");
+        }
+        state.fail_preview(&state.source, "Source decode failed".into());
+        state.fail_preview(&state.program, "Program decode failed".into());
+        state.preview_frame_ready(&state.source);
+        assert_eq!(state.status.peek(), "Preview failed: Program decode failed");
+        state.preview_frame_ready(&state.program);
+        assert_eq!(state.status.peek(), "Preview ready");
     }
 
     #[test]

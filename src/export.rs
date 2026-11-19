@@ -1051,12 +1051,13 @@ mod tests {
         })));
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
-            clip: Clip {
+            clip: Box::new(Clip {
                 keyframes: Vec::new(),
                 speed: 1.0,
                 transform: crate::timeline::Transform::default(),
                 noise_reduction: false,
                 lut: None,
+                chroma_key: None,
                 transition_out: None,
                 color: Default::default(),
                 transition: None,
@@ -1071,7 +1072,7 @@ mod tests {
                 muted: false,
                 linked_audio: true,
                 playback: Playback::Forward
-            }
+            })
         }));
         let mut settings =
             ExportSettings::for_project(64, 36, editor.project().settings().frame_rate.clone());
@@ -1262,11 +1263,12 @@ mod tests {
         })));
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
-            clip: Clip {
+            clip: Box::new(Clip {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 color: Default::default(),
                 lut: None,
+                chroma_key: None,
                 transition_out: None,
                 id: 1,
                 start_frame: 0,
@@ -1282,7 +1284,7 @@ mod tests {
                 linked_audio: false,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
-            }
+            })
         }));
         let target = directory.path().join("export.mp4");
         super::render(editor.project(), &target).unwrap();
@@ -1364,9 +1366,10 @@ mod tests {
             .id;
         assert!(editor.apply(Command::InsertClip {
             track_id,
-            clip: Clip {
+            clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
+                chroma_key: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1384,7 +1387,7 @@ mod tests {
                 linked_audio: false,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
-            }
+            })
         }));
         let target = dir.join("export.mp4");
         super::render(editor.project(), &target).unwrap();
@@ -1524,9 +1527,10 @@ mod tests {
         let mut editor = Editor::new(format::from_json(&document.to_string()).unwrap());
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
-            clip: Clip {
+            clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
+                chroma_key: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1544,7 +1548,7 @@ mod tests {
                 linked_audio: false,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
-            },
+            }),
         }));
         let control = Arc::new(ExportControl::default());
         let result = super::render_with_control(editor.project(), &target, control.clone());
@@ -1578,6 +1582,82 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "writes chroma-key demo exports to OCUS_CHROMA_EVIDENCE"]
+    fn chroma_key_export_evidence() {
+        let dir = std::path::PathBuf::from(
+            std::env::var("OCUS_CHROMA_EVIDENCE").expect("set evidence directory"),
+        );
+        fs::create_dir_all(&dir).unwrap();
+        for (name, filter) in [
+            (
+                "foreground",
+                "color=c=0x00FF00:s=640x360:r=30:d=2,drawbox=x=240:y=100:w=160:h=160:color=red:t=fill",
+            ),
+            ("background", "testsrc2=s=640x360:r=30:d=2"),
+        ] {
+            assert!(
+                std::process::Command::new("ffmpeg")
+                    .args([
+                        "-v", "error", "-y", "-f", "lavfi", "-i", filter, "-c:v", "ffv1"
+                    ])
+                    .arg(dir.join(format!("{name}.mkv")))
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let mut document: serde_json::Value =
+            serde_json::from_str(&format::to_json(&Project::new("Chroma key demo")).unwrap())
+                .unwrap();
+        document["settings"]["width"] = 640.into();
+        document["settings"]["height"] = 360.into();
+        let mut editor = Editor::new(format::from_json(&document.to_string()).unwrap());
+        for (track_id, name) in [(0, "background"), (1, "foreground")] {
+            let id = track_id + 1;
+            assert!(editor.apply(Command::ImportMedia(Media {
+                id,
+                path: dir.join(format!("{name}.mkv")),
+                kind: MediaKind::Video,
+                duration_us: Some(2_000_000),
+                has_audio: false,
+            })));
+            let clip = serde_json::from_value(serde_json::json!({
+                "id": id, "start_frame": 0, "source_start_frame": 0,
+                "duration_frames": 60, "content": {"media": {"media_id": id}},
+                "volume": 1.0, "muted": false
+            }))
+            .unwrap();
+            assert!(editor.apply(Command::InsertClip {
+                track_id,
+                clip: Box::new(clip)
+            }));
+        }
+        super::render(editor.project(), &dir.join("before.mp4")).unwrap();
+        assert!(editor.apply(Command::SetClipChromaKey {
+            track_id: 1,
+            clip_id: 2,
+            key: Some(Default::default()),
+        }));
+        fs::write(
+            dir.join("keyed.ocus"),
+            format::to_json(editor.project()).unwrap(),
+        )
+        .unwrap();
+        super::render(editor.project(), &dir.join("after.mp4")).unwrap();
+        assert!(editor.apply(Command::SetTransition {
+            track_id: 1,
+            clip_id: 2,
+            transition: Some(crate::timeline::Transition {
+                kind: crate::timeline::TransitionKind::Fade,
+                duration_frames: 30,
+                direction: Default::default(),
+            }),
+        }));
+        super::render(editor.project(), &dir.join("transition.mp4")).unwrap();
+        println!("Chroma key exports: {}", dir.display());
+    }
+
+    #[test]
     fn exports_a_video_clip_as_playable_h264_mp4() {
         let dir = export_test_base().join(format!("ocus-export-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
@@ -1604,9 +1684,10 @@ mod tests {
         })));
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
-            clip: Clip {
+            clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
+                chroma_key: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1624,7 +1705,7 @@ mod tests {
                 linked_audio: false,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
-            },
+            }),
         }));
         let progress = std::sync::Arc::new(super::ExportControl::default());
         super::render_with_control(editor.project(), &target, progress.clone()).unwrap_or_else(
@@ -1730,9 +1811,10 @@ mod tests {
         }));
         assert!(editor.apply(Command::InsertClip {
             track_id: 2,
-            clip: Clip {
+            clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
+                chroma_key: None,
                 id: 3,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1750,7 +1832,7 @@ mod tests {
                 linked_audio: false,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
-            },
+            }),
         }));
         let with_audio = dir.join("audio.mp4");
         assert!(super::can_render(editor.project()));
@@ -1808,6 +1890,7 @@ mod tests {
         layered[0].clips = vec![Clip {
             playback: crate::timeline::Playback::Forward,
             lut: None,
+            chroma_key: None,
             id: 4,
             start_frame: 15,
             source_start_frame: 15,
@@ -1829,6 +1912,7 @@ mod tests {
         layered[1].clips = vec![Clip {
             playback: crate::timeline::Playback::Forward,
             lut: None,
+            chroma_key: None,
             id: 5,
             start_frame: 0,
             source_start_frame: 0,
@@ -1857,6 +1941,7 @@ mod tests {
             clips: vec![Clip {
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
+                chroma_key: None,
                 id: 6,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1976,9 +2061,10 @@ mod tests {
         })));
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
-            clip: Clip {
+            clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
+                chroma_key: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1996,7 +2082,7 @@ mod tests {
                 linked_audio: false,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
-            },
+            }),
         }));
         super::render(editor.project(), &target).unwrap();
         assert_eq!(
@@ -2061,9 +2147,10 @@ mod tests {
         let mut editor = Editor::new(format::from_json(&document.to_string()).unwrap());
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
-            clip: Clip {
+            clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
+                chroma_key: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -2087,7 +2174,7 @@ mod tests {
                 linked_audio: false,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
-            },
+            }),
         }));
         super::render(editor.project(), &target).unwrap();
         let output = ffmpeg::format::input(&target).unwrap();
@@ -2238,9 +2325,10 @@ mod tests {
             .id;
         assert!(editor.apply(Command::InsertClip {
             track_id,
-            clip: Clip {
+            clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
+                chroma_key: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -2258,7 +2346,7 @@ mod tests {
                 linked_audio: false,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
-            },
+            }),
         }));
         let mut settings = ExportSettings::for_project(
             96,
@@ -2370,9 +2458,10 @@ mod tests {
         })));
         assert!(editor.apply(Command::InsertClip {
             track_id: 2,
-            clip: Clip {
+            clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
+                chroma_key: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -2390,7 +2479,7 @@ mod tests {
                 linked_audio: false,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
-            },
+            }),
         }));
         let mut settings = ExportSettings::for_project(
             96,

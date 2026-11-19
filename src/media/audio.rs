@@ -2415,7 +2415,7 @@ mod tests {
             })));
             assert!(editor.apply(Command::InsertClip {
                 track_id: 2,
-                clip: Clip {
+                clip: Box::new(Clip {
                     playback: crate::timeline::Playback::Forward,
                     speed,
                     transform: Transform::default(),
@@ -2435,7 +2435,8 @@ mod tests {
                     linked_audio: false,
                     color: Default::default(),
                     lut: None,
-                },
+                    chroma_key: None,
+                }),
             }));
             let dry_plan = Arc::new(AudioPlan::from_project(editor.project()));
             let dry = play(&dry_plan, 0, None);

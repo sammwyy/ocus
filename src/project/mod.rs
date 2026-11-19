@@ -146,6 +146,15 @@ impl Project {
             }
             let mut end = 0;
             for clip in &track.clips {
+                if clip.chroma_key.is_some_and(|key| {
+                    !key.valid()
+                        || track.kind != TrackKind::Video
+                        || !matches!(clip.content, ClipContent::Media { .. })
+                }) {
+                    return Err(
+                        "Chroma key needs a video or image clip and values between 0 and 1".into(),
+                    );
+                }
                 if clip.lut.is_some()
                     && (track.kind != TrackKind::Video
                         || !matches!(clip.content, ClipContent::Media { .. }))

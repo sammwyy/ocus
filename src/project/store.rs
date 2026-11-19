@@ -326,9 +326,10 @@ mod tests {
         let mut editor = Editor::new(Project::new("Film"));
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
-            clip: Clip {
+            clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
+                chroma_key: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -354,7 +355,7 @@ mod tests {
                 linked_audio: false,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
-            },
+            }),
         }));
         let last_export = LastExport {
             settings: ExportSettings::for_project(

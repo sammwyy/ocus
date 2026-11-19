@@ -16,22 +16,26 @@ fn colors() -> creamui::ColorScheme {
 }
 
 pub(super) fn background() -> Color {
-    colors().surface
+    opaque(colors().surface)
 }
 pub(super) fn panel() -> Color {
-    colors().surface_elevated
+    opaque(colors().surface_elevated)
 }
 pub(super) fn panel_raised() -> Color {
     let colors = colors();
-    colors.surface_elevated.mix(colors.text_primary, 0.025)
+    opaque(colors.surface_elevated.mix(colors.text_primary, 0.025))
 }
 pub(super) fn surface() -> Color {
     let colors = colors();
-    colors.surface_elevated.mix(colors.text_primary, 0.06)
+    opaque(colors.surface_elevated.mix(colors.text_primary, 0.06))
 }
 pub(super) fn surface_hover() -> Color {
     let colors = colors();
-    colors.surface_elevated.mix(colors.text_primary, 0.12)
+    opaque(colors.surface_elevated.mix(colors.text_primary, 0.12))
+}
+
+fn opaque(color: Color) -> Color {
+    Color { a: 255, ..color }
 }
 pub(super) fn border() -> Color {
     colors().border_strong
@@ -1549,6 +1553,28 @@ pub(super) fn menu_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_surfaces_are_opaque_in_every_theme() {
+        for theme in [
+            creamui::Theme::dark(),
+            creamui::Theme::light(),
+            creamui::Theme::midnight(),
+        ] {
+            creamui::reactive::with_context_scope(|| {
+                creamui::reactive::provide_context(creamui::ThemeProvider::new(theme));
+                for color in [
+                    background(),
+                    panel(),
+                    panel_raised(),
+                    surface(),
+                    surface_hover(),
+                ] {
+                    assert_eq!(color.a, 255);
+                }
+            });
+        }
+    }
 
     #[test]
     fn stabilization_slider_survives_rebuild_and_commits_one_undo_step() {

@@ -5,7 +5,7 @@
 use super::UiState;
 use super::controls::Glyph;
 use super::edits::{self, ClipRef, CopiedClip};
-use super::state::PlaybackMonitor;
+use super::state::{PlaybackMonitor, SettingsPage, ZOOM_SECONDS};
 use super::timeline_view::{Geometry, Ghost, lane_weight};
 use crate::media::MediaKind;
 use crate::project::Command;
@@ -1171,6 +1171,13 @@ impl UiState {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum MenuCommand {
+    ImportSubtitles,
+    ExportOptions,
+    QuickExport,
+    ExportQueue,
+    Settings,
+    About,
+    FitTimeline,
     ImportTimeline,
     ExportTimeline(Format),
     ReverseClip(ClipRef),
@@ -1252,9 +1259,29 @@ impl MenuEntry {
 /// An open context menu; `anchor` is in window coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct MenuState {
+    pub bar: Option<BarMenu>,
     pub anchor: Point,
     pub title: String,
     pub entries: Vec<MenuEntry>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BarMenu {
+    File,
+    Edit,
+    View,
+    Help,
+}
+
+impl BarMenu {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::File => "File",
+            Self::Edit => "Edit",
+            Self::View => "View",
+            Self::Help => "Help",
+        }
+    }
 }
 
 impl UiState {
@@ -1266,7 +1293,9 @@ impl UiState {
 
     fn open_menu(&self, anchor: Point, title: impl Into<String>, entries: Vec<MenuEntry>) {
         self.cancel_drag();
+        self.menu_scroll.set(0.0);
         self.menu.set(Some(MenuState {
+            bar: None,
             anchor,
             title: title.into(),
             entries,
@@ -1276,6 +1305,16 @@ impl UiState {
     pub fn run_menu(&self, command: MenuCommand) {
         self.close_menu();
         match command {
+            MenuCommand::ImportSubtitles => self.subtitle_dialog(),
+            MenuCommand::ExportOptions => self.export_dialog(),
+            MenuCommand::QuickExport => self.quick_export(),
+            MenuCommand::ExportQueue => self.open_export_queue(),
+            MenuCommand::Settings => self.open_settings(),
+            MenuCommand::About => {
+                self.open_settings();
+                self.settings_page.set(SettingsPage::About);
+            }
+            MenuCommand::FitTimeline => self.zoom_to_fit(),
             MenuCommand::ImportTimeline => self.import_timeline_dialog(),
             MenuCommand::ExportTimeline(format) => self.export_timeline_dialog(format),
             MenuCommand::ReverseClip(target) => self.reverse_clip(target),
@@ -1344,38 +1383,307 @@ impl UiState {
         }
     }
 
-    pub(super) fn open_timeline_files_menu(&self) {
-        if self.busy.peek() {
+    pub fn show_bar_menu(&self, bar: BarMenu, anchor: Point, toggle: bool) {
+        if toggle && self.menu.peek().is_some_and(|menu| menu.bar == Some(bar)) {
+            self.close_menu();
             return;
         }
-        let can_export = self.sequence_end() > 0;
-        self.open_menu(
-            Point { x: 98.0, y: 46.0 },
-            "Timeline files",
-            vec![
+        if !toggle && !self.menu.peek().is_some_and(|menu| menu.bar.is_some()) {
+            return;
+        }
+        let entries = match bar {
+            BarMenu::File => self.file_menu_entries(),
+            BarMenu::Edit => self.edit_menu_entries(),
+            BarMenu::View => vec![
                 MenuEntry::new(
-                    "Import OTIO or EDL…",
-                    Glyph::Import,
-                    "",
-                    MenuCommand::ImportTimeline,
-                ),
-                MenuEntry::separator(),
-                MenuEntry::new(
-                    "Export OpenTimelineIO…",
-                    Glyph::Export,
-                    "",
-                    MenuCommand::ExportTimeline(Format::Otio),
+                    "Zoom in",
+                    Glyph::ZoomIn,
+                    "+ / =",
+                    MenuCommand::Action(Action::ZoomIn),
                 )
-                .enabled(can_export),
+                .enabled(self.timeline_zoom.peek() > 0),
                 MenuEntry::new(
-                    "Export CMX3600 EDL…",
-                    Glyph::Export,
-                    "",
-                    MenuCommand::ExportTimeline(Format::Edl),
+                    "Zoom out",
+                    Glyph::ZoomOut,
+                    "-",
+                    MenuCommand::Action(Action::ZoomOut),
                 )
-                .enabled(can_export),
+                .enabled(self.timeline_zoom.peek() < ZOOM_SECONDS.len() - 1),
+                MenuEntry::new("Fit timeline", Glyph::Expand, "", MenuCommand::FitTimeline)
+                    .enabled(self.sequence_end() > 0),
             ],
-        );
+            BarMenu::Help => vec![MenuEntry::new(
+                "About Ocus",
+                Glyph::Document,
+                "",
+                MenuCommand::About,
+            )],
+        };
+        self.cancel_drag();
+        self.menu_scroll.set(0.0);
+        self.menu.set(Some(MenuState {
+            bar: Some(bar),
+            anchor,
+            title: bar.label().into(),
+            entries,
+        }));
+    }
+
+    fn file_menu_entries(&self) -> Vec<MenuEntry> {
+        let busy = self.busy.peek();
+        let queue = self.export_queue.peek();
+        let exporting = queue.active().is_some();
+        let can_export = (!busy || queue.accepts_jobs_while_busy()) && self.sequence_end() > 0;
+        let repeat = self.editor.borrow().project().last_export().is_some();
+        let mut entries = vec![
+            MenuEntry::new(
+                "New",
+                Glyph::Document,
+                "Ctrl+N",
+                MenuCommand::Action(Action::New),
+            )
+            .enabled(!busy),
+            MenuEntry::new(
+                "Open…",
+                Glyph::Folder,
+                "Ctrl+O",
+                MenuCommand::Action(Action::Open),
+            )
+            .enabled(!busy),
+            MenuEntry::new(
+                "Save",
+                Glyph::Save,
+                "Ctrl+S",
+                MenuCommand::Action(Action::Save),
+            )
+            .enabled(!busy),
+            MenuEntry::new(
+                "Save as…",
+                Glyph::Save,
+                "Ctrl+Shift+S",
+                MenuCommand::Action(Action::SaveAs),
+            )
+            .enabled(!busy),
+            MenuEntry::separator(),
+            MenuEntry::new(
+                "Import media…",
+                Glyph::Import,
+                "Ctrl+I",
+                MenuCommand::Action(Action::Import),
+            )
+            .enabled(!busy),
+            MenuEntry::new(
+                "Import subtitles…",
+                Glyph::Title,
+                "",
+                MenuCommand::ImportSubtitles,
+            )
+            .enabled(!busy),
+        ];
+        entries.extend(self.timeline_file_entries());
+        entries.extend([
+            MenuEntry::separator(),
+            MenuEntry::new(
+                "Export…",
+                Glyph::Export,
+                "Ctrl+E",
+                MenuCommand::ExportOptions,
+            )
+            .enabled(can_export),
+            MenuEntry::new(
+                if exporting {
+                    "Add export…"
+                } else {
+                    "Export again"
+                },
+                Glyph::Export,
+                "",
+                MenuCommand::QuickExport,
+            )
+            .enabled(can_export && (repeat || exporting)),
+        ]);
+        if repeat && !exporting {
+            entries.push(
+                MenuEntry::new(
+                    "Export options…",
+                    Glyph::Settings,
+                    "",
+                    MenuCommand::ExportOptions,
+                )
+                .enabled(!busy),
+            );
+        }
+        entries.extend([
+            MenuEntry::new("Queue", Glyph::List, "", MenuCommand::ExportQueue),
+            MenuEntry::separator(),
+            MenuEntry::new("Settings…", Glyph::Settings, "", MenuCommand::Settings),
+        ]);
+        entries
+    }
+
+    fn edit_menu_entries(&self) -> Vec<MenuEntry> {
+        let editor = self.editor.borrow();
+        let busy = self.busy.peek();
+        let editable = !busy
+            && !self.selected.peek().is_empty()
+            && self.selected.peek().iter().all(|(id, _)| {
+                editor
+                    .project()
+                    .tracks()
+                    .iter()
+                    .any(|track| track.id == *id && !track.locked)
+            });
+        let undo = !busy && editor.can_undo();
+        let redo = !busy && editor.can_redo();
+        drop(editor);
+        let (detachable, linkable) = self.audio_link_state();
+        let (audible, all_muted) = self.audible_selection();
+        vec![
+            MenuEntry::new(
+                "Undo",
+                Glyph::Undo,
+                "Ctrl+Z",
+                MenuCommand::Action(Action::Undo),
+            )
+            .enabled(undo),
+            MenuEntry::new(
+                "Redo",
+                Glyph::Redo,
+                "Ctrl+Shift+Z",
+                MenuCommand::Action(Action::Redo),
+            )
+            .enabled(redo),
+            MenuEntry::separator(),
+            MenuEntry::new(
+                "Cut",
+                Glyph::Split,
+                "Ctrl+X",
+                MenuCommand::Action(Action::Cut),
+            )
+            .enabled(editable),
+            MenuEntry::new(
+                "Copy",
+                Glyph::Copy,
+                "Ctrl+C",
+                MenuCommand::Action(Action::Copy),
+            )
+            .enabled(!busy && !self.selected.peek().is_empty()),
+            MenuEntry::new(
+                "Paste at playhead",
+                Glyph::Import,
+                "Ctrl+V",
+                MenuCommand::Action(Action::Paste),
+            )
+            .enabled(!busy && !self.clipboard.borrow().is_empty()),
+            MenuEntry::new(
+                "Duplicate",
+                Glyph::Copy,
+                "Ctrl+D",
+                MenuCommand::Action(Action::Duplicate),
+            )
+            .enabled(editable),
+            MenuEntry::new(
+                "Select all",
+                Glyph::Grid,
+                "Ctrl+A",
+                MenuCommand::Action(Action::SelectAll),
+            )
+            .enabled(!busy && self.sequence_end() > 0),
+            MenuEntry::separator(),
+            MenuEntry::new(
+                "Split at playhead",
+                Glyph::Split,
+                "S",
+                MenuCommand::Action(Action::Split),
+            )
+            .enabled(editable && !self.split_targets().is_empty()),
+            MenuEntry::new(
+                "Reverse clip",
+                Glyph::Reverse,
+                "Shift+R",
+                MenuCommand::Action(Action::ReverseClip),
+            )
+            .enabled(
+                editable
+                    && self.selected.peek().last().is_some_and(|clip| {
+                        self.playback_reason(*clip, Playback::Reverse).is_none()
+                    }),
+            ),
+            MenuEntry::new(
+                "Add freeze frame",
+                Glyph::Freeze,
+                "Shift+F",
+                MenuCommand::Action(Action::FreezeFrame),
+            )
+            .enabled(
+                editable
+                    && self
+                        .selected
+                        .peek()
+                        .last()
+                        .is_some_and(|clip| self.can_freeze_frame(*clip)),
+            ),
+            MenuEntry::new("Detach audio", Glyph::Unlink, "", MenuCommand::DetachAudio)
+                .enabled(editable && detachable),
+            MenuEntry::new("Link audio", Glyph::Link, "", MenuCommand::LinkAudio)
+                .enabled(editable && linkable),
+            MenuEntry::new(
+                if all_muted {
+                    "Unmute audio"
+                } else {
+                    "Mute audio"
+                },
+                Glyph::Volume,
+                "",
+                MenuCommand::ToggleMute,
+            )
+            .enabled(editable && !audible.is_empty()),
+            MenuEntry::separator(),
+            MenuEntry::new(
+                "Delete",
+                Glyph::Trash,
+                "Del",
+                MenuCommand::Action(Action::Delete),
+            )
+            .enabled(editable)
+            .danger(),
+            MenuEntry::new(
+                "Ripple delete",
+                Glyph::Ripple,
+                "Shift+Del",
+                MenuCommand::Action(Action::RippleDelete),
+            )
+            .enabled(editable)
+            .danger(),
+        ]
+    }
+
+    fn timeline_file_entries(&self) -> Vec<MenuEntry> {
+        let busy = self.busy.peek();
+        let can_export = self.sequence_end() > 0;
+        vec![
+            MenuEntry::new(
+                "Import OTIO or EDL…",
+                Glyph::Import,
+                "",
+                MenuCommand::ImportTimeline,
+            )
+            .enabled(!busy),
+            MenuEntry::new(
+                "Export OpenTimelineIO…",
+                Glyph::Export,
+                "",
+                MenuCommand::ExportTimeline(Format::Otio),
+            )
+            .enabled(!busy && can_export),
+            MenuEntry::new(
+                "Export CMX3600 EDL…",
+                Glyph::Export,
+                "",
+                MenuCommand::ExportTimeline(Format::Edl),
+            )
+            .enabled(!busy && can_export),
+        ]
     }
 
     pub fn add_track(&self, kind: TrackKind) {
@@ -1950,12 +2258,21 @@ mod tests {
         let empty = UiState::new();
         let (populated, _source) = playback_state();
         for (state, can_export) in [(&empty, false), (&populated, true)] {
-            state.open_timeline_files_menu();
+            state.show_bar_menu(BarMenu::File, Point { x: 0.0, y: 46.0 }, true);
             let menu = state.menu.peek().unwrap();
             let actions: Vec<_> = menu
                 .entries
                 .iter()
-                .filter_map(|row| row.command.map(|command| (command, row.enabled)))
+                .filter_map(|row| {
+                    row.command
+                        .filter(|command| {
+                            matches!(
+                                command,
+                                MenuCommand::ImportTimeline | MenuCommand::ExportTimeline(_)
+                            )
+                        })
+                        .map(|command| (command, row.enabled))
+                })
                 .collect();
             assert_eq!(
                 actions,

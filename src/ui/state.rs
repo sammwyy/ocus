@@ -404,6 +404,7 @@ pub(crate) struct UiState {
     pub modifiers: Rc<Cell<Modifiers>>,
     pub clipboard: Rc<RefCell<Vec<CopiedClip>>>,
     pub menu: Signal<Option<MenuState>>,
+    pub menu_scroll: ScrollController,
     pub pointer: Rc<Cell<Point>>,
     pub sidebar: Signal<Sidebar>,
     pub settings_modal: Signal<bool>,
@@ -583,6 +584,7 @@ impl UiState {
             modifiers: Rc::new(Cell::new(Modifiers::default())),
             clipboard: Rc::new(RefCell::new(Vec::new())),
             menu: Signal::new(None),
+            menu_scroll: ScrollController::default(),
             pointer: Rc::new(Cell::new(Point::default())),
             sidebar: Signal::new(Sidebar::Media),
             settings_modal: Signal::new(false),
@@ -5232,13 +5234,13 @@ mod tests {
                 .borrow()
                 .contains_key(&("Insert at timeline end", 1))
         );
-        let undo = state.tooltip_controller(("Undo", 0));
-        undo.focus(true);
+        let zoom = state.tooltip_controller(("Zoom in", 0));
+        zoom.focus(true);
         build();
-        assert!(state.tooltip_controller(("Undo", 0)).visible());
+        assert!(state.tooltip_controller(("Zoom in", 0)).visible());
         removed.focus(true);
         assert!(
-            undo.visible(),
+            zoom.visible(),
             "a removed controller's effect must be dropped"
         );
         state.dirty.set(false);

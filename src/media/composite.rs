@@ -1,6 +1,8 @@
 use super::preview::{FrameImage, FrameSource, VideoLayers, blend};
 use crate::project::Project;
-use crate::timeline::{ClipContent, ColorAdjust, Title, TrackKind, Transition, TransitionKind};
+use crate::timeline::{
+    ClipContent, ColorAdjust, SlideDirection, Title, TrackKind, Transition, TransitionKind,
+};
 use crate::ui::{title_fonts, title_markup};
 use creamui::fonts::{FontWeight, HorizontalAlign, LayoutSettings, cached_layout, resolve};
 use std::collections::{HashMap, HashSet};
@@ -37,6 +39,7 @@ fn adjust_color(image: Arc<FrameImage>, color: ColorAdjust) -> Arc<FrameImage> {
 #[derive(Clone)]
 pub struct VisualPlan {
     transitions: HashMap<u64, Transition>,
+    transitions_out: HashMap<u64, Transition>,
     tracks: Vec<Vec<VisualClip>>,
     resolution: (u32, u32),
 }
@@ -107,6 +110,16 @@ impl VisualPlan {
             })
             .collect();
         Self {
+            transitions_out: project
+                .tracks()
+                .iter()
+                .flat_map(|track| &track.clips)
+                .filter_map(|clip| {
+                    clip.transition_out
+                        .clone()
+                        .map(|transition| (clip.id, transition))
+                })
+                .collect(),
             transitions: project
                 .tracks()
                 .iter()
@@ -119,6 +132,39 @@ impl VisualPlan {
                 .collect(),
             tracks,
             resolution: (project.settings().width, project.settings().height),
+        }
+    }
+
+    fn transition_at(&self, clip: &VisualClip, position: u64) -> Option<(&Transition, f64, bool)> {
+        let (id, start, duration) = clip.timing();
+        let elapsed = position.checked_sub(start)?;
+        if elapsed >= duration {
+            return None;
+        }
+        let incoming = self.transitions.get(&id);
+        let outgoing = self.transitions_out.get(&id);
+        let mut in_length =
+            incoming.map_or(0, |transition| transition.duration_frames.min(duration));
+        let mut out_length =
+            outgoing.map_or(0, |transition| transition.duration_frames.min(duration));
+        if in_length > duration - out_length {
+            in_length = in_length.min(duration / 2);
+            out_length = out_length.min(duration / 2);
+        }
+        if elapsed < in_length {
+            Some((
+                incoming?,
+                (elapsed + 1) as f64 / (in_length as f64 + 1.0),
+                false,
+            ))
+        } else if out_length > 0 && elapsed >= duration - out_length {
+            Some((
+                outgoing?,
+                (elapsed - (duration - out_length) + 1) as f64 / (out_length as f64 + 1.0),
+                true,
+            ))
+        } else {
+            None
         }
     }
 
@@ -173,14 +219,13 @@ impl Compositor {
         position: u64,
         cancelled: &Arc<AtomicBool>,
     ) -> Result<Option<FrameImage>, String> {
-        if !self.plan.transitions.is_empty()
-            && self.plan.tracks.iter().flatten().any(|clip| {
-                let (id, start, duration) = clip.timing();
-                position >= start
-                    && self.plan.transitions.get(&id).is_some_and(|transition| {
-                        position - start < duration.min(transition.duration_frames)
-                    })
-            })
+        if (!self.plan.transitions.is_empty() || !self.plan.transitions_out.is_empty())
+            && self
+                .plan
+                .tracks
+                .iter()
+                .flatten()
+                .any(|clip| self.plan.transition_at(clip, position).is_some())
         {
             return self.transition_frame(position, cancelled);
         }
@@ -316,17 +361,14 @@ impl Compositor {
                     let (_, start, duration) = clip.timing();
                     position >= start && position - start < duration
                 })?;
-                let (id, start, duration) = clip.timing();
+                let (_, start, _) = clip.timing();
                 let transition = self
                     .plan
-                    .transitions
-                    .get(&id)
-                    .filter(|transition| {
-                        position - start < duration.min(transition.duration_frames)
-                    })
-                    .cloned();
+                    .transition_at(clip, position)
+                    .map(|(transition, t, out)| (transition.clone(), t, out));
                 let previous = transition
                     .as_ref()
+                    .filter(|(_, _, out)| !out)
                     .and_then(|_| {
                         track.iter().find(|other| {
                             let (_, other_start, other_duration) = other.timing();
@@ -338,28 +380,26 @@ impl Compositor {
             })
             .collect();
         for (clip, transition, previous) in clips {
-            let Some(transition) = transition else {
+            let Some((transition, progress, out)) = transition else {
                 self.draw_clip(&clip, position, &mut pixels, &mut active, cancelled)?;
                 continue;
             };
             let mut incoming = pixels.clone();
-            let dip_through_black = transition.kind == TransitionKind::Fade && previous.is_some();
+            let dip_through_black =
+                !out && transition.kind == TransitionKind::Fade && previous.is_some();
             if let Some(previous) = previous {
                 self.draw_clip(&previous, position, &mut pixels, &mut active, cancelled)?;
             }
-            let (_, start, duration) = clip.timing();
-            let t = ((position - start + 1) as f64
-                / (duration.min(transition.duration_frames) as f64 + 1.0))
-                .clamp(f64::EPSILON, 1.0 - f64::EPSILON);
-            let offset = ((1.0 - t) * f64::from(self.width)).round() as usize;
-            let stride = self.width as usize * 4;
+            let t = if out { 1.0 - progress } else { progress };
+            let distance = 1.0 - t;
+            let (dx, dy) = match transition.direction {
+                SlideDirection::Left => (-((distance * f64::from(self.width)).round() as i64), 0),
+                SlideDirection::Right => ((distance * f64::from(self.width)).round() as i64, 0),
+                SlideDirection::Up => (0, -((distance * f64::from(self.height)).round() as i64)),
+                SlideDirection::Down => (0, (distance * f64::from(self.height)).round() as i64),
+            };
             if transition.kind == TransitionKind::Slide {
-                for (dest, src) in incoming
-                    .chunks_exact_mut(stride)
-                    .zip(pixels.chunks_exact(stride))
-                {
-                    dest[..stride - offset * 4].copy_from_slice(&src[offset * 4..]);
-                }
+                copy_shifted(&pixels, &mut incoming, self.width, self.height, -dx, -dy);
             }
             self.draw_clip(&clip, position, &mut incoming, &mut active, cancelled)?;
             match transition.kind {
@@ -383,12 +423,7 @@ impl Compositor {
                     }
                 }
                 TransitionKind::Slide => {
-                    for (dest, src) in pixels
-                        .chunks_exact_mut(stride)
-                        .zip(incoming.chunks_exact(stride))
-                    {
-                        dest[offset * 4..].copy_from_slice(&src[..stride - offset * 4]);
-                    }
+                    copy_shifted(&incoming, &mut pixels, self.width, self.height, dx, dy);
                 }
             }
         }
@@ -398,6 +433,25 @@ impl Compositor {
             height: self.height,
             pixels,
         }))
+    }
+}
+
+fn copy_shifted(source: &[u8], dest: &mut [u8], width: u32, height: u32, dx: i64, dy: i64) {
+    let columns = i64::from(width) - dx.abs();
+    let rows = i64::from(height) - dy.abs();
+    if columns <= 0 || rows <= 0 {
+        return;
+    }
+    let stride = width as usize * 4;
+    let source_x = (-dx).max(0) as usize * 4;
+    let dest_x = dx.max(0) as usize * 4;
+    let source_y = (-dy).max(0) as usize;
+    let dest_y = dy.max(0) as usize;
+    let length = columns as usize * 4;
+    for row in 0..rows as usize {
+        let from = (source_y + row) * stride + source_x;
+        let to = (dest_y + row) * stride + dest_x;
+        dest[to..to + length].copy_from_slice(&source[from..from + length]);
     }
 }
 
@@ -640,6 +694,7 @@ mod tests {
         let plan = |color| VisualPlan {
             resolution: (2, 2),
             transitions: HashMap::new(),
+            transitions_out: HashMap::new(),
             tracks: vec![vec![VisualClip::Media(FrameSource {
                 color,
                 clip_id: 1,
@@ -683,6 +738,7 @@ mod tests {
                 Transition {
                     kind,
                     duration_frames: 2,
+                    direction: Default::default(),
                 },
             );
             let frame = Compositor::new(transition_plan, 2, 2, (30, 1))
@@ -705,6 +761,231 @@ mod tests {
         }
     }
     static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn out_transition_pixels_and_directional_slides() {
+        use crate::timeline::SlideDirection;
+        ffmpeg_next::init().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let source = |id, color: [u8; 4], start, duration| {
+            let path = dir.path().join(format!("polish-{id}.tga"));
+            let mut tga = vec![0; 18];
+            tga[2] = 2;
+            tga[12..14].copy_from_slice(&4u16.to_le_bytes());
+            tga[14..16].copy_from_slice(&4u16.to_le_bytes());
+            tga[16] = 32;
+            tga[17] = 40;
+            tga.extend([color[2], color[1], color[0], color[3]].repeat(16));
+            fs::write(&path, tga).unwrap();
+            VisualClip::Media(FrameSource {
+                color: Default::default(),
+                clip_id: id,
+                path,
+                kind: MediaKind::Image,
+                start,
+                source_start: 0,
+                duration,
+            })
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        for lower in [false, true] {
+            for out in [false, true] {
+                for kind in [
+                    TransitionKind::Fade,
+                    TransitionKind::Dissolve,
+                    TransitionKind::Slide,
+                ] {
+                    for direction in [
+                        SlideDirection::Left,
+                        SlideDirection::Right,
+                        SlideDirection::Up,
+                        SlideDirection::Down,
+                    ] {
+                        for alpha in [0, 128, 255] {
+                            let mut plan = VisualPlan {
+                                transitions: HashMap::new(),
+                                transitions_out: HashMap::new(),
+                                tracks: if lower {
+                                    vec![vec![source(1, [240, 0, 0, 255], 0, 20)]]
+                                } else {
+                                    vec![]
+                                },
+                                resolution: (4, 4),
+                            };
+                            plan.tracks.push(vec![source(2, [0, 0, 240, alpha], 5, 5)]);
+                            let transition = Transition {
+                                kind,
+                                direction,
+                                duration_frames: 3,
+                            };
+                            if out {
+                                plan.transitions_out.insert(2, transition);
+                            } else {
+                                plan.transitions.insert(2, transition);
+                            }
+                            let mut compositor = Compositor::new(plan, 4, 4, (30, 1));
+                            let under = if lower {
+                                [240, 0, 0, 255]
+                            } else {
+                                [0, 0, 0, 255]
+                            };
+                            let mut fully_visible = under;
+                            blend(&mut fully_visible, &[0, 0, 240, alpha]);
+                            for phase in 0..3 {
+                                let position = if out { 7 + phase } else { 5 + phase };
+                                let t = (phase + 1) as f64 / 4.0;
+                                let opacity = if out { 1.0 - t } else { t };
+                                let frame =
+                                    compositor.frame(position, &cancelled).unwrap().unwrap();
+                                let offset = if out { phase + 1 } else { 3 - phase } as i32;
+                                let (dx, dy) = match direction {
+                                    SlideDirection::Left => (-offset, 0),
+                                    SlideDirection::Right => (offset, 0),
+                                    SlideDirection::Up => (0, -offset),
+                                    SlideDirection::Down => (0, offset),
+                                };
+                                for y in 0..4i32 {
+                                    for x in 0..4i32 {
+                                        let expected = if kind == TransitionKind::Slide {
+                                            if (0..4).contains(&(x - dx))
+                                                && (0..4).contains(&(y - dy))
+                                            {
+                                                fully_visible
+                                            } else {
+                                                under
+                                            }
+                                        } else {
+                                            std::array::from_fn(|channel| {
+                                                (f64::from(under[channel]) * (1.0 - opacity)
+                                                    + f64::from(fully_visible[channel]) * opacity)
+                                                    .round()
+                                                    as u8
+                                            })
+                                        };
+                                        let i = (y * 4 + x) as usize * 4;
+                                        assert_eq!(
+                                            &frame.pixels[i..i + 4],
+                                            &expected,
+                                            "{kind:?} {direction:?} out={out} lower={lower} phase={phase} x={x} y={y}"
+                                        );
+                                    }
+                                }
+                            }
+                            if out {
+                                assert_eq!(
+                                    &compositor.frame(6, &cancelled).unwrap().unwrap().pixels[..4],
+                                    &fully_visible
+                                );
+                            } else {
+                                assert_eq!(
+                                    &compositor.frame(8, &cancelled).unwrap().unwrap().pixels[..4],
+                                    &fully_visible
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let transition = Transition {
+            kind: TransitionKind::Dissolve,
+            direction: SlideDirection::Right,
+            duration_frames: u64::MAX,
+        };
+        for duration in [1, 2, 3, 4] {
+            let plan = VisualPlan {
+                transitions: HashMap::from([(2, transition.clone())]),
+                transitions_out: HashMap::from([(2, transition.clone())]),
+                tracks: vec![vec![source(2, [0, 0, 240, 255], 0, duration)]],
+                resolution: (4, 4),
+            };
+            let mut compositor = Compositor::new(plan.clone(), 4, 4, (30, 1));
+            for position in 0..duration {
+                let length = duration / 2;
+                let opacity = if position < length {
+                    (position + 1) as f64 / (length + 1) as f64
+                } else if position >= duration - length {
+                    (duration - position) as f64 / (length + 1) as f64
+                } else {
+                    1.0
+                };
+                assert_eq!(
+                    &compositor
+                        .frame(position, &cancelled)
+                        .unwrap()
+                        .unwrap()
+                        .pixels[..4],
+                    &[0, 0, (240.0 * opacity).round() as u8, 255]
+                );
+            }
+            assert!(compositor.frame(duration, &cancelled).unwrap().is_none());
+            let mut out_only = plan;
+            out_only.transitions.clear();
+            let mut compositor = Compositor::new(out_only, 4, 4, (30, 1));
+            for position in 0..duration {
+                let opacity = (duration - position) as f64 / (duration + 1) as f64;
+                assert_eq!(
+                    &compositor
+                        .frame(position, &cancelled)
+                        .unwrap()
+                        .unwrap()
+                        .pixels[..4],
+                    &[0, 0, (240.0 * opacity).round() as u8, 255]
+                );
+            }
+        }
+        let mut legacy = serde_json::to_value(Project::new("Legacy slide")).unwrap();
+        legacy["version"] = 1.into();
+        legacy["settings"]["width"] = 4.into();
+        legacy["settings"]["height"] = 4.into();
+        legacy["media"] = serde_json::json!([crate::media::Media {
+            id: 1,
+            path: dir.path().join("polish-2.tga"),
+            kind: MediaKind::Image,
+            duration_us: None,
+            has_audio: false,
+        }]);
+        legacy["tracks"][0]["clips"] = serde_json::json!([{
+            "id": 2, "start_frame": 5, "source_start_frame": 0,
+            "duration_frames": 5, "content": {"media": {"media_id": 1}},
+            "volume": 1.0, "muted": false,
+            "transition": {"kind": "slide", "duration_frames": 3}
+        }]);
+        let old_project = crate::project::format::from_json(&legacy.to_string()).unwrap();
+        legacy["tracks"][0]["clips"][0]["transition"]["direction"] = "right".into();
+        legacy["tracks"][0]["clips"][0]["transition_out"] = serde_json::Value::Null;
+        let new_project = crate::project::format::from_json(&legacy.to_string()).unwrap();
+        let mut old = Compositor::new(VisualPlan::from_project(&old_project), 4, 4, (30, 1));
+        let mut new = Compositor::new(VisualPlan::from_project(&new_project), 4, 4, (30, 1));
+        for position in 0..11 {
+            assert_eq!(
+                old.frame(position, &cancelled)
+                    .unwrap()
+                    .map(|frame| frame.pixels),
+                new.frame(position, &cancelled)
+                    .unwrap()
+                    .map(|frame| frame.pixels)
+            );
+        }
+        legacy["tracks"][0]["clips"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("transition");
+        legacy["tracks"][0]["clips"][0]["transition_out"] =
+            serde_json::json!({"kind": "fade", "duration_frames": 3});
+        legacy["media"][0]["path"] = dir
+            .path()
+            .join("missing.tga")
+            .to_string_lossy()
+            .into_owned()
+            .into();
+        let missing = crate::project::format::from_json(&legacy.to_string()).unwrap();
+        assert!(
+            Compositor::new(VisualPlan::from_project(&missing), 4, 4, (30, 1))
+                .frame(8, &cancelled)
+                .is_err()
+        );
+    }
 
     #[test]
     fn hidden_video_tracks_do_not_contribute_titles_or_decode_missing_media() {
@@ -775,10 +1056,12 @@ mod tests {
         tga.extend([0, 0, 0, 255].repeat(8));
         fs::write(&still, tga).unwrap();
         let plan = VisualPlan {
+            transitions_out: HashMap::new(),
             resolution: (4, 2),
             transitions: HashMap::from([(
                 2,
                 Transition {
+                    direction: Default::default(),
                     kind: TransitionKind::Dissolve,
                     duration_frames: 3,
                 },
@@ -860,10 +1143,12 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         for alpha in [0, 128] {
             let overlay_plan = VisualPlan {
+                transitions_out: HashMap::new(),
                 resolution: (4, 2),
                 transitions: HashMap::from([(
                     3,
                     Transition {
+                        direction: Default::default(),
                         kind: TransitionKind::Fade,
                         duration_frames: 3,
                     },
@@ -909,10 +1194,12 @@ mod tests {
                 TransitionKind::Slide,
             ] {
                 let mut plan = VisualPlan {
+                    transitions_out: HashMap::new(),
                     resolution: (4, 2),
                     transitions: HashMap::from([(
                         2,
                         Transition {
+                            direction: Default::default(),
                             kind,
                             duration_frames: 3,
                         },
@@ -983,10 +1270,12 @@ mod tests {
             }
         }
         let plan = VisualPlan {
+            transitions_out: HashMap::new(),
             resolution: (4, 2),
             transitions: HashMap::from([(
                 2,
                 Transition {
+                    direction: Default::default(),
                     kind: TransitionKind::Dissolve,
                     duration_frames: 30,
                 },
@@ -1042,6 +1331,7 @@ mod tests {
                 .success()
         );
         let plan = VisualPlan {
+            transitions_out: HashMap::new(),
             transitions: HashMap::new(),
             resolution: (1920, 1080),
             tracks: vec![vec![VisualClip::Media(FrameSource {
@@ -1091,6 +1381,7 @@ mod tests {
             );
             let frames = 10 * u64::from(fps.0 / fps.1);
             let plan = VisualPlan {
+                transitions_out: HashMap::new(),
                 transitions: HashMap::new(),
                 resolution: (1920, 1080),
                 tracks: vec![vec![VisualClip::Media(FrameSource {
@@ -1232,6 +1523,7 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         for (tracks, decoded) in scenarios {
             let mut plan = VisualPlan {
+                transitions_out: HashMap::new(),
                 transitions: HashMap::new(),
                 tracks,
                 resolution: (160, 90),
@@ -1262,6 +1554,7 @@ mod tests {
             assert!(compositor.frame(3, &cancelled).unwrap().is_none());
         }
         let plan = VisualPlan {
+            transitions_out: HashMap::new(),
             transitions: HashMap::new(),
             tracks: vec![
                 vec![source(0, dir.join("missing.tga"))],
@@ -1394,6 +1687,7 @@ mod tests {
             },
         };
         let plan = VisualPlan {
+            transitions_out: HashMap::new(),
             transitions: HashMap::new(),
             tracks: vec![
                 vec![source(1, red.clone())],
@@ -1479,6 +1773,7 @@ mod tests {
         };
         assert!(leftmost_green(&moved.pixels) > leftmost_green(&image.pixels));
         let behind = VisualPlan {
+            transitions_out: HashMap::new(),
             transitions: HashMap::new(),
             tracks: vec![vec![title], vec![source(2, blue.clone())]],
             resolution: (160, 90),

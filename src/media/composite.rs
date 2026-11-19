@@ -104,6 +104,7 @@ impl VisualPlan {
                                 speed: clip.speed,
                                 playback: clip.playback,
                                 lut: clip.lut.clone(),
+                                chroma_key: clip.chroma_key,
                                 color: clip.color,
                                 clip_id: clip.id,
                                 path: media.path.clone(),
@@ -182,6 +183,17 @@ impl VisualPlan {
             ))
         } else {
             None
+        }
+    }
+
+    pub fn replace_chroma_key(&mut self, clip_id: u64, key: crate::timeline::ChromaKey) {
+        for clip in self.tracks.iter_mut().flatten() {
+            if let VisualClip::Media(source) = clip
+                && source.clip_id == clip_id
+            {
+                source.chroma_key = Some(key);
+                return;
+            }
         }
     }
 
@@ -265,7 +277,10 @@ impl Compositor {
                         visible = true;
                         active.push(source.clip_id);
                         let image = adjust_color(
-                            self.layers.layer_at(source, position, cancelled)?,
+                            apply_chroma_key(
+                                self.layers.layer_at(source, position, cancelled)?,
+                                source.chroma_key,
+                            ),
                             source.color,
                         );
                         let image = apply_lut(&mut self.luts, source, image)?;
@@ -353,7 +368,10 @@ impl Compositor {
                         .saturating_sub(1),
                 );
                 let image = adjust_color(
-                    self.layers.layer_at(source, position, cancelled)?,
+                    apply_chroma_key(
+                        self.layers.layer_at(source, position, cancelled)?,
+                        source.chroma_key,
+                    ),
                     source.color,
                 );
                 let image = apply_lut(&mut self.luts, source, image)?;
@@ -675,6 +693,41 @@ fn clip_span(
     span.end = partition(span.start, span.end, last);
 }
 
+pub(super) fn apply_chroma_key(
+    image: Arc<FrameImage>,
+    key: Option<crate::timeline::ChromaKey>,
+) -> Arc<FrameImage> {
+    let Some(key) = key else {
+        return image;
+    };
+    let uv = |color: [u8; 3]| {
+        let [r, g, b] = color.map(|v| f32::from(v) / 255.0);
+        [
+            -0.168736 * r - 0.331264 * g + 0.5 * b,
+            0.5 * r - 0.418688 * g - 0.081312 * b,
+        ]
+    };
+    let target = uv(key.color);
+    let dominant = (0..3).max_by_key(|&i| key.color[i]).unwrap();
+    let mut image = Arc::unwrap_or_clone(image);
+    for pixel in image.pixels.as_chunks_mut::<4>().0 {
+        let value = uv([pixel[0], pixel[1], pixel[2]]);
+        let distance = ((value[0] - target[0]).powi(2) + (value[1] - target[1]).powi(2)).sqrt();
+        let t = if key.smoothness == 0.0 {
+            if distance <= key.similarity { 0.0 } else { 1.0 }
+        } else {
+            ((distance - key.similarity) / key.smoothness).clamp(0.0, 1.0)
+        };
+        let alpha = t * t * (3.0 - 2.0 * t);
+        pixel[3] = (f32::from(pixel[3]) * alpha).round() as u8;
+        let others =
+            (f32::from(pixel[(dominant + 1) % 3]) + f32::from(pixel[(dominant + 2) % 3])) * 0.5;
+        let channel = f32::from(pixel[dominant]);
+        pixel[dominant] = (channel - (channel - others).max(0.0) * key.spill).round() as u8;
+    }
+    Arc::new(image)
+}
+
 pub(super) fn apply_lut(
     cache: &mut HashMap<std::path::PathBuf, CompiledLut>,
     source: &FrameSource,
@@ -918,6 +971,111 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
+    fn chroma_key_alpha_softness_spill_and_disabled() {
+        let image = |rgb: [u8; 3]| {
+            Arc::new(FrameImage {
+                picture: (0, 0, 1, 1),
+                width: 1,
+                height: 1,
+                pixels: vec![rgb[0], rgb[1], rgb[2], 200],
+            })
+        };
+        let key = crate::timeline::ChromaKey::default();
+        assert_eq!(apply_chroma_key(image([0, 255, 0]), Some(key)).pixels[3], 0);
+        assert_eq!(
+            apply_chroma_key(image([255, 0, 0]), Some(key)).pixels[3],
+            200
+        );
+        let soft = apply_chroma_key(image([40, 225, 40]), Some(key));
+        assert!(
+            soft.pixels[3] > 0 && soft.pixels[3] < 200,
+            "{:?}",
+            soft.pixels
+        );
+        assert!(soft.pixels[1] < 225);
+        let original = image([0, 255, 0]);
+        assert!(Arc::ptr_eq(
+            &original,
+            &apply_chroma_key(original.clone(), None)
+        ));
+        let hard = crate::timeline::ChromaKey {
+            smoothness: 0.0,
+            ..key
+        };
+        assert_eq!(
+            apply_chroma_key(image([0, 255, 0]), Some(hard)).pixels[3],
+            0
+        );
+    }
+
+    #[test]
+    fn chroma_key_reveals_lower_track_normally_and_during_transitions() {
+        use crate::timeline::{ChromaKey, Transition, TransitionKind};
+        let dir = tempfile::tempdir().unwrap();
+        let source = |id, rgb: [u8; 3], key| {
+            let path = dir.path().join(format!("{id}.tga"));
+            let mut tga = vec![0; 18];
+            tga[2] = 2;
+            tga[12..14].copy_from_slice(&4u16.to_le_bytes());
+            tga[14..16].copy_from_slice(&2u16.to_le_bytes());
+            tga[16] = 32;
+            tga[17] = 40;
+            tga.extend([rgb[2], rgb[1], rgb[0], 255].repeat(8));
+            fs::write(&path, tga).unwrap();
+            VisualClip::Media(FrameSource {
+                speed: 1.0,
+                playback: Default::default(),
+                lut: None,
+                chroma_key: key,
+                clip_id: id,
+                path,
+                color: Default::default(),
+                kind: MediaKind::Image,
+                start: 0,
+                source_start: 0,
+                duration: 20,
+                keyframes: Vec::new(),
+                transform: Transform::default(),
+            })
+        };
+        for transition in [
+            None,
+            Some(TransitionKind::Fade),
+            Some(TransitionKind::Dissolve),
+            Some(TransitionKind::Slide),
+        ] {
+            let plan = VisualPlan {
+                transitions_out: HashMap::new(),
+                resolution: (4, 2),
+                transitions: transition
+                    .map(|kind| {
+                        HashMap::from([(
+                            2,
+                            Transition {
+                                kind,
+                                duration_frames: 10,
+                                direction: Default::default(),
+                            },
+                        )])
+                    })
+                    .unwrap_or_default(),
+                tracks: vec![
+                    vec![source(1, [240, 0, 0], None)],
+                    vec![source(2, [0, 255, 0], Some(ChromaKey::default()))],
+                ],
+            };
+            let mut compositor = Compositor::new(plan, 4, 2, (30, 1));
+            let image = compositor
+                .frame(4, &Arc::new(AtomicBool::new(false)))
+                .unwrap()
+                .unwrap();
+            for pixel in image.pixels.as_chunks::<4>().0 {
+                assert_eq!(*pixel, [240, 0, 0, 255], "{transition:?}");
+            }
+        }
+    }
+
+    #[test]
     fn proxy_crop_uses_the_fitted_picture() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("wide.mp4");
@@ -955,6 +1113,7 @@ mod tests {
             duration: 3,
             color: Default::default(),
             lut: None,
+            chroma_key: None,
             transform: Transform {
                 crop_left: 0.25,
                 ..Default::default()
@@ -1046,6 +1205,7 @@ mod tests {
                 color,
                 speed: 1.0,
                 lut: None,
+                chroma_key: None,
                 clip_id: 1,
                 path: path.clone(),
                 kind: crate::media::MediaKind::Image,
@@ -1150,6 +1310,7 @@ mod tests {
                 playback: crate::timeline::Playback::Forward,
                 color,
                 lut: Some(lut_path),
+                chroma_key: None,
                 speed: 1.0,
                 clip_id: 1,
                 path,
@@ -1298,6 +1459,7 @@ mod tests {
             duration: 11,
             color: Default::default(),
             lut: None,
+            chroma_key: None,
             transform: Transform::default(),
             keyframes: vec![
                 Keyframe::new(0, Transform::default()),
@@ -1657,6 +1819,7 @@ mod tests {
                 playback: crate::timeline::Playback::Forward,
                 clip_id,
                 lut: None,
+                chroma_key: None,
                 path,
                 kind: MediaKind::Video,
                 start: 0,
@@ -1775,6 +1938,7 @@ mod tests {
             speed: 1.0,
             playback: crate::timeline::Playback::Forward,
             lut: Some(lut_path.clone()),
+            chroma_key: None,
             clip_id: 1,
             path,
             kind: MediaKind::Image,
@@ -1863,6 +2027,7 @@ mod tests {
         let source = FrameSource {
             playback: crate::timeline::Playback::Forward,
             lut: None,
+            chroma_key: None,
             speed: 1.0,
             color: Default::default(),
             clip_id: 1,
@@ -1966,6 +2131,7 @@ mod tests {
                 color: Default::default(),
                 speed: 1.0,
                 lut: None,
+                chroma_key: None,
                 clip_id: id,
                 path,
                 kind: MediaKind::Image,
@@ -2266,6 +2432,7 @@ mod tests {
                     speed: 1.0,
                     playback: crate::timeline::Playback::Forward,
                     lut: None,
+                    chroma_key: None,
                     clip_id: 1,
                     path: video,
                     color: Default::default(),
@@ -2280,6 +2447,7 @@ mod tests {
                     speed: 1.0,
                     playback: crate::timeline::Playback::Forward,
                     lut: None,
+                    chroma_key: None,
                     clip_id: 2,
                     path: still,
                     color: Default::default(),
@@ -2606,6 +2774,7 @@ mod tests {
                 playback: Playback::Forward,
                 clip_id,
                 lut: None,
+                chroma_key: None,
                 path,
                 kind: MediaKind::Image,
                 start,
@@ -2687,6 +2856,7 @@ mod tests {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
+                chroma_key: None,
                 clip_id: id,
                 path,
                 color: Default::default(),
@@ -2898,6 +3068,7 @@ mod tests {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
+                chroma_key: None,
                 color: Default::default(),
                 clip_id: 1,
                 path,
@@ -2953,6 +3124,7 @@ mod tests {
                     speed: 1.0,
                     playback: crate::timeline::Playback::Forward,
                     lut: None,
+                    chroma_key: None,
                     color: Default::default(),
                     clip_id: 1,
                     path,
@@ -3055,6 +3227,7 @@ mod tests {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
+                chroma_key: None,
                 color: Default::default(),
                 clip_id: id,
                 path,
@@ -3275,6 +3448,7 @@ mod tests {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
+                chroma_key: None,
                 color: Default::default(),
                 clip_id: id,
                 path,

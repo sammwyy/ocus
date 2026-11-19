@@ -90,6 +90,12 @@ fn storyboard_selected(
     for channel in request.color_bits {
         params.extend(channel.to_le_bytes());
     }
+    if let Some(key) = request.chroma_key {
+        params.extend(key.color);
+        for value in [key.similarity, key.smoothness, key.spill] {
+            params.extend(value.to_le_bytes());
+        }
+    }
     for value in request.transform_bits {
         params.extend(value.to_le_bytes());
     }
@@ -280,6 +286,7 @@ mod tests {
         StoryboardKey {
             transform_bits: StoryboardKey::transform_bits(crate::timeline::Transform::default()),
             lut: None,
+            chroma_key: None,
             color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
             playback: crate::timeline::Playback::Forward,
             path,

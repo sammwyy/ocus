@@ -93,6 +93,8 @@ pub struct Clip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lut: Option<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chroma_key: Option<crate::timeline::ChromaKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<Transition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition_out: Option<Transition>,
@@ -123,6 +125,51 @@ pub struct Clip {
     pub transform: Transform,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keyframes: Vec<Keyframe>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct ChromaKey {
+    pub color: [u8; 3],
+    pub similarity: f32,
+    pub smoothness: f32,
+    pub spill: f32,
+}
+
+impl Default for ChromaKey {
+    fn default() -> Self {
+        Self {
+            color: [0, 255, 0],
+            similarity: 0.1,
+            smoothness: 0.1,
+            spill: 0.5,
+        }
+    }
+}
+
+impl ChromaKey {
+    fn bits(self) -> ([u8; 3], [u32; 3]) {
+        (
+            self.color,
+            [self.similarity, self.smoothness, self.spill].map(f32::to_bits),
+        )
+    }
+    pub fn valid(self) -> bool {
+        [self.similarity, self.smoothness, self.spill]
+            .into_iter()
+            .all(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+    }
+}
+
+impl PartialEq for ChromaKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.bits() == other.bits()
+    }
+}
+impl Eq for ChromaKey {}
+impl std::hash::Hash for ChromaKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.bits(), state);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]

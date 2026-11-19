@@ -176,6 +176,7 @@ pub fn track(project: &Project, cues: &[Cue]) -> Result<Track, String> {
             transform: Default::default(),
             noise_reduction: false,
             lut: None,
+            chroma_key: None,
             transition: None,
             transition_out: None,
             color: Default::default(),

@@ -247,6 +247,7 @@ pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Op
         Clip {
             playback: crate::timeline::Playback::Forward,
             lut: None,
+            chroma_key: None,
             id,
             start_frame,
             source_start_frame: 0,
@@ -404,6 +405,7 @@ pub(crate) fn insert_media(
     let clip = Clip {
         playback: crate::timeline::Playback::Forward,
         lut: None,
+        chroma_key: None,
         id: next_clip_id(project).ok_or("Clip ID limit reached")?,
         start_frame: start,
         source_start_frame: 0,
@@ -437,7 +439,7 @@ pub(crate) fn insert_media(
         tracks: vec![track.id],
         command: Command::InsertClip {
             track_id: track.id,
-            clip,
+            clip: Box::new(clip),
         },
     })
 }
@@ -531,6 +533,7 @@ pub(crate) fn detach_audio(project: &Project, selection: &[ClipRef]) -> Option<P
         detached.push(Clip {
             id,
             lut: None,
+            chroma_key: None,
             ..clip.clone()
         });
         clip.fade_in_frames = 0;
@@ -637,6 +640,7 @@ mod tests {
         Clip {
             playback: crate::timeline::Playback::Forward,
             lut: None,
+            chroma_key: None,
             id,
             start_frame,
             source_start_frame: 0,
@@ -670,7 +674,7 @@ mod tests {
         for (track_id, clip) in clips {
             assert!(editor.apply(Command::InsertClip {
                 track_id: *track_id,
-                clip: clip.clone(),
+                clip: Box::new(clip.clone()),
             }));
         }
         editor.project().clone()
@@ -788,6 +792,12 @@ mod tests {
         let inserted = insert_media(editor.project(), 1, Some((0, 0))).unwrap();
         assert!(editor.apply(inserted.command));
         let path = Some(std::path::PathBuf::from("look.cube"));
+        let key = Some(crate::timeline::ChromaKey::default());
+        assert!(editor.apply(Command::SetClipChromaKey {
+            track_id: 0,
+            clip_id: 1,
+            key,
+        }));
         assert!(editor.apply(Command::SetClipLut {
             track_id: 0,
             clip_id: 1,
@@ -804,11 +814,13 @@ mod tests {
             editor.project().tracks()[0]
                 .clips
                 .iter()
-                .all(|clip| clip.lut == path)
+                .all(|clip| clip.lut == path && clip.chroma_key == key)
         );
         let detached = detach_audio(editor.project(), &[(0, 1)]).unwrap();
         assert!(editor.apply(Command::ReplaceTracks(detached.tracks)));
         assert!(editor.project().tracks()[2].clips[0].lut.is_none());
+        assert!(editor.project().tracks()[2].clips[0].chroma_key.is_none());
+        assert_eq!(editor.project().tracks()[0].clips[0].chroma_key, key);
         assert_eq!(editor.project().tracks()[0].clips[0].lut, path);
     }
 
@@ -863,7 +875,10 @@ mod tests {
             for track_id in 2..2 + occupied {
                 let mut clip = title(track_id + 10, 45);
                 clip.content = ClipContent::Media { media_id: 1 };
-                assert!(editor.apply(Command::InsertClip { track_id, clip }));
+                assert!(editor.apply(Command::InsertClip {
+                    track_id,
+                    clip: Box::new(clip)
+                }));
             }
             let before = editor.project().tracks().to_vec();
             assert!(detach_audio(editor.project(), &[]).is_none());
@@ -1031,7 +1046,10 @@ mod tests {
             let mut clip = title(track_id + 10, 0);
             clip.content = ClipContent::Media { media_id: 1 };
             clip.linked_audio = audio;
-            assert!(full.apply(Command::InsertClip { track_id, clip }));
+            assert!(full.apply(Command::InsertClip {
+                track_id,
+                clip: Box::new(clip)
+            }));
         }
         let detached = detach_audio(full.project(), &[(0, 10)]).unwrap();
         assert_eq!(detached.tracks.len(), 5);

@@ -39,7 +39,7 @@ fn project(path: &Path) -> Editor {
     for id in 1..=100 {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
-            clip: Clip {
+            clip: Box::new(Clip {
                 id,
                 start_frame: (id - 1) * 60,
                 source_start_frame: 0,
@@ -57,9 +57,10 @@ fn project(path: &Path) -> Editor {
                 transform: Transform::default(),
                 keyframes: Vec::new(),
                 lut: None,
+                chroma_key: None,
                 transition: None,
                 transition_out: None,
-            },
+            }),
         }));
     }
     editor
@@ -98,6 +99,7 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
         let request = StoryboardKey {
             transform_bits: StoryboardKey::transform_bits(Transform::default()),
             lut: None,
+            chroma_key: None,
             color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
             playback: Playback::Forward,
             path: path.clone(),

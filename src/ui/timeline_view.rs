@@ -1351,10 +1351,7 @@ impl Widget for TimelineView {
                 Gesture::Scrub if end > 0 => {
                     let frame = geometry.frame(position.x).min(end - 1);
                     if state.program.position.peek() != frame {
-                        if state.program.playing.peek() {
-                            state.pause();
-                        }
-                        state.focus_frame(frame);
+                        state.seek(frame);
                     }
                 }
                 Gesture::Clip { .. } => {

@@ -1,5 +1,5 @@
 use crate::media::{Media, MediaKind};
-use crate::timeline::{ClipContent, Track, TrackKind};
+use crate::timeline::{ClipContent, Marker, Track, TrackKind};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -18,6 +18,9 @@ pub struct Project {
     settings: VideoSettings,
     media: Vec<Media>,
     tracks: Vec<Track>,
+    /// Sequence markers in ascending frame order, at most one per frame.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    markers: Vec<Marker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_export: Option<LastExport>,
 }
@@ -43,6 +46,7 @@ impl Project {
             settings: VideoSettings::default(),
             media: Vec::new(),
             tracks,
+            markers: Vec::new(),
             last_export: None,
         }
     }
@@ -61,6 +65,10 @@ impl Project {
 
     pub fn tracks(&self) -> &[Track] {
         &self.tracks
+    }
+
+    pub fn markers(&self) -> &[Marker] {
+        &self.markers
     }
 
     pub fn last_export(&self) -> Option<&LastExport> {
@@ -98,6 +106,13 @@ impl Project {
         if let Some(last) = &self.last_export {
             last.validate()?;
         }
+        if self
+            .markers
+            .windows(2)
+            .any(|pair| pair[0].frame >= pair[1].frame)
+        {
+            return Err("Markers must be unique and in frame order".into());
+        }
         let mut media_ids = HashSet::new();
         for media in &self.media {
             if !media_ids.insert(media.id)
@@ -115,6 +130,11 @@ impl Project {
             }
             let mut end = 0;
             for clip in &track.clips {
+                if clip.transition.as_ref().is_some_and(|transition| {
+                    track.kind != TrackKind::Video || transition.duration_frames == 0
+                }) {
+                    return Err("Transitions need a video track and a positive duration".into());
+                }
                 let next = clip
                     .start_frame
                     .checked_add(clip.duration_frames)
@@ -127,6 +147,7 @@ impl Project {
                     || !clip_ids.insert(clip.id)
                     || !clip.volume.is_finite()
                     || !(0.0..=2.0).contains(&clip.volume)
+                    || !clip.valid_fades()
                 {
                     return Err("Invalid or overlapping clip".into());
                 }

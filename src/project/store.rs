@@ -307,6 +307,9 @@ mod tests {
                 }),
                 volume: 1.0,
                 muted: false,
+                transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             },
         }));

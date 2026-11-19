@@ -2,6 +2,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use ffmpeg::Rescale;
 use ffmpeg_next as ffmpeg;
 use serde::{Deserialize, Serialize};
 
@@ -11,8 +12,16 @@ pub mod preview;
 
 fn seek_timestamp(input: &ffmpeg::format::context::Input, micros: u128) -> Option<i64> {
     // A seek without a stream index uses AV_TIME_BASE and the format origin.
+    timestamp_from_start(micros, format_origin(input, ffmpeg::Rational(1, 1_000_000)))
+}
+
+fn format_origin(input: &ffmpeg::format::context::Input, time_base: ffmpeg::Rational) -> i64 {
     let start = unsafe { (*input.as_ptr()).start_time };
-    timestamp_from_start(micros, start)
+    if start == ffmpeg::ffi::AV_NOPTS_VALUE {
+        0
+    } else {
+        start.rescale(ffmpeg::Rational(1, 1_000_000), time_base)
+    }
 }
 
 fn timestamp_from_start(micros: u128, start: i64) -> Option<i64> {

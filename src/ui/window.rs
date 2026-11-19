@@ -1,9 +1,9 @@
 use super::controls::{
     AUDIO, DragOverlay, ExportMeter, Glyph, Help, IMAGE, Layer, PLAYHEAD, STAGE, Scrubber, TITLE,
-    Thumb, VIDEO, ZoomSlider, accent, accent_button, background, border, chip, faint, fit, glyph,
-    heading, icon_button, kind_color, list_row, media_item, menu_row, muted, panel, panel_raised,
-    play_button, secondary_button, segment, short_duration, sized_icon_button, surface,
-    surface_hover, text, text_color, timecode, tool_button, with_help,
+    Thumb, VIDEO, ZoomSlider, accent, accent_button, background, border, chip, enabled_chip, faint,
+    fit, glyph, heading, icon_button, kind_color, list_row, media_item, menu_row, muted, panel,
+    panel_raised, play_button, secondary_button, segment, short_duration, sized_icon_button,
+    surface, surface_hover, text, text_color, timecode, tool_button, with_help,
 };
 use super::edits::ClipRef;
 use super::interaction::{Action, DragPayload, MenuState};
@@ -2466,10 +2466,17 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         }
         if media.is_some_and(|media| media.kind != MediaKind::Image) {
             let mut presets = Vec::new();
+            let mut unavailable = false;
             for speed in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] {
-                presets.push(chip(
+                let enabled = state
+                    .editor
+                    .borrow()
+                    .can_set_clip_speed(track_id, clip.id, speed);
+                unavailable |= !enabled && speed != clip.speed;
+                presets.push(enabled_chip(
                     &format!("{speed}x"),
                     clip.speed == speed,
+                    !busy && enabled,
                     state,
                     move |state| {
                         if let Some((track_id, clip)) = selected_clip(state) {
@@ -2488,7 +2495,19 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     Box::new(Grid::new().columns(3).gap(4.0).with_children(presets)),
                     text("Slower is longer · faster is shorter.", faint(), 10.0),
                     text(
-                        "Audio keeps its pitch. Stops at the next clip.",
+                        if unavailable {
+                            if project
+                                .tracks()
+                                .iter()
+                                .any(|track| track.id == track_id && track.locked)
+                            {
+                                "Unlock the track to change speed."
+                            } else {
+                                "Not enough source left for some speeds."
+                            }
+                        } else {
+                            "Audio keeps its pitch. Stops at the next clip."
+                        },
                         faint(),
                         10.0,
                     ),
@@ -7254,6 +7273,70 @@ mod tests {
         assert!(state.drag.peek().is_none());
         state.end_media_drag();
         assert_eq!(starts(0), vec![0, 90]);
+    }
+
+    #[test]
+    fn short_tail_disables_unavailable_speed_presets() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 7,
+            path: "video.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(4_000_000),
+            has_audio: false,
+        })));
+        state.insert_media(7);
+        let (track_id, clip) = selected_clip(&state).unwrap();
+        assert!(state.edit(Command::Split {
+            track_id,
+            clip_id: clip.id,
+            at_frame: 117,
+            new_id: 99,
+        }));
+        state.select_clip(Some((track_id, 99)));
+        let before = state.editor.borrow().project().clone();
+        let status = state.status.peek();
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let mut painter = TestPainter::default();
+            let scene = Renderer::new().render(
+                inspector(&state, &before, 300.0, false),
+                Size {
+                    width: 300.0,
+                    height: 2000.0,
+                },
+                &mut painter,
+            );
+            let point = |label| {
+                let rect = painter
+                    .bounds
+                    .iter()
+                    .find(|(text, _)| text == label)
+                    .unwrap()
+                    .1;
+                Point {
+                    x: rect.x + rect.width / 2.0,
+                    y: rect.y + rect.height / 2.0,
+                }
+            };
+            assert!(scene.hit_test(point("4x")).is_none());
+            assert!(
+                painter
+                    .labels
+                    .iter()
+                    .any(|text| text == "Not enough source left for some speeds.")
+            );
+            assert_eq!(state.editor.borrow().project(), &before);
+            assert_eq!(state.status.peek(), status);
+            for label in ["0.25x", "0.5x", "1.5x", "2x"] {
+                assert!(scene.hit_test(point(label)).is_some(), "{label}");
+            }
+            scene.hit_test(point("2x")).unwrap()();
+        });
+        let clip = selected_clip(&state).unwrap().1;
+        assert_eq!((clip.speed, clip.duration_frames), (2.0, 1));
+        assert!(state.editor.borrow_mut().undo());
+        assert_eq!(state.editor.borrow().project(), &before);
     }
 
     #[test]

@@ -836,6 +836,16 @@ pub(super) fn chip(
     state: &UiState,
     operation: impl Fn(&UiState) + 'static,
 ) -> BoxedWidget {
+    enabled_chip(label, active, true, state, operation)
+}
+
+pub(super) fn enabled_chip(
+    label: &str,
+    active: bool,
+    enabled: bool,
+    state: &UiState,
+    operation: impl Fn(&UiState) + 'static,
+) -> BoxedWidget {
     pressable(
         Look {
             background: if active { surface_hover() } else { CLEAR },
@@ -845,10 +855,16 @@ pub(super) fn chip(
             padding: 9.0,
             radius: 5.0,
         },
-        true,
+        enabled,
         vec![text(
             label,
-            if active { text_color() } else { muted() },
+            if active {
+                text_color()
+            } else if enabled {
+                muted()
+            } else {
+                faint()
+            },
             11.0,
         )],
         state,

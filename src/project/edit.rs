@@ -383,6 +383,16 @@ impl Editor {
         &self.project
     }
 
+    pub fn can_set_clip_speed(&self, track_id: u64, clip_id: u64, speed: f64) -> bool {
+        Self::new(self.project.clone())
+            .execute(Command::SetClipSpeed {
+                track_id,
+                clip_id,
+                speed,
+            })
+            .is_some()
+    }
+
     pub fn recovered(project: Project) -> Self {
         Self {
             saved_revision: u64::MAX,
@@ -1300,6 +1310,34 @@ mod tests {
             "linked_audio": true
         }]);
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn speed_availability_matches_commands_without_changing_history() {
+        let original = speed_project();
+        let editor = Editor::new(original.clone());
+        for (track_id, clip_id, speed) in [
+            (0, 1, 0.25),
+            (0, 1, 2.0),
+            (0, 1, 1.0),
+            (0, 1, 0.0),
+            (0, 1, f64::NAN),
+            (0, 99, 2.0),
+            (99, 1, 2.0),
+        ] {
+            let mut trial = Editor::new(original.clone());
+            assert_eq!(
+                editor.can_set_clip_speed(track_id, clip_id, speed),
+                trial.apply(Command::SetClipSpeed {
+                    track_id,
+                    clip_id,
+                    speed
+                }),
+            );
+        }
+        assert_eq!(editor.project(), &original);
+        assert!(!editor.can_undo());
+        assert!(!editor.can_redo());
     }
 
     #[test]

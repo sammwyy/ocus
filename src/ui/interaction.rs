@@ -612,10 +612,17 @@ impl UiState {
         *self.clipboard.borrow_mut() = saved;
     }
 
-    /// Selected clips under the playhead, or every clip there if none are.
+    /// Selected editable clips under the playhead, or every editable clip there if none are.
     pub fn split_targets(&self) -> Vec<ClipRef> {
         let editor = self.editor.borrow();
-        let under = edits::clips_at(editor.project(), self.program.position.peek());
+        let mut under = edits::clips_at(editor.project(), self.program.position.peek());
+        under.retain(|(track_id, _)| {
+            editor
+                .project()
+                .tracks()
+                .iter()
+                .any(|track| track.id == *track_id && !track.locked)
+        });
         let selection = self.selected.peek();
         let selected: Vec<_> = under
             .iter()
@@ -1764,6 +1771,56 @@ mod tests {
             .iter()
             .map(|clip| clip.start_frame)
             .collect()
+    }
+
+    #[test]
+    fn playhead_split_skips_locked_video_and_splits_unselected_audio_tracks() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/tmp/footage.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(3_000_000),
+            has_audio: true,
+        })));
+        for track_id in [0, 2, 3] {
+            assert!(state.edit(Command::InsertClip {
+                track_id,
+                clip: Clip {
+                    id: track_id + 1,
+                    start_frame: 0,
+                    source_start_frame: 0,
+                    duration_frames: 90,
+                    content: ClipContent::Media { media_id: 1 },
+                    volume: 1.0,
+                    muted: false,
+                    linked_audio: false,
+                },
+            }));
+        }
+        assert!(state.edit(Command::SetTrackLocked {
+            track_id: 0,
+            locked: true
+        }));
+        state.program.position.set(30);
+        assert!(state.selected.peek().is_empty());
+        let original = state.editor.borrow().project().tracks().to_vec();
+        state.run(Action::Split);
+        assert_eq!(starts(&state, 2), vec![0, 30]);
+        assert_eq!(starts(&state, 3), vec![0, 30]);
+        assert_eq!(state.editor.borrow().project().tracks()[0], original[0]);
+        state.undo();
+        assert_eq!(state.editor.borrow().project().tracks(), original);
+        for track_id in [2, 3] {
+            assert!(state.edit(Command::SetTrackLocked {
+                track_id,
+                locked: true
+            }));
+        }
+        assert!(state.split_targets().is_empty());
+        let locked = state.editor.borrow().project().clone();
+        state.run(Action::Split);
+        assert_eq!(state.editor.borrow().project(), &locked);
     }
 
     #[test]

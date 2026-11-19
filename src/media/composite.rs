@@ -224,6 +224,7 @@ impl VisualPlan {
 }
 
 pub struct Compositor {
+    fps: (u32, u32),
     luts: HashMap<std::path::PathBuf, CompiledLut>,
     width: u32,
     height: u32,
@@ -234,7 +235,7 @@ pub struct Compositor {
 
 enum Layer<'a> {
     Media(Arc<FrameImage>, Transform),
-    Title(&'a Title),
+    Title(&'a Title, crate::timeline::TitleMotion),
 }
 
 impl Compositor {
@@ -244,6 +245,7 @@ impl Compositor {
 
     pub fn new(plan: VisualPlan, width: u32, height: u32, fps: (u32, u32)) -> Self {
         Self {
+            fps,
             luts: HashMap::new(),
             width,
             height,
@@ -317,7 +319,12 @@ impl Compositor {
                         title,
                     } if *start <= position && position - *start < *duration => {
                         visible = true;
-                        pending.push(Layer::Title(title));
+                        pending.push(Layer::Title(
+                            title,
+                            title
+                                .animation
+                                .resolve(position - *start, *duration, self.fps),
+                        ));
                     }
                     _ => {}
                 }
@@ -339,14 +346,15 @@ impl Compositor {
                         blend(dest, src);
                     }
                 }
-                Layer::Title(title) => {
-                    self.glyphs.draw(
+                Layer::Title(title, motion) => {
+                    self.glyphs.draw_animated(
                         title,
                         self.width,
                         self.height,
                         self.plan.resolution.0,
                         self.width as usize * 4,
                         &mut pixels,
+                        motion,
                     );
                 }
             }
@@ -400,13 +408,25 @@ impl Compositor {
                     blend(dest, src);
                 }
             }
-            VisualClip::Title { title, .. } => self.glyphs.draw(
+            VisualClip::Title {
+                title,
+                start,
+                duration,
+                ..
+            } => self.glyphs.draw_animated(
                 title,
                 self.width,
                 self.height,
                 self.plan.resolution.0,
                 self.width as usize * 4,
                 pixels,
+                title.animation.resolve(
+                    position
+                        .saturating_sub(*start)
+                        .min(duration.saturating_sub(1)),
+                    *duration,
+                    self.fps,
+                ),
             ),
         }
         Ok(())
@@ -793,6 +813,7 @@ pub(crate) fn title_background_padding(size: f32) -> (f32, f32) {
 }
 
 impl Glyphs {
+    #[cfg(test)]
     fn draw(
         &mut self,
         title: &Title,
@@ -802,6 +823,29 @@ impl Glyphs {
         stride: usize,
         pixels: &mut [u8],
     ) {
+        self.draw_animated(
+            title,
+            width,
+            height,
+            native_width,
+            stride,
+            pixels,
+            crate::timeline::TitleAnimation::None.resolve(0, 0, (30, 1)),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_animated(
+        &mut self,
+        title: &Title,
+        width: u32,
+        height: u32,
+        native_width: u32,
+        stride: usize,
+        pixels: &mut [u8],
+        motion: crate::timeline::TitleMotion,
+    ) {
+        let (title, runs) = title_markup::animated(title, motion);
         let mut canvas = Canvas {
             width,
             height,
@@ -812,7 +856,7 @@ impl Glyphs {
             .max(1.0)
             .min(height as f32 * 2.0);
         let mut lines = vec![Vec::new()];
-        for run in title_markup::parse(title) {
+        for run in runs {
             let mut parts = run.text.split('\n').peekable();
             while let Some(part) = parts.next() {
                 if !part.is_empty() {
@@ -975,6 +1019,80 @@ fn paint(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
+    #[test]
+    fn animated_titles_render_fade_pixels_and_evidence_strip() {
+        use crate::timeline::{TITLE_TEMPLATES, TitleAnimation};
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (width, height) = (320, 180);
+        let mut strip = vec![0_u8; width * 4 * height * 4 * 3];
+        for (row, (name, animation)) in TITLE_TEMPLATES.into_iter().enumerate() {
+            let mut title = Title {
+                text: name.into(),
+                ..Title::default()
+            };
+            title.apply_template(animation);
+            let plan = VisualPlan {
+                tracks: vec![vec![VisualClip::Title {
+                    clip_id: 1,
+                    start: 0,
+                    duration: 90,
+                    title,
+                }]],
+                resolution: (640, 360),
+                transitions: HashMap::new(),
+                transitions_out: HashMap::new(),
+            };
+            let mut compositor = Compositor::new(plan, width as u32, height as u32, (30, 1));
+            if animation == TitleAnimation::Fade {
+                let mut brightness = Vec::new();
+                for frame in [0, 45, 89] {
+                    let image = compositor.frame(frame, &cancelled).unwrap().unwrap();
+                    brightness.push(
+                        image
+                            .pixels
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .map(|p| u64::from(p[0]) + u64::from(p[1]) + u64::from(p[2]))
+                            .sum::<u64>(),
+                    );
+                }
+                assert_eq!(brightness[0], 0);
+                assert!(brightness[1] > 0);
+                assert_eq!(brightness[2], 0);
+                let clip = compositor.plan.tracks[0][0].clone();
+                for frame in [0, 7, 45, 89] {
+                    let expected = compositor.frame(frame, &cancelled).unwrap().unwrap();
+                    let mut pixels = vec![0; width * height * 4];
+                    for pixel in pixels.as_chunks_mut::<4>().0 {
+                        pixel[3] = 255;
+                    }
+                    compositor
+                        .draw_clip(&clip, frame, &mut pixels, &mut Vec::new(), &cancelled)
+                        .unwrap();
+                    assert_eq!(pixels, expected.pixels);
+                }
+            }
+            for (column, frame) in [3, 8, 45, 87].into_iter().enumerate() {
+                let image = compositor.frame(frame, &cancelled).unwrap().unwrap();
+                for y in 0..height {
+                    for x in 0..width {
+                        let dest = ((row * height + y) * width * 4 + column * width + x) * 3;
+                        let source = (y * width + x) * 4;
+                        strip[dest..dest + 3].copy_from_slice(&image.pixels[source..source + 3]);
+                    }
+                }
+            }
+        }
+        if let Ok(path) = std::env::var("OCUS_TITLE_STRIP_PPM") {
+            let mut file = std::fs::File::create(path).unwrap();
+            write!(file, "P6\n{} {}\n255\n", width * 4, height * 4).unwrap();
+            file.write_all(&strip).unwrap();
+        }
+    }
+
     use super::*;
     use crate::media::MediaKind;
     use crate::media::preview::{PreviewEvent, PreviewPlan, decode_sequence};

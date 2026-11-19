@@ -546,6 +546,7 @@ mod tests {
 
     fn proxy_source(path: PathBuf, duration: u64) -> FrameSource {
         FrameSource {
+            speed: 1.0,
             lut: None,
             color: ColorAdjust::default(),
             clip_id: 1,
@@ -599,6 +600,26 @@ mod tests {
             assert!(super::super::proxy::generate(&path, &cancelled).unwrap());
             let proxy = super::super::proxy::ready(&path).unwrap();
             let source = proxy_source(path, if late { 45 } else { 30 });
+            for speed in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] {
+                let sped = FrameSource {
+                    speed,
+                    start: 10,
+                    source_start: 3,
+                    duration: ((source.duration - 3) as f64 / speed).floor() as u64,
+                    ..source.clone()
+                };
+                let mut originals = VideoLayers::new((30, 1), (160, 90));
+                let mut proxies = VideoLayers::new((30, 1), (160, 90));
+                proxies.use_proxies = true;
+                for position in sped.start..sped.start + sped.duration {
+                    let expected = originals.layer_at(&sped, position, &cancelled).unwrap();
+                    let actual = proxies.layer_at(&sped, position, &cancelled).unwrap();
+                    assert!(
+                        expected.pixels[0].abs_diff(actual.pixels[0]) <= 3,
+                        "late={late}, {speed}x at {position}"
+                    );
+                }
+            }
             let mut sequential_original = FrameReader::open_selected(
                 &source,
                 0,

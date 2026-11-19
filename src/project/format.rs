@@ -99,6 +99,24 @@ mod tests {
     }
 
     #[test]
+    fn markers_round_trip_and_unordered_markers_are_rejected() {
+        let old = to_json(&Project::new("Old")).unwrap();
+        assert!(!old.contains("markers"));
+        assert!(from_json(&old).unwrap().markers().is_empty());
+        let mut editor = crate::project::Editor::new(Project::new("Marked"));
+        assert!(editor.apply(crate::project::Command::AddMarker(48)));
+        assert!(editor.apply(crate::project::Command::AddMarker(12)));
+        let json = to_json(editor.project()).unwrap();
+        let project = from_json(&json).unwrap();
+        assert_eq!(&project, editor.project());
+        let mut document: serde_json::Value = serde_json::from_str(&json).unwrap();
+        document["markers"] = serde_json::json!([{ "frame": 48 }, { "frame": 12 }]);
+        assert!(from_json(&document.to_string()).is_err());
+        document["markers"] = serde_json::json!([{ "frame": 12 }, { "frame": 12 }]);
+        assert!(from_json(&document.to_string()).is_err());
+    }
+
+    #[test]
     fn export_options_round_trip_without_breaking_existing_projects() {
         use crate::project::export_settings::{
             AudioCodec, Container, ExportSettings, LastExport, VideoCodec,

@@ -1,5 +1,5 @@
 use crate::media::{Media, MediaKind};
-use crate::timeline::{ClipContent, Track, TrackKind};
+use crate::timeline::{ClipContent, Marker, Track, TrackKind};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -18,6 +18,9 @@ pub struct Project {
     settings: VideoSettings,
     media: Vec<Media>,
     tracks: Vec<Track>,
+    /// Sequence markers in ascending frame order, at most one per frame.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    markers: Vec<Marker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_export: Option<LastExport>,
 }
@@ -43,6 +46,7 @@ impl Project {
             settings: VideoSettings::default(),
             media: Vec::new(),
             tracks,
+            markers: Vec::new(),
             last_export: None,
         }
     }
@@ -61,6 +65,10 @@ impl Project {
 
     pub fn tracks(&self) -> &[Track] {
         &self.tracks
+    }
+
+    pub fn markers(&self) -> &[Marker] {
+        &self.markers
     }
 
     pub fn last_export(&self) -> Option<&LastExport> {
@@ -82,6 +90,13 @@ impl Project {
         }
         if let Some(last) = &self.last_export {
             last.validate()?;
+        }
+        if self
+            .markers
+            .windows(2)
+            .any(|pair| pair[0].frame >= pair[1].frame)
+        {
+            return Err("Markers must be unique and in frame order".into());
         }
         let mut media_ids = HashSet::new();
         for media in &self.media {

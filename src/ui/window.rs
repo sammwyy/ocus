@@ -2669,6 +2669,13 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     },
                 ))
                 .child(tool_button(
+                    Some(Glyph::Marker),
+                    "Marker",
+                    !busy,
+                    state,
+                    UiState::toggle_marker,
+                ))
+                .child(tool_button(
                     Some(Glyph::Tracks),
                     "Tracks",
                     !busy,
@@ -2755,6 +2762,11 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             end: timeline_end,
             fps,
             playhead: frame,
+            markers: project
+                .markers()
+                .iter()
+                .map(|marker| marker.frame)
+                .collect(),
             selected: selection.clone(),
             ghosts: plan.as_ref().map_or_else(
                 || match state.trim_draft.get() {
@@ -5114,6 +5126,12 @@ mod tests {
             end: 300,
             fps: (30, 1),
             playhead: 0,
+            markers: editor
+                .project()
+                .markers()
+                .iter()
+                .map(|marker| marker.frame)
+                .collect(),
             selected: state.selected.peek(),
             ghosts: Vec::new(),
             dragging: false,
@@ -5299,6 +5317,26 @@ mod tests {
         press(&view, 40.0, 60.0);
         drag_to(&view, at(10.0), 60.0);
         assert_eq!(state.program.position.peek(), 299);
+    }
+
+    #[test]
+    fn timeline_draws_markers_and_ruler_scrubs_snap_to_them() {
+        let state = UiState::new();
+        let view = TimelineView {
+            markers: vec![60, 120],
+            ..view(&state)
+        };
+        let mut painter = TestPainter::default();
+        view.paint(&mut painter, TIMELINE);
+        assert!(painter.labels.iter().any(|label| label == "1"));
+        assert!(painter.labels.iter().any(|label| label == "2"));
+        press(&view, at(121.0), 10.0);
+        assert_eq!(state.program.position.peek(), 120);
+        drag_to(&view, at(90.0), 10.0);
+        assert_eq!(state.program.position.peek(), 90);
+        drag_to(&view, at(59.0), 10.0);
+        assert_eq!(state.program.position.peek(), 60);
+        release(&view);
     }
 
     #[test]

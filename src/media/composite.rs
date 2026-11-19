@@ -2,7 +2,7 @@ use super::lut::{CompiledLut, Lut};
 use super::preview::{FrameImage, FrameSource, VideoLayers, blend};
 use crate::project::Project;
 use crate::timeline::{
-    ClipContent, ColorAdjust, SlideDirection, Title, TrackKind, Transform, Transition,
+    ClipContent, ColorAdjust, Playback, SlideDirection, Title, TrackKind, Transform, Transition,
     TransitionKind,
 };
 use crate::ui::{title_fonts, title_markup};
@@ -13,7 +13,7 @@ use std::sync::atomic::AtomicBool;
 use swash::scale::{Render, ScaleContext, Source, image::Image};
 use swash::zeno::{Format, Join, Stroke};
 
-fn adjust_color(image: Arc<FrameImage>, color: ColorAdjust) -> Arc<FrameImage> {
+pub(super) fn adjust_color(image: Arc<FrameImage>, color: ColorAdjust) -> Arc<FrameImage> {
     if color.neutral() {
         return image;
     }
@@ -102,6 +102,7 @@ impl VisualPlan {
                                 project.media().iter().find(|media| media.id == *media_id)?;
                             Some(VisualClip::Media(FrameSource {
                                 speed: clip.speed,
+                                playback: clip.playback,
                                 lut: clip.lut.clone(),
                                 color: clip.color,
                                 clip_id: clip.id,
@@ -343,6 +344,12 @@ impl Compositor {
         match clip {
             VisualClip::Media(source) => {
                 active.push(source.clip_id);
+                let position = position.min(
+                    source
+                        .start
+                        .saturating_add(source.duration)
+                        .saturating_sub(1),
+                );
                 let image = adjust_color(
                     self.layers.layer_at(source, position, cancelled)?,
                     source.color,
@@ -390,7 +397,7 @@ impl Compositor {
                     let (_, start, duration) = clip.timing();
                     position >= start && position - start < duration
                 })?;
-                let (_, start, _) = clip.timing();
+                let (_, start, duration) = clip.timing();
                 let transition = self
                     .plan
                     .transition_at(clip, position)
@@ -404,7 +411,22 @@ impl Compositor {
                             other_start.checked_add(other_duration) == Some(start)
                         })
                     })
-                    .cloned();
+                    .cloned()
+                    .map(|mut previous| {
+                        if let VisualClip::Media(source) = &mut previous {
+                            let handle =
+                                duration.min(transition.as_ref().unwrap().0.duration_frames);
+                            let handle = if source.playback == Playback::Reverse {
+                                let handle = handle.min(source.source_start);
+                                source.source_start -= handle;
+                                handle
+                            } else {
+                                handle
+                            };
+                            source.duration = source.duration.saturating_add(handle);
+                        }
+                        previous
+                    });
                 Some((clip.clone(), transition, previous))
             })
             .collect();
@@ -466,7 +488,7 @@ impl Compositor {
     }
 }
 
-fn draw_transformed(
+pub(super) fn draw_transformed(
     destination: &mut [u8],
     width: u32,
     height: u32,
@@ -650,7 +672,7 @@ fn clip_span(
     span.end = partition(span.start, span.end, last);
 }
 
-fn apply_lut(
+pub(super) fn apply_lut(
     cache: &mut HashMap<std::path::PathBuf, CompiledLut>,
     source: &FrameSource,
     image: Arc<FrameImage>,
@@ -920,6 +942,7 @@ mod tests {
         assert!(crate::media::proxy::generate(&path, &cancelled).unwrap());
         let source = FrameSource {
             speed: 1.0,
+            playback: crate::timeline::Playback::Forward,
             clip_id: 1,
             path,
             kind: MediaKind::Video,
@@ -1015,6 +1038,7 @@ mod tests {
             transitions: HashMap::new(),
             transitions_out: HashMap::new(),
             tracks: vec![vec![VisualClip::Media(FrameSource {
+                playback: Playback::Forward,
                 color,
                 speed: 1.0,
                 lut: None,
@@ -1118,6 +1142,7 @@ mod tests {
             transitions: HashMap::new(),
             transitions_out: HashMap::new(),
             tracks: vec![vec![VisualClip::Media(FrameSource {
+                playback: crate::timeline::Playback::Forward,
                 color,
                 lut: Some(lut_path),
                 speed: 1.0,
@@ -1492,6 +1517,7 @@ mod tests {
             );
             FrameSource {
                 speed: 1.0,
+                playback: crate::timeline::Playback::Forward,
                 clip_id,
                 lut: None,
                 path,
@@ -1608,6 +1634,7 @@ mod tests {
         fs::write(&lut_path, "LUT_1D_SIZE 2\n1 1 1\n0 0 0\n").unwrap();
         let source = FrameSource {
             speed: 1.0,
+            playback: crate::timeline::Playback::Forward,
             lut: Some(lut_path.clone()),
             clip_id: 1,
             path,
@@ -1695,6 +1722,7 @@ mod tests {
         let lut_path = dir.path().join("invert.cube");
         fs::write(&lut_path, "LUT_1D_SIZE 2\n1 1 1\n0 0 0\n").unwrap();
         let source = FrameSource {
+            playback: crate::timeline::Playback::Forward,
             lut: None,
             speed: 1.0,
             color: Default::default(),
@@ -1794,6 +1822,7 @@ mod tests {
             tga.extend([color[2], color[1], color[0], color[3]].repeat(16));
             fs::write(&path, tga).unwrap();
             VisualClip::Media(FrameSource {
+                playback: Playback::Forward,
                 color: Default::default(),
                 speed: 1.0,
                 lut: None,
@@ -2039,7 +2068,7 @@ mod tests {
         ffmpeg_next::init().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let raw = dir.path().join("frames.rgb");
-        let video = dir.path().join("out.mkv");
+        let video = dir.path().join("out.nut");
         let colors = [[240, 0, 0], [0, 240, 0], [0, 0, 240], [240, 240, 0]];
         fs::write(
             &raw,
@@ -2094,6 +2123,7 @@ mod tests {
             tracks: vec![vec![
                 VisualClip::Media(FrameSource {
                     speed: 1.0,
+                    playback: crate::timeline::Playback::Forward,
                     lut: None,
                     clip_id: 1,
                     path: video,
@@ -2106,6 +2136,7 @@ mod tests {
                 }),
                 VisualClip::Media(FrameSource {
                     speed: 1.0,
+                    playback: crate::timeline::Playback::Forward,
                     lut: None,
                     clip_id: 2,
                     path: still,
@@ -2253,6 +2284,122 @@ mod tests {
                 }
             }
         }
+        for (playback, color) in [
+            (Playback::Reverse, [240, 0, 0]),
+            (Playback::Freeze, [0, 240, 0]),
+        ] {
+            let mut plan = plan.clone();
+            let VisualClip::Media(source) = &mut plan.tracks[0][0] else {
+                unreachable!()
+            };
+            source.playback = playback;
+            source.source_start = 1;
+            let mut compositor = Compositor::new(plan.clone(), 4, 2, (30, 1));
+            for position in 2..5 {
+                let factor = (5 - position) as u8;
+                let expected = [
+                    color[0] / 4 * factor,
+                    color[1] / 4 * factor,
+                    color[2] / 4 * factor,
+                    255,
+                ];
+                assert_eq!(
+                    &compositor
+                        .frame(position, &cancelled)
+                        .unwrap()
+                        .unwrap()
+                        .pixels[..4],
+                    &expected,
+                    "{playback:?} at {position}"
+                );
+            }
+            assert_eq!(
+                &Compositor::new(plan.clone(), 4, 2, (30, 1))
+                    .frame(4, &cancelled)
+                    .unwrap()
+                    .unwrap()
+                    .pixels[..4],
+                &[color[0] / 4, color[1] / 4, color[2] / 4, 255]
+            );
+            plan.tracks[0].truncate(1);
+            plan.transitions.clear();
+            let VisualClip::Media(source) = &mut plan.tracks[0][0] else {
+                unreachable!()
+            };
+            source.source_start = 0;
+            source.duration = 4;
+            source.color = ColorAdjust {
+                brightness: 0.1,
+                contrast: 0.6,
+                saturation: 0.4,
+            };
+            let lut = dir.path().join("invert.cube");
+            fs::write(&lut, "LUT_1D_SIZE 2\n1 1 1\n0 0 0\n").unwrap();
+            source.lut = Some(lut);
+            let mut reference = Compositor::new(plan.clone(), 4, 2, (30, 1));
+            let frames: Vec<_> = (0..4)
+                .map(|position| reference.frame(position, &cancelled).unwrap().unwrap())
+                .collect();
+            for kind in [
+                TransitionKind::Fade,
+                TransitionKind::Dissolve,
+                TransitionKind::Slide,
+            ] {
+                for direction in [
+                    SlideDirection::Left,
+                    SlideDirection::Right,
+                    SlideDirection::Up,
+                    SlideDirection::Down,
+                ] {
+                    let mut plan = plan.clone();
+                    let transition = Transition {
+                        kind,
+                        direction,
+                        duration_frames: 1,
+                    };
+                    plan.transitions.insert(1, transition.clone());
+                    plan.transitions_out.insert(1, transition);
+                    let mut compositor = Compositor::new(plan, 4, 2, (30, 1));
+                    for (position, reference) in frames.iter().enumerate() {
+                        let boundary = position == 0 || position == 3;
+                        let (dx, dy) = if boundary && kind == TransitionKind::Slide {
+                            match direction {
+                                SlideDirection::Left => (-2, 0),
+                                SlideDirection::Right => (2, 0),
+                                SlideDirection::Up => (0, -1),
+                                SlideDirection::Down => (0, 1),
+                            }
+                        } else {
+                            (0, 0)
+                        };
+                        let frame = compositor
+                            .frame(position as u64, &cancelled)
+                            .unwrap()
+                            .unwrap();
+                        for y in 0..2i32 {
+                            for x in 0..4i32 {
+                                let pixel = (y * 4 + x) as usize * 4;
+                                let mut expected = [0, 0, 0, 255];
+                                if (0..4).contains(&(x - dx)) && (0..2).contains(&(y - dy)) {
+                                    let source = ((y - dy) * 4 + x - dx) as usize * 4;
+                                    expected.copy_from_slice(&reference.pixels[source..source + 4]);
+                                    if boundary && kind != TransitionKind::Slide {
+                                        for channel in &mut expected[..3] {
+                                            *channel = (f32::from(*channel) * 0.5).round() as u8;
+                                        }
+                                    }
+                                }
+                                assert_eq!(
+                                    &frame.pixels[pixel..pixel + 4],
+                                    &expected,
+                                    "{playback:?} {kind:?} {direction:?} at {position}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -2271,6 +2418,7 @@ mod tests {
             fs::write(&path, tga).unwrap();
             VisualClip::Media(FrameSource {
                 speed: 1.0,
+                playback: Playback::Forward,
                 clip_id,
                 lut: None,
                 path,
@@ -2352,6 +2500,7 @@ mod tests {
             fs::write(&path, tga).unwrap();
             VisualClip::Media(FrameSource {
                 speed: 1.0,
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 clip_id: id,
                 path,
@@ -2561,6 +2710,7 @@ mod tests {
             resolution: (1920, 1080),
             tracks: vec![vec![VisualClip::Media(FrameSource {
                 speed: 1.0,
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 color: Default::default(),
                 clip_id: 1,
@@ -2614,6 +2764,7 @@ mod tests {
                 resolution: (1920, 1080),
                 tracks: vec![vec![VisualClip::Media(FrameSource {
                     speed: 1.0,
+                    playback: crate::timeline::Playback::Forward,
                     lut: None,
                     color: Default::default(),
                     clip_id: 1,
@@ -2714,6 +2865,7 @@ mod tests {
         let source = |id, path| {
             VisualClip::Media(FrameSource {
                 speed: 1.0,
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 color: Default::default(),
                 clip_id: id,
@@ -2932,6 +3084,7 @@ mod tests {
         let source = |id, path| {
             VisualClip::Media(FrameSource {
                 speed: 1.0,
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 color: Default::default(),
                 clip_id: id,

@@ -2,7 +2,8 @@ use super::Project;
 use super::export_settings::LastExport;
 use crate::media::{Media, MediaKind};
 use crate::timeline::{
-    Clip, ClipContent, ColorAdjust, Marker, Title, Track, TrackKind, Transform, Transition,
+    Clip, ClipContent, ColorAdjust, Marker, Playback, Title, Track, TrackKind, Transform,
+    Transition,
 };
 use std::collections::HashSet;
 
@@ -36,14 +37,14 @@ pub(crate) fn split_tracks(
             id: next_id,
             start_frame: at_frame,
             source_start_frame: clip
-                .source_start_frame
-                .checked_add(clip.source_offset(offset))?,
+                .source_start_for_range(offset, clip.duration_frames - offset)?,
             duration_frames: clip.duration_frames - offset,
             fade_in_frames: 0,
             fade_out_frames: clip.fade_out_frames.min(clip.duration_frames - offset),
             ..clip.clone()
         };
         next_id = next_id.checked_add(1)?;
+        clip.source_start_frame = clip.source_start_for_range(0, offset)?;
         clip.duration_frames = offset;
         clip.transition_out = None;
         clip.fade_out_frames = 0;
@@ -56,6 +57,11 @@ pub(crate) fn split_tracks(
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
+    SetPlayback {
+        track_id: u64,
+        clip_id: u64,
+        playback: Playback,
+    },
     SetClipTransform {
         track_id: u64,
         clip_id: u64,
@@ -243,11 +249,12 @@ fn ripple_delete(project: &Project, selection: &[(u64, u64)]) -> Option<Vec<Trac
                         next_id = next_id.checked_add(1)?;
                         right.id = next_id;
                         right.transition = None;
-                        right.source_start_frame = right
-                            .source_start_frame
-                            .checked_add(clip.source_offset(end - clip.start_frame))?;
+                        right.source_start_frame =
+                            clip.source_start_for_range(end - clip.start_frame, clip_end - end)?;
                         right.start_frame = start;
                         right.duration_frames = clip_end - end;
+                        clip.source_start_frame =
+                            clip.source_start_for_range(0, start - clip.start_frame)?;
                         right.fade_in_frames = 0;
                         right.clamp_fades();
                         clip.fade_out_frames = 0;
@@ -256,13 +263,14 @@ fn ripple_delete(project: &Project, selection: &[(u64, u64)]) -> Option<Vec<Trac
                         kept.push(clip);
                         kept.push(right);
                     } else {
+                        clip.source_start_frame =
+                            clip.source_start_for_range(0, start - clip.start_frame)?;
                         clip.duration_frames = start - clip.start_frame;
                         kept.push(clip);
                     }
                 } else if clip_end > end {
-                    clip.source_start_frame = clip
-                        .source_start_frame
-                        .checked_add(clip.source_offset(end - clip.start_frame))?;
+                    clip.source_start_frame =
+                        clip.source_start_for_range(end - clip.start_frame, clip_end - end)?;
                     clip.duration_frames = clip_end - end;
                     clip.start_frame = start;
                     kept.push(clip);
@@ -289,6 +297,50 @@ pub struct Editor {
     revision: u64,
     next_revision: u64,
     saved_revision: u64,
+}
+
+pub fn freeze_at(project: &Project, track_id: u64, clip_id: u64, frame: u64) -> Option<Command> {
+    let track = project
+        .tracks()
+        .iter()
+        .find(|t| t.id == track_id && !t.locked)?;
+    let clip = track.clips.iter().find(|c| c.id == clip_id)?;
+    let ClipContent::Media { media_id } = clip.content else {
+        return None;
+    };
+    if track.kind != TrackKind::Video
+        || !project
+            .media()
+            .iter()
+            .any(|m| m.id == media_id && m.kind == MediaKind::Video)
+    {
+        return None;
+    }
+    let offset = frame.checked_sub(clip.start_frame)?;
+    let held = clip.source_frame_at(offset)?;
+    let new_id = project
+        .tracks()
+        .iter()
+        .flat_map(|t| &t.clips)
+        .map(|c| c.id)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)?;
+    let mut tracks = if offset == 0 {
+        project.tracks().to_vec()
+    } else {
+        split_tracks(project.tracks(), &[(track_id, clip_id)], frame, new_id)?
+    };
+    let right = tracks
+        .iter_mut()
+        .find(|t| t.id == track_id)?
+        .clips
+        .iter_mut()
+        .find(|c| c.id == if offset == 0 { clip_id } else { new_id })?;
+    right.playback = Playback::Freeze;
+    right.speed = 1.0;
+    right.source_start_frame = held;
+    Some(Command::ReplaceTracks(tracks))
 }
 
 pub(crate) fn trim_edge(
@@ -321,7 +373,7 @@ pub(crate) fn trim_edge(
             .iter()
             .find(|media| media.id == media_id)
             .and_then(|media| {
-                if media.kind == MediaKind::Image {
+                if media.kind == MediaKind::Image || clip.playback == Playback::Freeze {
                     return None;
                 }
                 media.duration_us.map(|duration| {
@@ -341,15 +393,24 @@ pub(crate) fn trim_edge(
                 .any(|media| media.id == media_id && media.kind != MediaKind::Image),
             _ => false,
         };
-        let minimum = if timed_media {
+        let minimum = if timed_media && clip.playback != Playback::Freeze {
+            let extension = if clip.playback == Playback::Reverse {
+                available
+                    .unwrap_or(u64::MAX)
+                    .saturating_sub(clip.source_start_frame + clip.source_span())
+            } else {
+                clip.source_start_frame
+            };
             clip.start_frame
-                .saturating_sub(clip.timeline_span(clip.source_start_frame))
+                .saturating_sub(clip.timeline_span(extension))
         } else {
             0
         }
         .max(previous);
         let start = frame.clamp(minimum, end - 1);
-        let source = if start >= clip.start_frame {
+        let source = if clip.playback != Playback::Forward {
+            clip.source_start_frame
+        } else if start >= clip.start_frame {
             clip.source_start_frame
                 .saturating_add(clip.source_offset(start - clip.start_frame))
         } else {
@@ -358,17 +419,27 @@ pub(crate) fn trim_edge(
         };
         (start, source, end - start)
     } else {
-        let maximum = available
-            .map_or(u64::MAX, |frames| {
+        let maximum = if clip.playback == Playback::Reverse {
+            clip.start_frame.saturating_add(
+                clip.timeline_span(clip.source_start_frame.checked_add(clip.source_span())?),
+            )
+        } else {
+            available.map_or(u64::MAX, |frames| {
                 clip.start_frame.saturating_add(
                     clip.timeline_span(frames.saturating_sub(clip.source_start_frame)),
                 )
             })
-            .min(next);
+        }
+        .min(next);
         let end = frame.clamp(clip.start_frame + 1, maximum);
         (
             clip.start_frame,
-            clip.source_start_frame,
+            if clip.playback == Playback::Reverse {
+                (clip.source_start_frame + clip.source_span())
+                    .checked_sub(((end - clip.start_frame) as f64 * clip.speed).ceil() as u64)?
+            } else {
+                clip.source_start_frame
+            },
             end - clip.start_frame,
         )
     };
@@ -379,6 +450,304 @@ pub(crate) fn trim_edge(
         source_start_frame,
         duration_frames,
     })
+}
+
+#[cfg(test)]
+mod playback_tests {
+    use super::*;
+
+    fn editor(playback: Playback) -> Editor {
+        let mut editor = Editor::new(Project::new("Playback"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "video.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(1_000_000),
+            has_audio: true
+        })));
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 0,
+            clip: Clip {
+                speed: 1.0,
+                transform: crate::timeline::Transform::default(),
+                noise_reduction: false,
+                lut: None,
+                transition_out: None,
+                color: Default::default(),
+                transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
+                playback,
+                id: 1,
+                start_frame: 10,
+                source_start_frame: 5,
+                duration_frames: 20,
+                content: ClipContent::Media { media_id: 1 },
+                volume: 1.0,
+                muted: false,
+                linked_audio: true
+            }
+        }));
+        editor
+    }
+
+    #[test]
+    fn split_and_ripple_preserve_reverse_and_freeze_frames() {
+        for playback in [Playback::Reverse, Playback::Freeze] {
+            let mut editor = editor(playback);
+            let original = editor.project().tracks()[0].clips[0].clone();
+            let tracks = split_tracks(editor.project().tracks(), &[(0, 1)], 18, 2).unwrap();
+            for (part, offset) in tracks[0].clips.iter().zip([0, 8]) {
+                for k in 0..part.duration_frames {
+                    assert_eq!(
+                        part.source_frame_at(k),
+                        original.source_frame_at(offset + k)
+                    );
+                }
+            }
+            assert!(editor.apply(Command::InsertClip {
+                track_id: 1,
+                clip: Clip {
+                    speed: 1.0,
+                    transform: crate::timeline::Transform::default(),
+                    noise_reduction: false,
+                    lut: None,
+                    transition_out: None,
+                    color: Default::default(),
+                    transition: None,
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
+                    playback: Playback::Forward,
+                    id: 3,
+                    start_frame: 16,
+                    source_start_frame: 0,
+                    duration_frames: 5,
+                    content: ClipContent::Title(Title::default()),
+                    volume: 1.0,
+                    muted: false,
+                    linked_audio: false
+                }
+            }));
+            assert!(editor.apply(Command::RippleDelete {
+                track_id: 1,
+                clip_id: 3
+            }));
+            let clips = &editor.project().tracks()[0].clips;
+            for (part, offset) in clips.iter().zip([0, 11]) {
+                for k in 0..part.duration_frames {
+                    assert_eq!(
+                        part.source_frame_at(k),
+                        original.source_frame_at(offset + k)
+                    );
+                }
+            }
+            assert!(editor.undo());
+            assert_eq!(editor.project().tracks()[0].clips, vec![original]);
+        }
+    }
+
+    #[test]
+    fn trim_edges_preserve_reverse_source_end_and_freeze_hold() {
+        for (playback, left, frame, source, duration) in [
+            (Playback::Reverse, true, 15, 5, 15),
+            (Playback::Reverse, true, 0, 5, 25),
+            (Playback::Reverse, false, 25, 10, 15),
+            (Playback::Reverse, false, 100, 0, 25),
+            (Playback::Freeze, true, 0, 5, 30),
+            (Playback::Freeze, false, 100, 5, 90),
+        ] {
+            let mut editor = editor(playback);
+            let before = editor.project().tracks().to_vec();
+            let command = trim_edge(editor.project(), 0, 1, left, frame).unwrap();
+            assert!(editor.apply(command));
+            let clip = &editor.project().tracks()[0].clips[0];
+            assert_eq!(
+                (clip.source_start_frame, clip.duration_frames),
+                (source, duration)
+            );
+            assert!(editor.undo());
+            assert_eq!(editor.project().tracks(), before);
+        }
+    }
+
+    #[test]
+    fn playback_switches_are_undoable_and_leaving_freeze_clamps_to_held_frame() {
+        let mut editor = editor(Playback::Forward);
+        assert!(editor.apply(Command::SetClipFades {
+            track_id: 0,
+            clip_id: 1,
+            fade_in_frames: 10,
+            fade_out_frames: 10,
+        }));
+        let before = editor.project().tracks().to_vec();
+        for playback in [Playback::Reverse, Playback::Freeze, Playback::Forward] {
+            assert!(editor.apply(Command::SetPlayback {
+                track_id: 0,
+                clip_id: 1,
+                playback
+            }));
+        }
+        let clip = &editor.project().tracks()[0].clips[0];
+        assert_eq!((clip.source_start_frame, clip.duration_frames), (24, 6));
+        assert_eq!((clip.fade_in_frames, clip.fade_out_frames), (6, 0));
+        let after = editor.project().tracks().to_vec();
+        for _ in 0..3 {
+            assert!(editor.undo());
+        }
+        assert_eq!(editor.project().tracks(), before);
+        for _ in 0..3 {
+            assert!(editor.redo());
+        }
+        assert_eq!(editor.project().tracks(), after);
+        assert!(!editor.apply(Command::SetPlayback {
+            track_id: 99,
+            clip_id: 1,
+            playback: Playback::Freeze
+        }));
+    }
+
+    #[test]
+    fn frame_hold_splits_at_the_displayed_frame_as_one_undo_step() {
+        for playback in [Playback::Forward, Playback::Reverse, Playback::Freeze] {
+            for frame in [10, 18] {
+                let mut editor = editor(playback);
+                let before = editor.project().tracks().to_vec();
+                let held = before[0].clips[0].source_frame_at(frame - 10).unwrap();
+                let command = freeze_at(editor.project(), 0, 1, frame).unwrap();
+                let changed = editor.apply(command);
+                if playback == Playback::Freeze && frame == 10 {
+                    assert!(!changed);
+                    continue;
+                }
+                assert!(changed);
+                let right = editor.project().tracks()[0].clips.last().unwrap();
+                assert_eq!(
+                    (
+                        right.playback,
+                        right.source_start_frame,
+                        right.duration_frames
+                    ),
+                    (Playback::Freeze, held, 30 - frame)
+                );
+                assert!(editor.undo());
+                assert_eq!(editor.project().tracks(), before);
+                assert!(editor.redo());
+            }
+        }
+        let editor = editor(Playback::Forward);
+        for frame in [0, 30, 100] {
+            assert!(freeze_at(editor.project(), 0, 1, frame).is_none());
+        }
+        assert!(freeze_at(editor.project(), 99, 1, 10).is_none());
+    }
+
+    #[test]
+    fn playback_and_frame_holds_respect_track_locks_but_allow_hidden_tracks() {
+        for playback in [Playback::Forward, Playback::Reverse, Playback::Freeze] {
+            let mut editor = editor(playback);
+            assert!(editor.apply(Command::SetTrackLocked {
+                track_id: 0,
+                locked: true
+            }));
+            let locked = editor.project().clone();
+            for frame in [10, 18] {
+                assert!(freeze_at(editor.project(), 0, 1, frame).is_none());
+            }
+            let change = Command::SetPlayback {
+                track_id: 0,
+                clip_id: 1,
+                playback: if playback == Playback::Reverse {
+                    Playback::Forward
+                } else {
+                    Playback::Reverse
+                },
+            };
+            assert!(!editor.apply(change.clone()));
+            assert_eq!(editor.project(), &locked);
+            assert!(editor.undo());
+            assert!(editor.apply(Command::SetTrackHidden {
+                track_id: 0,
+                hidden: true
+            }));
+            assert!(editor.apply(change));
+            let command = freeze_at(editor.project(), 0, 1, 18).unwrap();
+            assert!(editor.apply(command));
+            assert!(editor.project().tracks()[0].hidden);
+            assert_eq!(
+                editor.project().tracks()[0].clips[1].playback,
+                Playback::Freeze
+            );
+            editor.project().validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn validation_rejects_incompatible_playback_and_bounds_only_the_held_frame() {
+        let mut editor = editor(Playback::Freeze);
+        let mut tracks = editor.project().tracks().to_vec();
+        tracks[0].clips[0].duration_frames = 1000;
+        assert!(editor.apply(Command::ReplaceTracks(tracks.clone())));
+        tracks[0].clips[0].source_start_frame = 30;
+        assert!(!editor.apply(Command::ReplaceTracks(tracks)));
+        for kind in [MediaKind::Image, MediaKind::Audio] {
+            let media_id = if kind == MediaKind::Image { 2 } else { 3 };
+            assert!(editor.apply(Command::ImportMedia(Media {
+                id: media_id,
+                path: format!("other-{media_id}").into(),
+                kind,
+                duration_us: Some(1_000_000),
+                has_audio: kind == MediaKind::Audio
+            })));
+            let mut clip = editor.project().tracks()[0].clips[0].clone();
+            clip.id = 2;
+            clip.start_frame = 0;
+            clip.duration_frames = 5;
+            clip.linked_audio = false;
+            clip.content = ClipContent::Media { media_id };
+            for playback in [Playback::Reverse, Playback::Freeze] {
+                clip.playback = playback;
+                let accepted = editor.apply(Command::InsertClip {
+                    track_id: if kind == MediaKind::Audio { 2 } else { 1 },
+                    clip: clip.clone(),
+                });
+                assert_eq!(
+                    accepted,
+                    kind == MediaKind::Audio && playback == Playback::Reverse
+                );
+                if accepted {
+                    assert!(editor.undo());
+                }
+            }
+        }
+        assert!(!editor.apply(Command::Move {
+            track_id: 0,
+            target_track_id: 2,
+            clip_id: 1,
+            to_frame: 100
+        }));
+        let mut tracks = editor.project().tracks().to_vec();
+        tracks[1].clips.push(Clip {
+            speed: 1.0,
+            transform: crate::timeline::Transform::default(),
+            noise_reduction: false,
+            lut: None,
+            transition_out: None,
+            color: Default::default(),
+            transition: None,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
+            playback: Playback::Reverse,
+            id: 99,
+            start_frame: 0,
+            source_start_frame: 0,
+            duration_frames: 1,
+            content: ClipContent::Title(Title::default()),
+            volume: 1.0,
+            muted: false,
+            linked_audio: false,
+        });
+        assert!(!editor.apply(Command::ReplaceTracks(tracks)));
+    }
 }
 
 impl Editor {
@@ -449,6 +818,7 @@ impl Editor {
             | Command::SetClipSpeed { track_id, .. }
             | Command::SetClipAudio { track_id, .. }
             | Command::SetClipColor { track_id, .. }
+            | Command::SetPlayback { track_id, .. }
             | Command::SetClipTransform { track_id, .. }
             | Command::SetClipLut { track_id, .. }
             | Command::SetClipFades { track_id, .. }
@@ -477,6 +847,44 @@ impl Editor {
             return None;
         }
         match command {
+            Command::SetPlayback {
+                track_id,
+                clip_id,
+                playback,
+            } => {
+                let mut tracks = self.project.tracks.clone();
+                let clip = tracks
+                    .iter_mut()
+                    .find(|t| t.id == track_id)?
+                    .clips
+                    .iter_mut()
+                    .find(|c| c.id == clip_id)?;
+                if clip.playback == playback {
+                    return None;
+                }
+                if playback == Playback::Freeze {
+                    clip.source_start_frame = clip.source_frame_at(0)?;
+                    clip.speed = 1.0;
+                } else if clip.playback == Playback::Freeze {
+                    let ClipContent::Media { media_id } = clip.content else {
+                        return None;
+                    };
+                    let media = self.project.media.iter().find(|m| m.id == media_id)?;
+                    if let Some(duration) = media.duration_us {
+                        let rate = &self.project.settings.frame_rate;
+                        let frames = (u128::from(duration) * u128::from(rate.numerator)
+                            / (1_000_000 * u128::from(rate.denominator)))
+                        .max(1)
+                        .min(u128::from(u64::MAX)) as u64;
+                        clip.duration_frames = clip
+                            .duration_frames
+                            .min(frames.checked_sub(clip.source_start_frame)?);
+                    }
+                }
+                clip.playback = playback;
+                clip.clamp_fades();
+                self.execute(Command::ReplaceTracks(tracks))
+            }
             Command::RenameTrack { track_id, name } => {
                 let name = name.trim().to_owned();
                 if !Track::valid_name(&name) {
@@ -568,7 +976,11 @@ impl Editor {
                 if clip.duration_frames == 0
                     || clip
                         .source_start_frame
-                        .checked_add(clip.source_span())
+                        .checked_add(if clip.playback == Playback::Freeze {
+                            0
+                        } else {
+                            clip.source_span()
+                        })
                         .is_none()
                     || !clip.transform.valid()
                     || !clip.color.valid()
@@ -592,7 +1004,10 @@ impl Editor {
                 let kind = track.kind;
                 let compatible = match &clip.content {
                     ClipContent::Title(title) => {
-                        kind == TrackKind::Video && title.valid() && clip.speed == 1.0
+                        kind == TrackKind::Video
+                            && title.valid()
+                            && clip.speed == 1.0
+                            && clip.playback == Playback::Forward
                     }
                     ClipContent::Media { media_id } => {
                         !track.subtitles
@@ -976,13 +1391,20 @@ impl Editor {
                     .media
                     .iter()
                     .find(|media| media.id == media_id)?;
-                if media.kind == MediaKind::Image || clip.speed == speed {
+                if media.kind == MediaKind::Image
+                    || clip.playback == Playback::Freeze
+                    || clip.speed == speed
+                {
                     return None;
                 }
+                let source_end = clip.source_start_frame.checked_add(clip.source_span())?;
                 let duration = (clip.duration_frames as f64 * clip.speed / speed).round() as u64;
                 clip.speed = speed;
                 clip.duration_frames = duration.max(1).min(next - clip.start_frame);
-                if let Some(duration_us) = media.duration_us {
+                if clip.playback == Playback::Reverse {
+                    clip.duration_frames = clip.duration_frames.min(clip.timeline_span(source_end));
+                    clip.source_start_frame = source_end.checked_sub(clip.source_span())?;
+                } else if let Some(duration_us) = media.duration_us {
                     let rate = &self.project.settings.frame_rate;
                     let frames = (u128::from(duration_us) * u128::from(rate.numerator)
                         / (1_000_000 * u128::from(rate.denominator)))
@@ -1203,6 +1625,50 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn subtitle_clips_only_support_forward_playback() {
+        let project = super::Project::new("Captions");
+        let cues = crate::subtitles::parse("1\n00:00:00,000 --> 00:00:01,000\nFirst").unwrap();
+        let track = crate::subtitles::track(&project, &cues).unwrap();
+        let track_id = track.id;
+        let clip_id = track.clips[0].id;
+        assert_eq!(track.clips[0].playback, super::Playback::Forward);
+        let mut tracks = project.tracks().to_vec();
+        tracks.push(track);
+        let mut editor = super::Editor::new(project);
+        assert!(editor.apply(super::Command::ReplaceTracks(tracks)));
+        let before = editor.project().clone();
+        for playback in [super::Playback::Reverse, super::Playback::Freeze] {
+            assert!(!editor.apply(super::Command::SetPlayback {
+                track_id,
+                clip_id,
+                playback
+            }));
+            let mut invalid = before.clone();
+            let clip = &mut invalid
+                .tracks
+                .iter_mut()
+                .find(|track| track.id == track_id)
+                .unwrap()
+                .clips[0];
+            clip.playback = playback;
+            let mut inserted = clip.clone();
+            inserted.id += 1;
+            inserted.start_frame = 60;
+            assert!(invalid.validate().is_err());
+            assert!(!editor.apply(super::Command::InsertClip {
+                track_id,
+                clip: inserted
+            }));
+            assert!(!editor.apply(super::Command::ReplaceTracks(invalid.tracks)));
+            assert_eq!(editor.project(), &before);
+        }
+        assert!(super::freeze_at(editor.project(), track_id, clip_id, 0).is_none());
+        assert!(editor.undo());
+        assert!(editor.redo());
+        assert_eq!(editor.project(), &before);
+    }
+
+    #[test]
     fn subtitle_style_changes_a_whole_track_in_one_undo_step() {
         let project = super::Project::new("Captions");
         let cues = crate::subtitles::parse("1\n00:00:00,000 --> 00:00:01,000\n<i>First</i>\n\n2\n00:00:01,000 --> 00:00:02,000\nSecond").unwrap();
@@ -1341,6 +1807,7 @@ mod tests {
         let mut editor = Editor::new(Project::new("Locked"));
         let clip = Clip {
             speed: 1.0,
+            playback: Playback::Forward,
             lut: None,
             color: ColorAdjust::default(),
             transition: None,
@@ -1824,6 +2291,7 @@ mod tests {
             has_audio: false
         })));
         let clip = Clip {
+            playback: Playback::Forward,
             id: 1,
             start_frame: 0,
             source_start_frame: 0,
@@ -2060,6 +2528,7 @@ mod tests {
             track_id: 0,
             clip: Clip {
                 speed: 1.0,
+                playback: Playback::Forward,
                 lut: None,
                 id: 1,
                 start_frame: 0,
@@ -2130,6 +2599,7 @@ mod tests {
             })));
             let track_id = if kind == MediaKind::Audio { 2 } else { 0 };
             let clip = Clip {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 id: 1,
                 start_frame: 100,
@@ -2179,6 +2649,7 @@ mod tests {
             assert!(editor.apply(Command::InsertClip {
                 track_id,
                 clip: Clip {
+                    playback: crate::timeline::Playback::Forward,
                     id: 2,
                     start_frame: 20,
                     duration_frames: 30,
@@ -2212,6 +2683,7 @@ mod tests {
             has_audio: false
         })));
         let clip = Clip {
+            playback: crate::timeline::Playback::Forward,
             lut: None,
             id: 1,
             start_frame: 40,
@@ -2267,6 +2739,7 @@ mod tests {
             assert!(editor.apply(Command::InsertClip {
                 track_id: 0,
                 clip: Clip {
+                    playback: crate::timeline::Playback::Forward,
                     id,
                     start_frame,
                     duration_frames,
@@ -2289,6 +2762,7 @@ mod tests {
         use crate::timeline::Title;
         let mut editor = Editor::new(Project::new("Film"));
         let title = Clip {
+            playback: crate::timeline::Playback::Forward,
             lut: None,
             id: 1,
             start_frame: 0,
@@ -2326,6 +2800,7 @@ mod tests {
         assert!(!editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 id: 2,
                 ..title.clone()
             },
@@ -2349,6 +2824,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 id: 1,
                 start_frame: 0,
@@ -2625,6 +3101,7 @@ mod tests {
     fn clip_insertion_rejects_invalid_ranges_overlap_and_missing_media() {
         let mut editor = Editor::new(Project::new("Film"));
         let title = Clip {
+            playback: crate::timeline::Playback::Forward,
             lut: None,
             id: 1,
             start_frame: 10,
@@ -2678,6 +3155,7 @@ mod tests {
         assert!(!insert(
             &mut editor,
             Clip {
+                playback: crate::timeline::Playback::Forward,
                 id: 2,
                 start_frame: 99,
                 ..title.clone()
@@ -2686,6 +3164,7 @@ mod tests {
         assert!(insert(
             &mut editor,
             Clip {
+                playback: crate::timeline::Playback::Forward,
                 id: 2,
                 start_frame: 100,
                 ..title
@@ -2709,6 +3188,7 @@ mod tests {
         assert_eq!(
             split[0].clips[1],
             Clip {
+                playback: crate::timeline::Playback::Forward,
                 id: 5,
                 start_frame: 20,
                 source_start_frame: 50,
@@ -2721,6 +3201,7 @@ mod tests {
     fn split_fixture() -> Vec<Track> {
         let mut project = Project::new("Split");
         let clip = Clip {
+            playback: crate::timeline::Playback::Forward,
             lut: None,
             id: 1,
             start_frame: 10,
@@ -2742,6 +3223,7 @@ mod tests {
         project.tracks[0].clips = vec![
             clip.clone(),
             Clip {
+                playback: crate::timeline::Playback::Forward,
                 id: 2,
                 start_frame: 60,
                 ..clip.clone()
@@ -2820,6 +3302,7 @@ mod tests {
     fn split_move_trim_and_ripple_delete_are_atomic_and_undoable() {
         let mut editor = Editor::new(Project::new("Film"));
         let make_clip = |id, start_frame| Clip {
+            playback: crate::timeline::Playback::Forward,
             lut: None,
             id,
             start_frame,
@@ -2921,6 +3404,7 @@ mod tests {
             assert!(editor.apply(Command::InsertClip {
                 track_id,
                 clip: Clip {
+                    playback: crate::timeline::Playback::Forward,
                     lut: None,
                     id,
                     start_frame,
@@ -2986,6 +3470,7 @@ mod tests {
             has_audio: true,
         })));
         let title = |id, start_frame, duration_frames| Clip {
+            playback: crate::timeline::Playback::Forward,
             lut: None,
             id,
             start_frame,
@@ -3015,6 +3500,7 @@ mod tests {
             (
                 2,
                 Clip {
+                    playback: crate::timeline::Playback::Forward,
                     lut: None,
                     id: 6,
                     start_frame: 0,
@@ -3089,6 +3575,7 @@ mod tests {
             assert!(editor.apply(Command::InsertClip {
                 track_id,
                 clip: Clip {
+                    playback: crate::timeline::Playback::Forward,
                     lut: None,
                     id,
                     start_frame,
@@ -3128,6 +3615,7 @@ mod tests {
             has_audio: true,
         })));
         let clip = Clip {
+            playback: crate::timeline::Playback::Forward,
             lut: None,
             id: 2,
             start_frame: 0,
@@ -3176,6 +3664,7 @@ mod tests {
         assert!(!editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 id: 1,
                 start_frame: 0,
@@ -3203,6 +3692,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 id: 1,
                 start_frame: 0,
@@ -3245,6 +3735,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 id: 1,
                 start_frame: 0,
@@ -3341,6 +3832,7 @@ mod tests {
         })));
         let clip = Clip {
             speed: 1.0,
+            playback: crate::timeline::Playback::Forward,
             noise_reduction: false,
             lut: None,
             transition_out: None,

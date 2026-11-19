@@ -1,5 +1,18 @@
 # Ocus
 
+The timeline model supports `forward` (the omitted default), `reverse`, and
+`freeze` clip playback in project JSON. Reverse uses the same source range in
+the opposite direction; freeze holds one video frame with an independent
+duration. `SetPlayback` and `freeze_at` are validated, undoable project edits.
+Leaving freeze keeps the held source frame as the source range start and
+clamps the duration to the remaining source. Preview, filmstrips and export
+render reverse and freeze playback; reverse audio follows the picture and
+freeze audio is silent. Select a media clip to choose Normal, Reverse, or
+Freeze in the Inspector. Shift+R toggles reverse; Shift+F adds a frame hold
+at the playhead, splitting the selected video clip when needed. Both actions
+are also in the clip context menu and support undo/redo. Timeline badges
+identify reversed and frozen clips.
+
 Projects open even when source files have moved. Missing files are marked in the
 media bin; choose **Relink…** to search a folder by exact filename, or right-click
 a missing item and choose **Relink file…** to locate a renamed file. Locating one
@@ -62,6 +75,8 @@ same start frame keep the later cue. Subtitle titles use the existing preview an
 export compositor. Select a subtitle cue to edit the track's font, color, outline,
 background and position in **Subtitle style**. Each style change updates all cues
 on that track in one undoable step without changing their text or timing.
+Subtitle clips use normal, Forward-only playback, like titles; they cannot be
+reversed or frozen.
 Video export burns subtitles in by default. Turn off **Burn in subtitles** on
 the Export dialog's Video tab to export a clean video and an SRT sidecar beside
 it. Multiple subtitle tracks merge into one time-sorted sidecar. GIF always burns

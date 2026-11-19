@@ -17,7 +17,7 @@ use crate::project::export_settings::{
 };
 use crate::project::{Command, Editor, Project, recovery, store};
 use crate::settings::{self, Settings, ThemeMode};
-use crate::timeline::{ClipContent, Title, TrackKind, Transform};
+use crate::timeline::{Clip, ClipContent, Playback, Title, TrackKind, Transform};
 use creamui::core::{Modifiers, Point, Rect, RgbaImage};
 use creamui::widgets::{
     ColorPickerController, ScrollController, TextController, TooltipController,
@@ -125,6 +125,31 @@ const DEFAULT_ZOOM: usize = 5;
 
 /// An empty cached filmstrip marks a preview that could not be generated.
 pub(crate) type Storyboard = Arc<Vec<Arc<RgbaImage>>>;
+
+pub(super) fn clip_storyboard_key(
+    clip: &Clip,
+    media: &Media,
+    fps: (u32, u32),
+) -> Option<StoryboardKey> {
+    let first = clip.source_frame_at(0)?;
+    let last = clip.source_frame_at(clip.duration_frames.checked_sub(1)?)?;
+    Some(StoryboardKey {
+        transform_bits: StoryboardKey::transform_bits(clip.transform),
+        color_bits: [
+            clip.color.brightness,
+            clip.color.contrast,
+            clip.color.saturation,
+        ]
+        .map(f32::to_bits),
+        lut: clip.lut.clone(),
+        playback: clip.playback,
+        path: media.path.clone(),
+        kind: media.kind,
+        source_start: first.min(last),
+        duration: first.abs_diff(last).saturating_add(1),
+        fps,
+    })
+}
 
 type InspectedSource = Result<ImportedSource, String>;
 
@@ -247,6 +272,7 @@ impl Monitor {
 /// The source frames shown by the source monitor, in project frames.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SourceRange {
+    pub playback: crate::timeline::Playback,
     pub path: PathBuf,
     pub kind: MediaKind,
     pub source_start: u64,
@@ -1223,6 +1249,7 @@ impl UiState {
             }
             let media = project.media().iter().find(|media| media.id == media_id)?;
             return Some(SourceRange {
+                playback: clip.playback,
                 path: media.path.clone(),
                 kind: media.kind,
                 source_start: clip.source_start_frame,
@@ -1236,6 +1263,7 @@ impl UiState {
         let media = project.media().iter().find(|media| media.id == media_id)?;
         let rate = &project.settings().frame_rate;
         Some(SourceRange {
+            playback: crate::timeline::Playback::Forward,
             path: media.path.clone(),
             kind: media.kind,
             source_start: 0,
@@ -1498,6 +1526,7 @@ impl UiState {
                 if track.kind == TrackKind::Video {
                     sources.push(FrameSource {
                         speed: clip.speed,
+                        playback: clip.playback,
                         lut: clip.lut.clone(),
                         color: clip.color,
                         clip_id: clip.id,
@@ -1506,7 +1535,7 @@ impl UiState {
                         start: clip.start_frame,
                         source_start: clip.source_start_frame,
                         duration: clip.duration_frames,
-                        transform: Transform::default(),
+                        transform: clip.transform,
                     });
                 }
             }
@@ -1560,6 +1589,7 @@ impl UiState {
                 .filter(|range| range.kind != MediaKind::Audio)
                 .map(|range| FrameSource {
                     speed: 1.0,
+                    playback: range.playback,
                     lut: None,
                     color: Default::default(),
                     clip_id: 0,
@@ -1581,6 +1611,7 @@ impl UiState {
                 .filter(|range| range.kind != MediaKind::Image)
                 .map(|range| AudioSource {
                     speed: 1.0,
+                    playback: range.playback,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
                     path: range.path.clone(),
@@ -2001,6 +2032,39 @@ impl UiState {
         );
     }
 
+    pub(super) fn clip_storyboard(
+        &self,
+        clip: &Clip,
+        media: &Media,
+        fps: (u32, u32),
+    ) -> Option<Storyboard> {
+        let key = clip_storyboard_key(clip, media, fps)?;
+        let images = self.storyboards.borrow().get(&key)?.clone();
+        if clip.playback == Playback::Freeze && !images.is_empty() {
+            Some(Arc::new(vec![images.first()?.clone()]))
+        } else {
+            Some(images)
+        }
+    }
+
+    pub(super) fn clip_thumbnail(
+        &self,
+        clip: &Clip,
+        media: &Media,
+        fps: (u32, u32),
+    ) -> Option<Arc<RgbaImage>> {
+        self.clip_storyboard(clip, media, fps)
+            .and_then(|images| images.first().cloned())
+            .or_else(|| {
+                (clip.color.neutral()
+                    && clip.transform.is_identity()
+                    && clip.lut.is_none()
+                    && (media.kind == MediaKind::Image || clip.source_frame_at(0) == Some(0)))
+                .then(|| self.thumbnails.borrow().get(&media.path).cloned())
+                .flatten()
+            })
+    }
+
     fn finish_storyboard(&self, key: StoryboardKey, result: Result<Vec<FrameImage>, String>) {
         let images = result
             .unwrap_or_default()
@@ -2053,13 +2117,7 @@ impl UiState {
                 }
                 let media = project.media().iter().find(|media| media.id == media_id)?;
                 Some((
-                    StoryboardKey {
-                        path: media.path.clone(),
-                        kind: media.kind,
-                        source_start: clip.source_start_frame,
-                        duration: clip.source_span(),
-                        fps,
-                    },
+                    clip_storyboard_key(clip, media, fps)?,
                     geometry.clip_visible(index, clip.start_frame, clip.duration_frames),
                 ))
             })
@@ -4089,6 +4147,7 @@ mod tests {
         let plan = AudioPlan {
             sources: vec![AudioSource {
                 speed: clip.speed,
+                playback: clip.playback,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
                 path,
@@ -4271,6 +4330,12 @@ mod tests {
             .map(|index| {
                 (
                     StoryboardKey {
+                        transform_bits: StoryboardKey::transform_bits(
+                            crate::timeline::Transform::default(),
+                        ),
+                        lut: None,
+                        color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
+                        playback: crate::timeline::Playback::Forward,
                         path: "video.mp4".into(),
                         kind: MediaKind::Video,
                         source_start: index * 30,
@@ -4409,6 +4474,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id: 0,
                 clip: Clip {
+                    playback: crate::timeline::Playback::Forward,
                     lut: None,
                     id: index,
                     start_frame: index * 30,
@@ -5264,6 +5330,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 2,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 id: 0,
                 start_frame: 0,

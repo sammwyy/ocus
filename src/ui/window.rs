@@ -2,8 +2,8 @@ use super::controls::{
     AUDIO, DragOverlay, ExportMeter, Glyph, Help, IMAGE, Layer, PLAYHEAD, STAGE, Scrubber, TITLE,
     Thumb, VIDEO, ZoomSlider, accent, accent_button, background, border, chip, enabled_chip, faint,
     fit, glyph, heading, icon_button, kind_color, list_row, media_item, menu_row, muted, panel,
-    panel_raised, play_button, secondary_button, segment, short_duration, sized_icon_button,
-    surface, surface_hover, text, text_color, timecode, tool_button, with_help,
+    panel_raised, play_button, playback_choice, secondary_button, segment, short_duration,
+    sized_icon_button, surface, surface_hover, text, text_color, timecode, tool_button, with_help,
 };
 use super::edits::ClipRef;
 use super::interaction::{Action, DragPayload, MenuState};
@@ -18,14 +18,13 @@ use super::{title_fonts, title_markup};
 use crate::export::queue::{Queue, Status as ExportStatus};
 use crate::media::audio::carries_sound;
 use crate::media::composite::title_outline_radius;
-use crate::media::preview::StoryboardKey;
 use crate::media::{Media, MediaKind};
 use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, VideoCodec};
 use crate::project::{Command, Project};
 use crate::settings::ThemeMode;
 use crate::timeline::{
-    Clip, ClipContent, ColorAdjust, SlideDirection, Title, Track, TrackKind, Transform, Transition,
-    TransitionKind,
+    Clip, ClipContent, ColorAdjust, Playback, SlideDirection, Title, Track, TrackKind, Transform,
+    Transition, TransitionKind,
 };
 use creamui::core::layout::{Dimension, Style};
 use creamui::core::{Painter, Point, Rect, TextAlign, Widget};
@@ -97,8 +96,8 @@ impl Widget for SourceWaveform {
             TextAlign::Start,
         );
         self.waveform.paint(painter, wave, wave, 1.0, AUDIO);
-        let progress =
-            (self.position as f64 / self.waveform.duration.max(1) as f64).clamp(0.0, 1.0);
+        let progress = (self.position as f64 / self.waveform.clip.duration_frames.max(1) as f64)
+            .clamp(0.0, 1.0);
         painter.fill_rect(
             Rect {
                 x: wave.x + (wave.width - 1.0) * progress as f32,
@@ -147,6 +146,44 @@ fn edit_selection(state: &UiState, edit: impl FnOnce(&Clip, u64, u64) -> Command
 
 fn set_title_text(state: &UiState) {
     change_title(state, |title| title.text = state.title_text.peek());
+}
+
+fn playback_controls(state: &UiState, target: ClipRef, playback: Playback) -> BoxedWidget {
+    let mut choices = Flex::row()
+        .gap(2.0)
+        .padding(3.0)
+        .background(surface())
+        .corner_radius(7.0);
+    for (label, value, hint, shortcut) in [
+        ("Normal", Playback::Forward, "Play the clip forwards", None),
+        (
+            "Reverse",
+            Playback::Reverse,
+            "Play the clip backwards",
+            Some("Shift R"),
+        ),
+        (
+            "Freeze",
+            Playback::Freeze,
+            "Hold the first frame; audio is silent",
+            None,
+        ),
+    ] {
+        let reason = state.playback_reason(target, value);
+        let mut help = Help::new(reason.unwrap_or(hint));
+        if let Some(shortcut) = shortcut {
+            help = help.shortcut(shortcut);
+        }
+        choices = choices.child(playback_choice(
+            label,
+            help,
+            reason.is_none() && !state.busy.get(),
+            playback == value,
+            state,
+            move |state| state.set_playback(target, value),
+        ));
+    }
+    section("Playback", vec![Box::new(choices)])
 }
 
 fn adjust_timing(state: &UiState, source: bool, seconds: bool, increase: bool) {
@@ -2413,7 +2450,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     .then(|| state.thumbnail_label(media))
                     .flatten(),
                 image: (track_kind == TrackKind::Video)
-                    .then(|| state.thumbnails.borrow().get(&media.path).cloned())
+                    .then(|| state.clip_thumbnail(&clip, media, fps))
                     .flatten(),
                 kind: if track_kind == TrackKind::Audio {
                     MediaKind::Audio
@@ -2432,6 +2469,9 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 .child(dot(color, 8.0))
                 .child(heading(fit(&name, inner - 20.0, 13.0), text_color(), 13.0)),
         ));
+        if track_kind == TrackKind::Video && matches!(clip.content, ClipContent::Media { .. }) {
+            rows.push(playback_controls(state, (track_id, clip.id), clip.playback));
+        }
         let mut timing = vec![
             property("Track", label_of(track_id)),
             property("Start", timecode(clip.start_frame, fps)),
@@ -2673,7 +2713,12 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 ],
             ));
         }
-        if (track_kind == TrackKind::Audio || clip.linked_audio) && media.is_some() {
+        if clip.playback == Playback::Freeze {
+            rows.push(section(
+                "Audio",
+                vec![text("Frozen frames are silent", muted(), 11.0)],
+            ));
+        } else if (track_kind == TrackKind::Audio || clip.linked_audio) && media.is_some() {
             let volume = clip.volume;
             let audio_state = state.clone();
             rows.push(section(
@@ -2808,7 +2853,9 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 ],
             ));
         }
-        if media.is_some_and(|media| media.kind != MediaKind::Image) {
+        if media.is_some_and(|media| media.kind != MediaKind::Image)
+            && clip.playback != crate::timeline::Playback::Freeze
+        {
             let mut presets = Vec::new();
             let mut unavailable = false;
             for speed in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] {
@@ -2857,6 +2904,9 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     ),
                 ],
             ));
+        }
+        if track_kind == TrackKind::Audio && matches!(clip.content, ClipContent::Media { .. }) {
+            rows.push(playback_controls(state, (track_id, clip.id), clip.playback));
         }
         let destinations = compatible_destinations(project.tracks(), track_id, &clip);
         let mut move_buttons = Flex::row()
@@ -3204,6 +3254,7 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                     }
                     LaneClip {
                         transition_frames,
+                        playback: clip.playback,
                         transition_out_frames,
                         clip_id: clip.id,
                         start: clip.start_frame,
@@ -3222,22 +3273,12 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                             (_, Some(media)) if media.kind == MediaKind::Image => ClipLook::Image,
                             _ => ClipLook::Video,
                         },
-                        images: media.filter(|_| video).and_then(|media| {
-                            state
-                                .storyboards
-                                .borrow()
-                                .get(&StoryboardKey {
-                                    path: media.path.clone(),
-                                    kind: media.kind,
-                                    source_start: clip.source_start_frame,
-                                    duration: clip.source_span(),
-                                    fps,
-                                })
-                                .cloned()
-                        }),
+                        images: media
+                            .filter(|_| video)
+                            .and_then(|media| state.clip_storyboard(clip, media, fps)),
                         fallback: media
                             .filter(|_| video)
-                            .and_then(|media| state.thumbnails.borrow().get(&media.path).cloned()),
+                            .and_then(|media| state.clip_thumbnail(clip, media, fps)),
                         waveform: media
                             .filter(|media| {
                                 !state.missing_media.get().contains(&media.id)
@@ -3246,8 +3287,7 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                             .and_then(|media| state.waveform(&media.path))
                             .map(|peaks| WaveformSlice {
                                 peaks,
-                                start: clip.source_start_frame,
-                                duration: clip.source_span(),
+                                clip: clip.clone(),
                                 fps,
                             }),
                         volume: clip.volume,
@@ -3620,8 +3660,26 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 Box::new(SourceWaveform {
                     waveform: WaveformSlice {
                         peaks,
-                        start: range.source_start,
-                        duration: range.duration,
+                        clip: Clip {
+                            speed: 1.0,
+                            transform: crate::timeline::Transform::default(),
+                            noise_reduction: false,
+                            lut: None,
+                            transition_out: None,
+                            color: Default::default(),
+                            id: 0,
+                            transition: None,
+                            start_frame: 0,
+                            source_start_frame: range.source_start,
+                            duration_frames: range.duration,
+                            content: ClipContent::Media { media_id: 0 },
+                            volume: 1.0,
+                            fade_in_frames: 0,
+                            fade_out_frames: 0,
+                            muted: false,
+                            linked_audio: false,
+                            playback: range.playback,
+                        },
                         fps,
                     },
                     position: source_position,
@@ -5716,11 +5774,16 @@ mod tests {
     }
 
     use super::*;
+    use crate::media::preview::{StoryboardKey, storyboard};
+    use crate::ui::state::clip_storyboard_key;
+    use crate::ui::timeline_view::RULER_HEIGHT;
     use creamui::core::{Painter, Point, Rect, Renderer, RgbaImage, TextAlign, Widget};
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
     fn destination_clip(start_frame: u64, duration_frames: u64) -> Clip {
         Clip {
+            playback: crate::timeline::Playback::Forward,
             lut: None,
             id: 10,
             start_frame,
@@ -5822,6 +5885,7 @@ mod tests {
         labels: Vec<String>,
         bounds: Vec<(String, Rect)>,
         images: Vec<Rect>,
+        image_ids: Vec<u64>,
         fills: Vec<(Rect, Color)>,
         strokes: Vec<(Rect, Color)>,
         text_colors: Vec<(String, Color)>,
@@ -5842,8 +5906,9 @@ mod tests {
             self.text_colors.push((text.to_owned(), color));
         }
 
-        fn draw_image(&mut self, rect: Rect, _: &RgbaImage, _: Option<Color>) {
+        fn draw_image(&mut self, rect: Rect, image: &RgbaImage, _: Option<Color>) {
             self.images.push(rect);
+            self.image_ids.push(image.id());
         }
     }
 
@@ -5857,6 +5922,284 @@ mod tests {
             Renderer::new().render(build(state, viewport), viewport, &mut painter);
         });
         painter
+    }
+
+    #[test]
+    fn clip_thumbnails_and_painted_filmstrips_follow_displayed_source_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frames.mkv");
+        assert!(
+            ProcessCommand::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "nullsrc=size=64x36:rate=30:duration=2,geq=lum=16+N*3:cb=128:cr=128",
+                    "-c:v",
+                    "ffv1",
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let state = UiState::new();
+        state.timeline_rect.set(TIMELINE);
+        let media = Media {
+            id: 1,
+            path,
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: true,
+        };
+        assert!(state.edit(Command::ImportMedia(media.clone())));
+        state.insert_media(1);
+        let target = state.primary_clip().unwrap();
+        assert!(state.edit(Command::Trim {
+            track_id: target.0,
+            clip_id: target.1,
+            start_frame: 0,
+            source_start_frame: 5,
+            duration_frames: 40
+        }));
+        let bin_image = Arc::new(RgbaImage::new(1, 1, vec![0, 0, 0, 255]).unwrap());
+        let lut = dir.path().join("invert.cube");
+        std::fs::write(&lut, "LUT_1D_SIZE 2\n1 1 1\n0 0 0\n").unwrap();
+        assert!(state.edit(Command::SetClipTransform {
+            track_id: target.0,
+            clip_id: target.1,
+            transform: Transform {
+                scale: 0.8,
+                rotation: 15.0,
+                x: 0.1,
+                opacity: 0.7,
+                crop_left: 0.1,
+                ..Default::default()
+            }
+        }));
+        assert!(state.edit(Command::SetClipColor {
+            track_id: target.0,
+            clip_id: target.1,
+            color: ColorAdjust {
+                brightness: 0.1,
+                ..Default::default()
+            }
+        }));
+        assert!(state.edit(Command::SetClipLut {
+            track_id: target.0,
+            clip_id: target.1,
+            path: Some(lut.clone())
+        }));
+        state
+            .thumbnails
+            .borrow_mut()
+            .insert(media.path.clone(), bin_image.clone());
+        for playback in [Playback::Forward, Playback::Reverse, Playback::Freeze] {
+            state.set_playback(target, playback);
+            let clip = selected_clip(&state).unwrap().1;
+            let key = clip_storyboard_key(&clip, &media, (30, 1)).unwrap();
+            assert!(
+                state.clip_thumbnail(&clip, &media, (30, 1)).is_none(),
+                "do not show source frame zero while loading"
+            );
+            let frames = storyboard(&key, Arc::new(AtomicBool::new(false)), false).unwrap();
+            let expected_frames: Vec<_> = [0, clip.duration_frames / 2, clip.duration_frames - 1]
+                .into_iter()
+                .map(|offset| clip.source_frame_at(offset).unwrap())
+                .collect();
+            for (index, frame) in frames.iter().enumerate() {
+                let expected = storyboard(
+                    &StoryboardKey {
+                        playback: Playback::Forward,
+                        source_start: expected_frames[index],
+                        duration: 1,
+                        ..key.clone()
+                    },
+                    Arc::new(AtomicBool::new(false)),
+                    false,
+                )
+                .unwrap();
+                assert_eq!(frame.pixels, expected[0].pixels);
+            }
+            let images: Vec<_> = frames
+                .into_iter()
+                .map(|frame| {
+                    Arc::new(RgbaImage::new(frame.width, frame.height, frame.pixels).unwrap())
+                })
+                .collect();
+            let first_id = images[0].id();
+            state.storyboards.borrow_mut().insert(key, Arc::new(images));
+            assert_eq!(
+                state.clip_thumbnail(&clip, &media, (30, 1)).unwrap().id(),
+                first_id
+            );
+            let mut inspector_painter = TestPainter::default();
+            creamui::reactive::with_context_scope(|| {
+                creamui::reactive::provide_context(creamui::ThemeProvider::new(
+                    creamui::Theme::dark(),
+                ));
+                let editor = state.editor.borrow();
+                Renderer::new().render(
+                    inspector(&state, editor.project(), 300.0, false),
+                    Size {
+                        width: 300.0,
+                        height: 2000.0,
+                    },
+                    &mut inspector_painter,
+                );
+            });
+            assert_eq!(inspector_painter.image_ids, vec![first_id]);
+            let mut timeline = view(&state);
+            timeline.span = 40;
+            let images = timeline.lanes[0].clips[0].images.as_ref().unwrap();
+            let mut painter = TestPainter::default();
+            timeline.paint(&mut painter, TIMELINE);
+            assert!(painter.image_ids.len() > 3);
+            assert!(!painter.image_ids.contains(&bin_image.id()));
+            let indices: Vec<_> = painter
+                .image_ids
+                .iter()
+                .map(|id| images.iter().position(|image| image.id() == *id).unwrap())
+                .collect();
+            assert!(indices.windows(2).all(|pair| pair[0] <= pair[1]));
+            if playback == Playback::Freeze {
+                assert!(painter.image_ids.iter().all(|id| *id == first_id));
+                assert!(
+                    inspector_painter
+                        .labels
+                        .iter()
+                        .any(|label| label == "Frozen frames are silent")
+                );
+                assert_eq!(
+                    inspector_painter
+                        .labels
+                        .iter()
+                        .filter(|label| *label == "100%")
+                        .count(),
+                    2
+                );
+                for label in ["Mute", "Detach audio to its own track"] {
+                    assert!(!inspector_painter.labels.iter().any(|text| text == label));
+                }
+                assert!(
+                    !painter
+                        .fills
+                        .iter()
+                        .any(|(rect, color)| rect.x >= 128.0 && *color == AUDIO.mix(panel(), 0.5))
+                );
+            }
+        }
+        let mut clip = selected_clip(&state).unwrap().1;
+        clip.playback = Playback::Forward;
+        clip.source_start_frame = 0;
+        clip.transform = Transform::default();
+        clip.color = Default::default();
+        clip.lut = None;
+        assert_eq!(
+            state.clip_thumbnail(&clip, &media, (30, 1)).unwrap().id(),
+            bin_image.id()
+        );
+        clip.color.brightness = 0.1;
+        assert!(state.clip_thumbnail(&clip, &media, (30, 1)).is_none());
+        clip.color = Default::default();
+        clip.transform.opacity = 0.5;
+        assert!(state.clip_thumbnail(&clip, &media, (30, 1)).is_none());
+        clip.transform = Transform::default();
+        clip.lut = Some(lut);
+        assert!(state.clip_thumbnail(&clip, &media, (30, 1)).is_none());
+        clip.duration_frames = 0;
+        assert!(state.clip_thumbnail(&clip, &media, (30, 1)).is_none());
+    }
+
+    #[test]
+    fn inspector_playback_choices_fit_small_and_large_widths() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "scene.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(10_000_000),
+            has_audio: true,
+        })));
+        state.insert_media(1);
+        let target = state.primary_clip().unwrap();
+        for playback in [Playback::Forward, Playback::Reverse, Playback::Freeze] {
+            state.set_playback(target, playback);
+            for width in [210.0, 360.0] {
+                let size = Size {
+                    width,
+                    height: 1000.0,
+                };
+                let mut painter = TestPainter::default();
+                creamui::reactive::with_context_scope(|| {
+                    creamui::reactive::provide_context(creamui::ThemeProvider::new(
+                        creamui::Theme::dark(),
+                    ));
+                    let editor = state.editor.borrow();
+                    Renderer::new().render(
+                        inspector(&state, editor.project(), width, false),
+                        size,
+                        &mut painter,
+                    );
+                });
+                for label in ["PLAYBACK", "Normal", "Reverse", "Freeze"] {
+                    let (_, rect) = painter
+                        .bounds
+                        .iter()
+                        .find(|(text, _)| text == label)
+                        .unwrap();
+                    assert!(
+                        rect.x >= 0.0 && rect.x + rect.width <= width,
+                        "{label}: {rect:?}"
+                    );
+                    assert!(
+                        rect.y >= 0.0 && rect.y + rect.height <= size.height,
+                        "{label}: {rect:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn timeline_playback_badges_fit_clip_headers_or_hide_when_too_narrow() {
+        let state = UiState::new();
+        state.timeline_rect.set(TIMELINE);
+        assert!(state.add_title());
+        let mut timeline = view(&state);
+        timeline.lanes[0].clips[0].name = "Clip".into();
+        for duration in [1, 12, 150] {
+            timeline.lanes[0].clips[0].duration = duration;
+            timeline.lanes[0].clips[0].playback = Playback::Forward;
+            let mut forward = TestPainter::default();
+            timeline.paint(&mut forward, TIMELINE);
+            for playback in [Playback::Reverse, Playback::Freeze] {
+                timeline.lanes[0].clips[0].playback = playback;
+                let mut painter = TestPainter::default();
+                timeline.paint(&mut painter, TIMELINE);
+                let added: Vec<_> = painter
+                    .fills
+                    .iter()
+                    .filter(|fill| !forward.fills.contains(fill))
+                    .collect();
+                if duration == 1 {
+                    assert!(added.is_empty());
+                } else {
+                    assert!(!added.is_empty());
+                    let x = at(0.0);
+                    let end = at(duration as f32);
+                    for (rect, _) in added {
+                        assert!(rect.x >= x && rect.x + rect.width <= end, "{rect:?}");
+                        assert!(
+                            rect.y >= RULER_HEIGHT && rect.y + rect.height <= RULER_HEIGHT + 20.0,
+                            "{rect:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -5874,7 +6217,7 @@ mod tests {
         let id = clip.id;
         assert!(state.edit(Command::InsertClip { track_id: 0, clip }));
         state.select_clip(Some((0, id)));
-        let painter = render(&state, 1280.0, 1600.0);
+        let painter = render(&state, 1280.0, 2600.0);
         for label in [
             "COLOR",
             "Brightness",
@@ -5890,7 +6233,7 @@ mod tests {
             color.contrast = 1.3;
             color.saturation = 0.0;
         });
-        let painter = render(&state, 1280.0, 1600.0);
+        let painter = render(&state, 1280.0, 2600.0);
         for label in ["+20", "130%", "0%"] {
             assert!(painter.labels.iter().any(|text| text == label), "{label}");
         }
@@ -6106,6 +6449,10 @@ mod tests {
             .next()
             .unwrap();
         let key = StoryboardKey {
+            transform_bits: StoryboardKey::transform_bits(crate::timeline::Transform::default()),
+            lut: None,
+            color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
+            playback: Playback::Forward,
             path,
             kind: MediaKind::Video,
             source_start: clip.source_start_frame,
@@ -7643,6 +7990,7 @@ mod tests {
             track_id: 0,
             clip: Clip {
                 speed: 1.0,
+                playback: crate::timeline::Playback::Forward,
                 noise_reduction: false,
                 lut: None,
                 transition_out: None,
@@ -7732,6 +8080,7 @@ mod tests {
                 track_id,
                 clip: Clip {
                     speed: 1.0,
+                    playback: crate::timeline::Playback::Forward,
                     id: id + 100,
                     noise_reduction: false,
                     lut: None,
@@ -8104,6 +8453,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 id: 1,
                 start_frame: 0,
@@ -8149,6 +8499,7 @@ mod tests {
                 base: true,
                 removable: false,
                 clips: vec![LaneClip {
+                    playback: Playback::Forward,
                     transition_frames: 0,
                     transition_out_frames: 0,
                     clip_id: 7,

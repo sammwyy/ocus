@@ -1,5 +1,5 @@
 use crate::media::{Media, MediaKind};
-use crate::timeline::{ClipContent, Marker, Track, TrackKind};
+use crate::timeline::{ClipContent, Marker, Playback, Track, TrackKind};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -9,7 +9,7 @@ pub mod format;
 pub mod recovery;
 pub mod store;
 
-pub use edit::{Command, Editor};
+pub use edit::{Command, Editor, freeze_at};
 use export_settings::LastExport;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -167,7 +167,11 @@ impl Project {
                     .checked_add(clip.duration_frames)
                     .ok_or("Clip range overflows")?;
                 clip.source_start_frame
-                    .checked_add(clip.source_span())
+                    .checked_add(if clip.playback == Playback::Freeze {
+                        0
+                    } else {
+                        clip.source_span()
+                    })
                     .ok_or("Clip source range overflows")?;
                 if clip.duration_frames == 0
                     || !clip.valid_speed()
@@ -184,8 +188,10 @@ impl Project {
                 end = next;
                 match &clip.content {
                     ClipContent::Title(title)
-                        if track.kind == TrackKind::Video && title.valid() && clip.speed == 1.0 => {
-                    }
+                        if track.kind == TrackKind::Video
+                            && title.valid()
+                            && clip.speed == 1.0
+                            && clip.playback == Playback::Forward => {}
                     ClipContent::Media { media_id }
                         if self.media.iter().any(|media| {
                             media.id == *media_id && self.media_clip_fits(media, track.kind, clip)
@@ -212,7 +218,16 @@ impl Project {
         kind: TrackKind,
         clip: &crate::timeline::Clip,
     ) -> bool {
-        if !clip.valid_speed() || media.kind == MediaKind::Image && clip.speed != 1.0 {
+        if !clip.valid_speed()
+            || (media.kind == MediaKind::Image || clip.playback == Playback::Freeze)
+                && clip.speed != 1.0
+        {
+            return false;
+        }
+        if (clip.playback == Playback::Reverse && media.kind == MediaKind::Image)
+            || (clip.playback == Playback::Freeze
+                && !(kind == TrackKind::Video && media.kind == MediaKind::Video))
+        {
             return false;
         }
         if !(matches!(

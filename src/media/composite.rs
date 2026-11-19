@@ -46,6 +46,7 @@ impl VisualPlan {
                             let media =
                                 project.media().iter().find(|media| media.id == *media_id)?;
                             Some(VisualClip::Media(FrameSource {
+                                playback: clip.playback,
                                 clip_id: clip.id,
                                 path: media.path.clone(),
                                 kind: media.kind,
@@ -413,6 +414,7 @@ mod tests {
         let plan = VisualPlan {
             resolution: (1920, 1080),
             tracks: vec![vec![VisualClip::Media(FrameSource {
+                playback: crate::timeline::Playback::Forward,
                 clip_id: 1,
                 path,
                 kind: MediaKind::Image,
@@ -460,6 +462,7 @@ mod tests {
             let plan = VisualPlan {
                 resolution: (1920, 1080),
                 tracks: vec![vec![VisualClip::Media(FrameSource {
+                    playback: crate::timeline::Playback::Forward,
                     clip_id: 1,
                     path,
                     kind: MediaKind::Video,
@@ -552,6 +555,7 @@ mod tests {
         let transparent = fixture("transparent.tga", 16, 9, 0);
         let source = |id, path| {
             VisualClip::Media(FrameSource {
+                playback: crate::timeline::Playback::Forward,
                 clip_id: id,
                 path,
                 kind: MediaKind::Image,
@@ -735,6 +739,7 @@ mod tests {
         .unwrap();
         let source = |id, path| {
             VisualClip::Media(FrameSource {
+                playback: crate::timeline::Playback::Forward,
                 clip_id: id,
                 path,
                 kind: MediaKind::Image,

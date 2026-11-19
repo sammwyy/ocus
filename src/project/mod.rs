@@ -9,7 +9,7 @@ pub mod format;
 pub mod recovery;
 pub mod store;
 
-pub use edit::{Command, Editor};
+pub use edit::{Command, Editor, freeze_at};
 use export_settings::LastExport;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -105,7 +105,11 @@ impl Project {
                     .checked_add(clip.duration_frames)
                     .ok_or("Clip range overflows")?;
                 clip.source_start_frame
-                    .checked_add(clip.duration_frames)
+                    .checked_add(if clip.playback == crate::timeline::Playback::Freeze {
+                        0
+                    } else {
+                        clip.duration_frames
+                    })
                     .ok_or("Clip source range overflows")?;
                 if clip.duration_frames == 0
                     || clip.start_frame < end
@@ -118,7 +122,9 @@ impl Project {
                 end = next;
                 match &clip.content {
                     ClipContent::Title(title)
-                        if track.kind == TrackKind::Video && title.valid() => {}
+                        if track.kind == TrackKind::Video
+                            && title.valid()
+                            && clip.playback == crate::timeline::Playback::Forward => {}
                     ClipContent::Media { media_id }
                         if self.media.iter().any(|media| {
                             media.id == *media_id && self.media_clip_fits(media, track.kind, clip)
@@ -145,6 +151,13 @@ impl Project {
         kind: TrackKind,
         clip: &crate::timeline::Clip,
     ) -> bool {
+        use crate::timeline::Playback;
+        if (clip.playback == Playback::Reverse && media.kind == MediaKind::Image)
+            || (clip.playback == Playback::Freeze
+                && !(kind == TrackKind::Video && media.kind == MediaKind::Video))
+        {
+            return false;
+        }
         if !(matches!(
             (kind, media.kind),
             (TrackKind::Video, MediaKind::Video | MediaKind::Image)
@@ -166,7 +179,13 @@ impl Project {
         } else {
             max_frames
         };
-        u128::from(clip.source_start_frame) + u128::from(clip.duration_frames) <= max_frames
+        u128::from(clip.source_start_frame)
+            + u128::from(if clip.playback == Playback::Freeze {
+                1
+            } else {
+                clip.duration_frames
+            })
+            <= max_frames
     }
 }
 

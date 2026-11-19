@@ -18,6 +18,7 @@ const CHUNK: usize = 2_048;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AudioSource {
+    pub playback: crate::timeline::Playback,
     pub path: PathBuf,
     pub start: u64,
     pub source_start: u64,
@@ -52,6 +53,7 @@ impl AudioPlan {
                     }
                     let media = project.media().iter().find(|media| media.id == media_id)?;
                     audible(track.kind, clip, media).then(|| AudioSource {
+                        playback: clip.playback,
                         path: media.path.clone(),
                         start: clip.start_frame,
                         source_start: clip.source_start_frame,
@@ -660,6 +662,7 @@ mod tests {
     fn timeline_audio_plan_preserves_sources_and_clock() {
         let project = mixed_project();
         let source = |path: &str, start, volume| AudioSource {
+            playback: crate::timeline::Playback::Forward,
             path: path.into(),
             start,
             source_start: 2,
@@ -743,6 +746,7 @@ mod tests {
             let queue = Arc::new(AudioQueue::new());
             let plan = AudioPlan {
                 sources: vec![AudioSource {
+                    playback: crate::timeline::Playback::Forward,
                     path,
                     start: 0,
                     source_start: 0,
@@ -842,6 +846,7 @@ mod tests {
             let plan = Arc::new(AudioPlan {
                 sources: (0..clips)
                     .map(|index| AudioSource {
+                        playback: crate::timeline::Playback::Forward,
                         path: path.clone(),
                         start: index * 240,
                         source_start: 0,
@@ -904,6 +909,7 @@ mod tests {
         let plan = AudioPlan {
             sources: vec![
                 AudioSource {
+                    playback: crate::timeline::Playback::Forward,
                     path: mono.clone(),
                     start: 0,
                     source_start: 0,
@@ -911,6 +917,7 @@ mod tests {
                     volume: 1.0,
                 },
                 AudioSource {
+                    playback: crate::timeline::Playback::Forward,
                     path: stereo.clone(),
                     start: 5,
                     source_start: 6,
@@ -918,6 +925,7 @@ mod tests {
                     volume: 0.5,
                 },
                 AudioSource {
+                    playback: crate::timeline::Playback::Forward,
                     path: silent.clone(),
                     start: 0,
                     source_start: 0,
@@ -955,6 +963,7 @@ mod tests {
         let queue = Arc::new(AudioQueue::new());
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                playback: crate::timeline::Playback::Forward,
                 path: path.clone(),
                 start: 0,
                 source_start: 0,
@@ -1010,6 +1019,7 @@ mod tests {
         let queue = Arc::new(AudioQueue::new());
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                playback: crate::timeline::Playback::Forward,
                 path: path.clone(),
                 start: 0,
                 source_start: 3,
@@ -1077,6 +1087,7 @@ mod tests {
             let queue = Arc::new(AudioQueue::new());
             let plan = AudioPlan {
                 sources: vec![AudioSource {
+                    playback: crate::timeline::Playback::Forward,
                     path: path.clone(),
                     start: 0,
                     source_start: 0,
@@ -1224,6 +1235,7 @@ mod tests {
             );
             let plan = Arc::new(AudioPlan {
                 sources: vec![AudioSource {
+                    playback: crate::timeline::Playback::Forward,
                     path,
                     start: 0,
                     source_start: 0,
@@ -1271,6 +1283,7 @@ mod tests {
             .collect();
         write_wav(&stereo, 48_000, 2, &stereo_samples);
         let source = |path: &PathBuf, start, source_start, duration, volume| AudioSource {
+            playback: crate::timeline::Playback::Forward,
             path: path.clone(),
             start,
             source_start,
@@ -1337,6 +1350,7 @@ mod tests {
         assert!(made.unwrap().success());
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                playback: crate::timeline::Playback::Forward,
                 path: path.clone(),
                 start: 0,
                 source_start: 0,
@@ -1368,6 +1382,7 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(true));
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                playback: crate::timeline::Playback::Forward,
                 path: PathBuf::from("missing.wav"),
                 start: 0,
                 source_start: 0,

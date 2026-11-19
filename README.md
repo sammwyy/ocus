@@ -1,5 +1,13 @@
 # Ocus
 
+The timeline model supports `forward` (the omitted default), `reverse`, and
+`freeze` clip playback in project JSON. Reverse uses the same source range in
+the opposite direction; freeze holds one video frame with an independent
+duration. `SetPlayback` and `freeze_at` are validated, undoable project edits.
+Leaving freeze keeps the held source frame as the source range start and
+clamps the duration to the remaining source. Playback controls, reverse/freeze
+rendering and freeze audio silencing are not implemented yet.
+
 Projects open even when source files have moved. Missing files are marked in the
 media bin; choose **Relink…** to search a folder by exact filename, or right-click
 a missing item and choose **Relink file…** to locate a renamed file. Locating one

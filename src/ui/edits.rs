@@ -233,6 +233,7 @@ pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Op
     Some((
         track.id,
         Clip {
+            playback: crate::timeline::Playback::Forward,
             id,
             start_frame,
             source_start_frame: 0,
@@ -372,6 +373,7 @@ pub(crate) fn insert_media(
         None => track.clips.iter().map(clip_end).max().unwrap_or(0),
     };
     let clip = Clip {
+        playback: crate::timeline::Playback::Forward,
         id: next_clip_id(project).ok_or("Clip ID limit reached")?,
         start_frame: start,
         source_start_frame: 0,
@@ -527,6 +529,7 @@ pub(crate) fn link_audio(project: &Project, selection: &[ClipRef]) -> Option<Pla
                     && clip.content == ClipContent::Media { media_id }
                     && clip.start_frame == picture.start_frame
                     && clip.source_start_frame == picture.source_start_frame
+                    && clip.playback == picture.playback
                     && clip.duration_frames == picture.duration_frames
             })
         });
@@ -570,6 +573,7 @@ mod tests {
 
     fn title(id: u64, start_frame: u64) -> Clip {
         Clip {
+            playback: crate::timeline::Playback::Forward,
             id,
             start_frame,
             source_start_frame: 0,

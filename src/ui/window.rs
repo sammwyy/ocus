@@ -122,7 +122,13 @@ fn adjust_timing(state: &UiState, source: bool, seconds: bool, increase: bool) {
                 .find(|media| media.id == media_id)
                 .filter(|media| media.kind != MediaKind::Image)
                 .and_then(|media| media_frames(media, fps))
-                .map(|frames| frames.saturating_sub(clip.duration_frames))
+                .map(|frames| {
+                    frames.saturating_sub(if clip.playback == crate::timeline::Playback::Freeze {
+                        1
+                    } else {
+                        clip.duration_frames
+                    })
+                })
                 .unwrap_or(u64::MAX - clip.duration_frames),
             _ => return,
         };
@@ -2213,6 +2219,7 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                                 .storyboards
                                 .borrow()
                                 .get(&StoryboardKey {
+                                    playback: clip.playback,
                                     path: media.path.clone(),
                                     kind: media.kind,
                                     source_start: clip.source_start_frame,
@@ -3987,6 +3994,7 @@ mod tests {
 
     fn destination_clip(start_frame: u64, duration_frames: u64) -> Clip {
         Clip {
+            playback: crate::timeline::Playback::Forward,
             id: 10,
             start_frame,
             source_start_frame: 0,
@@ -5233,6 +5241,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,

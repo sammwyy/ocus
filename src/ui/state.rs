@@ -200,6 +200,7 @@ impl Monitor {
 /// The source frames shown by the source monitor, in project frames.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SourceRange {
+    pub playback: crate::timeline::Playback,
     pub path: PathBuf,
     pub kind: MediaKind,
     pub source_start: u64,
@@ -956,6 +957,7 @@ impl UiState {
             }
             let media = project.media().iter().find(|media| media.id == media_id)?;
             return Some(SourceRange {
+                playback: clip.playback,
                 path: media.path.clone(),
                 kind: media.kind,
                 source_start: clip.source_start_frame,
@@ -969,6 +971,7 @@ impl UiState {
         let media = project.media().iter().find(|media| media.id == media_id)?;
         let rate = &project.settings().frame_rate;
         Some(SourceRange {
+            playback: crate::timeline::Playback::Forward,
             path: media.path.clone(),
             kind: media.kind,
             source_start: 0,
@@ -1212,6 +1215,7 @@ impl UiState {
                 };
                 if track.kind == TrackKind::Video {
                     sources.push(FrameSource {
+                        playback: clip.playback,
                         clip_id: clip.id,
                         path: media.path.clone(),
                         kind: media.kind,
@@ -1267,6 +1271,7 @@ impl UiState {
                 .iter()
                 .filter(|range| range.kind != MediaKind::Audio)
                 .map(|range| FrameSource {
+                    playback: range.playback,
                     clip_id: 0,
                     path: range.path.clone(),
                     kind: range.kind,
@@ -1284,6 +1289,7 @@ impl UiState {
                 .iter()
                 .filter(|range| range.kind != MediaKind::Image)
                 .map(|range| AudioSource {
+                    playback: range.playback,
                     path: range.path.clone(),
                     start: 0,
                     source_start: range.source_start,
@@ -1571,6 +1577,7 @@ impl UiState {
                 let media = project.media().iter().find(|media| media.id == media_id)?;
                 Some((
                     StoryboardKey {
+                        playback: clip.playback,
                         path: media.path.clone(),
                         kind: media.kind,
                         source_start: clip.source_start_frame,
@@ -3031,6 +3038,7 @@ mod tests {
         );
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                playback: clip.playback,
                 path,
                 start: clip.start_frame,
                 source_start: clip.source_start_frame,
@@ -3192,6 +3200,7 @@ mod tests {
             .map(|index| {
                 (
                     StoryboardKey {
+                        playback: crate::timeline::Playback::Forward,
                         path: "video.mp4".into(),
                         kind: MediaKind::Video,
                         source_start: index * 30,
@@ -3330,6 +3339,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id: 0,
                 clip: Clip {
+                    playback: crate::timeline::Playback::Forward,
                     id: index,
                     start_frame: index * 30,
                     source_start_frame: index * 30,
@@ -4199,6 +4209,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 2,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 id: 0,
                 start_frame: 0,
                 source_start_frame: 0,

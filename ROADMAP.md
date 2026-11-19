@@ -130,7 +130,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [ ] Basic keyframes for position, scale, rotation and opacity
 
 ### v0.8: Performance and safety
-- [ ] Hardware accelerated encoding and decoding (NVENC, VAAPI, VideoToolbox)
+- [x] Hardware accelerated encoding and decoding (NVENC, VAAPI, VideoToolbox)
 - [x] Proxy media for smooth 4K editing
 - [x] Frame and thumbnail cache
 - [x] Autosave

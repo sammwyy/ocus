@@ -12,7 +12,7 @@ src/
   main.rs           executable entry point
   app.rs            starts CreamUI and connects the project to the window
   atomic_file.rs    shared same-directory atomic writes for project and preset storage
-  settings.rs       editor appearance preferences in the platform config directory
+  settings.rs       editor appearance and performance preferences in the platform config directory
   project/
     mod.rs          saved project and video settings
     export_settings.rs  version-compatible per-project export settings
@@ -21,6 +21,7 @@ src/
     recovery.rs     ordered background autosave in the app data directory, with startup restore
   media.rs          source references, probing and thumbnail decoding
   media/preview.rs  background video decoding and frame-accurate seek
+  media/hardware.rs  NVENC/CUDA, VAAPI and VideoToolbox devices with software fallback
   media/cache.rs    bounded persistent thumbnail and storyboard RGBA cache
   media/composite.rs  shared preview/export visual composition
   media/audio.rs    background audio decoding, mixing and the playback clock
@@ -103,6 +104,11 @@ tracks and linked video sound through the bounded stereo queue used by preview
 playback, and encodes AAC or Opus. GIF uses the same compositor with
 per-frame palettes and skips the sound mix; WAV only renders the sound mix.
 Audio-only timelines use black video when exported to a video format.
+When hardware acceleration is enabled in Settings, `media/hardware.rs` opens
+one shared FFmpeg device per backend (CUDA, VAAPI or VideoToolbox) for video
+decoders, downloads decoded frames for the shared scaler, and lets export use
+NVENC, VAAPI or VideoToolbox encoders. Any codec, device or encoder that is
+unavailable falls back to software decoding or libx264, libx265 and libvpx.
 Output resolution, bitrate or constant-quality CRF, encoder speed and frame rate
 are independent of the edit
 timeline; the visual composition is letterboxed when output aspect differs

@@ -46,6 +46,7 @@ pub(crate) enum ExportPage {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsPage {
     Appearance,
+    Performance,
     About,
 }
 
@@ -415,6 +416,7 @@ impl UiState {
         let settings = settings::path()
             .and_then(|path| settings::load(&path).ok())
             .unwrap_or_default();
+        crate::media::hardware::set_enabled(settings.hardware_acceleration);
         let export_directory =
             settings::export_directory(settings.last_export_directory.as_deref());
         Self {
@@ -696,6 +698,7 @@ impl UiState {
             return;
         }
         self.settings.set(settings.clone());
+        crate::media::hardware::set_enabled(settings.hardware_acceleration);
         if settings.theme != ThemeMode::System
             && let Some(window) = self.window.borrow().as_ref()
         {
@@ -751,6 +754,12 @@ impl UiState {
         self.queue_storyboards();
         self.request_preview();
         self.request_source_preview();
+    }
+
+    pub fn toggle_hardware_acceleration(&self) {
+        let mut settings = self.settings.peek();
+        settings.hardware_acceleration = !settings.hardware_acceleration;
+        self.update_settings(settings);
     }
 
     pub fn sync_system_theme(&self) {

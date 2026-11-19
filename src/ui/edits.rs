@@ -245,6 +245,7 @@ pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Op
     Some((
         track.id,
         Clip {
+            effect_stack: Vec::new(),
             playback: crate::timeline::Playback::Forward,
             effect: None,
             mask: None,
@@ -406,6 +407,7 @@ pub(crate) fn insert_media(
         None => track.clips.iter().map(clip_end).max().unwrap_or(0),
     };
     let clip = Clip {
+        effect_stack: Vec::new(),
         playback: crate::timeline::Playback::Forward,
         effect: None,
         mask: None,
@@ -647,6 +649,7 @@ mod tests {
 
     fn title(id: u64, start_frame: u64) -> Clip {
         Clip {
+            effect_stack: Vec::new(),
             playback: crate::timeline::Playback::Forward,
             effect: None,
             mask: None,

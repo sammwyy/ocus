@@ -58,6 +58,17 @@ pub(crate) fn split_tracks(
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
+    ApplyEffect {
+        track_id: u64,
+        clip_id: u64,
+        kind: crate::timeline::effects::EffectKind,
+        path: Option<std::path::PathBuf>,
+    },
+    RemoveEffect {
+        track_id: u64,
+        clip_id: u64,
+        kind: crate::timeline::effects::EffectKind,
+    },
     SetClipStabilization {
         track_id: u64,
         clip_id: u64,
@@ -378,7 +389,10 @@ pub fn freeze_at(project: &Project, track_id: u64, clip_id: u64, frame: u64) -> 
         .clips
         .iter_mut()
         .find(|c| c.id == if offset == 0 { clip_id } else { new_id })?;
-    right.playback = Playback::Freeze;
+    if right.playback != Playback::Freeze {
+        right.playback = Playback::Freeze;
+        right.sync_playback_effects();
+    }
     right.speed = 1.0;
     right.source_start_frame = held;
     Some(Command::ReplaceTracks(tracks))
@@ -509,6 +523,7 @@ mod playback_tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 stabilization: None,
                 keyframes: Vec::new(),
                 speed: 1.0,
@@ -554,6 +569,7 @@ mod playback_tests {
             assert!(editor.apply(Command::InsertClip {
                 track_id: 1,
                 clip: Box::new(Clip {
+                    effect_stack: Vec::new(),
                     stabilization: None,
                     keyframes: Vec::new(),
                     speed: 1.0,
@@ -622,7 +638,7 @@ mod playback_tests {
     }
 
     #[test]
-    fn playback_switches_are_undoable_and_leaving_freeze_clamps_to_held_frame() {
+    fn playback_switches_are_undoable_and_leaving_freeze_preserves_duration() {
         let mut editor = editor(Playback::Forward);
         assert!(editor.apply(Command::SetClipFades {
             track_id: 0,
@@ -639,8 +655,8 @@ mod playback_tests {
             }));
         }
         let clip = &editor.project().tracks()[0].clips[0];
-        assert_eq!((clip.source_start_frame, clip.duration_frames), (24, 6));
-        assert_eq!((clip.fade_in_frames, clip.fade_out_frames), (6, 0));
+        assert_eq!((clip.source_start_frame, clip.duration_frames), (10, 20));
+        assert_eq!((clip.fade_in_frames, clip.fade_out_frames), (10, 10));
         let after = editor.project().tracks().to_vec();
         for _ in 0..3 {
             assert!(editor.undo());
@@ -655,6 +671,120 @@ mod playback_tests {
             clip_id: 1,
             playback: Playback::Freeze
         }));
+    }
+
+    #[test]
+    fn leaving_freeze_maps_source_range_and_clamps_only_to_source_length() {
+        for (held, duration, expected_forward, expected_reverse) in [
+            (5, 20, (5, 20), (0, 20)),
+            (24, 20, (10, 20), (5, 20)),
+            (24, 60, (0, 30), (0, 30)),
+        ] {
+            for (playback, expected) in [
+                (Playback::Forward, expected_forward),
+                (Playback::Reverse, expected_reverse),
+            ] {
+                let mut editor = editor(Playback::Freeze);
+                let mut tracks = editor.project().tracks().to_vec();
+                tracks[0].clips[0].source_start_frame = held;
+                tracks[0].clips[0].duration_frames = duration;
+                let mut next = tracks[0].clips[0].clone();
+                next.id = 2;
+                next.start_frame += duration;
+                tracks[0].clips.push(next);
+                assert!(editor.apply(Command::ReplaceTracks(tracks)));
+                let before = editor.project().clone();
+                let history = editor.undo.len();
+                assert!(editor.apply(Command::SetPlayback {
+                    track_id: 0,
+                    clip_id: 1,
+                    playback,
+                }));
+                let clip = &editor.project().tracks()[0].clips[0];
+                assert_eq!((clip.source_start_frame, clip.duration_frames), expected);
+                assert!(clip.start_frame + clip.duration_frames <= 10 + duration);
+                assert_eq!(editor.undo.len(), history + 1);
+                let after = editor.project().clone();
+                assert!(editor.undo());
+                assert_eq!(editor.project(), &before);
+                assert!(editor.redo());
+                assert_eq!(editor.project(), &after);
+            }
+        }
+    }
+
+    #[test]
+    fn reverse_freeze_removal_and_replacement_preserve_six_second_duration() {
+        use crate::timeline::effects::EffectKind;
+        for action in [
+            Command::RemoveEffect {
+                track_id: 0,
+                clip_id: 1,
+                kind: EffectKind::FreezeFrame,
+            },
+            Command::ApplyEffect {
+                track_id: 0,
+                clip_id: 1,
+                kind: EffectKind::Reverse,
+                path: None,
+            },
+            Command::SetPlayback {
+                track_id: 0,
+                clip_id: 1,
+                playback: Playback::Forward,
+            },
+            Command::SetPlayback {
+                track_id: 0,
+                clip_id: 1,
+                playback: Playback::Reverse,
+            },
+        ] {
+            let reverse = matches!(
+                action,
+                Command::ApplyEffect { .. }
+                    | Command::SetPlayback {
+                        playback: Playback::Reverse,
+                        ..
+                    }
+            );
+            let mut value = serde_json::to_value(Project::new("Freeze")).unwrap();
+            value["media"] = serde_json::json!([{
+                "id": 1, "path": "video.mp4", "kind": "video", "duration_us": 6_000_000,
+                "has_audio": true
+            }]);
+            value["tracks"][0]["clips"] = serde_json::json!([{
+                "id": 1, "start_frame": 0, "source_start_frame": 0, "duration_frames": 180,
+                "content": {"media": {"media_id": 1}}, "volume": 1.0, "muted": false,
+                "playback": "reverse", "effect_stack": ["reverse"]
+            }]);
+            let mut editor = Editor::new(serde_json::from_value(value).unwrap());
+            assert!(editor.apply(Command::ApplyEffect {
+                track_id: 0,
+                clip_id: 1,
+                kind: EffectKind::FreezeFrame,
+                path: None,
+            }));
+            let frozen = editor.project().clone();
+            let clip = &frozen.tracks()[0].clips[0];
+            assert_eq!((clip.source_start_frame, clip.duration_frames), (179, 180));
+            assert!(editor.apply(action));
+            let clip = &editor.project().tracks()[0].clips[0];
+            assert_eq!((clip.source_start_frame, clip.duration_frames), (0, 180));
+            assert_eq!(
+                clip.playback,
+                if reverse {
+                    Playback::Reverse
+                } else {
+                    Playback::Forward
+                }
+            );
+            assert_eq!(editor.undo.len(), 2);
+            let after = editor.project().clone();
+            assert!(editor.undo());
+            assert_eq!(editor.project(), &frozen);
+            assert!(editor.redo());
+            assert_eq!(editor.project(), &after);
+        }
     }
 
     #[test]
@@ -778,6 +908,7 @@ mod playback_tests {
         }));
         let mut tracks = editor.project().tracks().to_vec();
         tracks[1].clips.push(Clip {
+            effect_stack: Vec::new(),
             stabilization: None,
             keyframes: Vec::new(),
             speed: 1.0,
@@ -807,6 +938,129 @@ mod playback_tests {
 }
 
 impl Editor {
+    fn configure_effect(
+        &mut self,
+        track_id: u64,
+        clip_id: u64,
+        kind: crate::timeline::effects::EffectKind,
+        apply: bool,
+        path: Option<std::path::PathBuf>,
+    ) -> Option<()> {
+        use crate::timeline::effects::EffectKind;
+        let target = self.project.effect_target(track_id, clip_id).ok()?;
+        let playback = target.clip.playback;
+        let speed = target.clip.speed;
+        if matches!(kind, EffectKind::Reverse | EffectKind::FreezeFrame) {
+            let desired = if !apply {
+                Playback::Forward
+            } else if kind == EffectKind::Reverse {
+                Playback::Reverse
+            } else {
+                Playback::Freeze
+            };
+            if playback != desired {
+                self.execute(Command::SetPlayback {
+                    track_id,
+                    clip_id,
+                    playback: desired,
+                })?;
+            }
+        }
+        if kind == EffectKind::Speed {
+            let desired = if apply {
+                let mut low = 1.0_f64.to_bits();
+                let mut high = 2.0_f64.to_bits();
+                if speed == 2.0 || self.can_set_clip_speed(track_id, clip_id, 2.0) {
+                    low = high;
+                }
+                while low < high {
+                    let middle = low + (high - low).div_ceil(2);
+                    let candidate = f64::from_bits(middle);
+                    if speed == candidate || self.can_set_clip_speed(track_id, clip_id, candidate) {
+                        low = middle;
+                    } else {
+                        high = middle - 1;
+                    }
+                }
+                let desired = f64::from_bits(low);
+                if desired <= 1.0 {
+                    return None;
+                }
+                desired
+            } else {
+                1.0
+            };
+            if speed != desired {
+                self.execute(Command::SetClipSpeed {
+                    track_id,
+                    clip_id,
+                    speed: desired,
+                })?;
+            }
+        }
+        let rate = &self.project.settings.frame_rate;
+        let half_second =
+            (f64::from(rate.numerator) / f64::from(rate.denominator) / 2.0).round() as u64;
+        let clip = self
+            .project
+            .tracks
+            .iter_mut()
+            .find(|track| track.id == track_id)?
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == clip_id)?;
+        if kind.is_shader() {
+            clip.effect = if apply {
+                Some(crate::timeline::Effect {
+                    shader: if kind == EffectKind::CustomShader {
+                        crate::timeline::EffectShader::File(path?)
+                    } else {
+                        crate::timeline::EffectShader::Builtin(kind.id().into())
+                    },
+                    amount: 1.0,
+                })
+            } else {
+                None
+            };
+        } else {
+            match kind {
+                EffectKind::ChromaKey => clip.chroma_key = apply.then(Default::default),
+                EffectKind::ColorCorrection => {
+                    clip.color = if apply {
+                        ColorAdjust {
+                            brightness: 0.0,
+                            contrast: 1.1,
+                            saturation: 1.15,
+                        }
+                    } else {
+                        ColorAdjust::default()
+                    }
+                }
+                EffectKind::ColorLut => clip.lut = if apply { Some(path?) } else { None },
+                EffectKind::Mask => clip.mask = apply.then(Default::default),
+                EffectKind::Stabilization => clip.stabilization = None,
+                EffectKind::NoiseReduction => clip.noise_reduction = apply,
+                EffectKind::Fades => {
+                    let fade = if apply {
+                        half_second.min(clip.duration_frames / 2)
+                    } else {
+                        0
+                    };
+                    clip.fade_in_frames = fade;
+                    clip.fade_out_frames = fade;
+                }
+                _ => {}
+            }
+        }
+        clip.effect_stack.retain(|existing| {
+            *existing != kind && !(apply && kind.is_shader() && existing.is_shader())
+        });
+        if apply {
+            clip.effect_stack.push(kind);
+        }
+        Some(())
+    }
+
     pub fn new(project: Project) -> Self {
         Self {
             project,
@@ -867,7 +1121,9 @@ impl Editor {
                 .any(|track| track.id == id && !track.locked)
         };
         let allowed = match &command {
-            Command::InsertClip { track_id, .. }
+            Command::ApplyEffect { track_id, .. }
+            | Command::RemoveEffect { track_id, .. }
+            | Command::InsertClip { track_id, .. }
             | Command::RemoveClip { track_id, .. }
             | Command::Split { track_id, .. }
             | Command::Trim { track_id, .. }
@@ -908,18 +1164,62 @@ impl Editor {
             return None;
         }
         match command {
+            Command::ApplyEffect {
+                track_id,
+                clip_id,
+                kind,
+                path,
+            } => {
+                self.project
+                    .can_apply_effect(kind, track_id, clip_id)
+                    .ok()?;
+                if matches!(
+                    kind,
+                    crate::timeline::effects::EffectKind::CustomShader
+                        | crate::timeline::effects::EffectKind::ColorLut
+                ) && path.as_ref().is_none_or(|path| path.as_os_str().is_empty())
+                {
+                    return None;
+                }
+                let mut candidate = Self::new(self.project.clone());
+                candidate.configure_effect(track_id, clip_id, kind, true, path)?;
+                self.execute(Command::ReplaceTracks(candidate.project.tracks))
+            }
+            Command::RemoveEffect {
+                track_id,
+                clip_id,
+                kind,
+            } => {
+                if !self
+                    .project
+                    .effect_target(track_id, clip_id)
+                    .ok()?
+                    .clip
+                    .effect_stack
+                    .contains(&kind)
+                {
+                    return None;
+                }
+                let mut candidate = Self::new(self.project.clone());
+                candidate.configure_effect(track_id, clip_id, kind, false, None)?;
+                self.execute(Command::ReplaceTracks(candidate.project.tracks))
+            }
             Command::SetPlayback {
                 track_id,
                 clip_id,
                 playback,
             } => {
                 let mut tracks = self.project.tracks.clone();
-                let clip = tracks
-                    .iter_mut()
-                    .find(|t| t.id == track_id)?
+                let track = tracks.iter_mut().find(|track| track.id == track_id)?;
+                let index = track.clips.iter().position(|clip| clip.id == clip_id)?;
+                let next = track
                     .clips
-                    .iter_mut()
-                    .find(|c| c.id == clip_id)?;
+                    .iter()
+                    .filter(|clip| clip.start_frame > track.clips[index].start_frame)
+                    .map(|clip| clip.start_frame)
+                    .min()
+                    .unwrap_or(u64::MAX);
+                let clip = &mut track.clips[index];
                 if clip.playback == playback {
                     return None;
                 }
@@ -931,18 +1231,27 @@ impl Editor {
                         return None;
                     };
                     let media = self.project.media.iter().find(|m| m.id == media_id)?;
+                    clip.playback = playback;
+                    let needed = clip.source_span();
+                    if playback == Playback::Reverse {
+                        clip.source_start_frame = clip
+                            .source_start_frame
+                            .saturating_sub(needed.saturating_sub(1));
+                    }
                     if let Some(duration) = media.duration_us {
                         let rate = &self.project.settings.frame_rate;
                         let frames = (u128::from(duration) * u128::from(rate.numerator)
                             / (1_000_000 * u128::from(rate.denominator)))
                         .max(1)
                         .min(u128::from(u64::MAX)) as u64;
-                        clip.duration_frames = clip
-                            .duration_frames
-                            .min(frames.checked_sub(clip.source_start_frame)?);
+                        clip.source_start_frame =
+                            clip.source_start_frame.min(frames.saturating_sub(needed));
+                        clip.duration_frames = clip.duration_frames.min(clip.timeline_span(frames));
                     }
+                    clip.duration_frames = clip.duration_frames.min(next - clip.start_frame);
                 }
                 clip.playback = playback;
+                clip.sync_playback_effects();
                 clip.clamp_fades();
                 self.execute(Command::ReplaceTracks(tracks))
             }
@@ -1103,6 +1412,29 @@ impl Editor {
                             || !matches!(clip.content, ClipContent::Media { .. })))
                 {
                     return None;
+                }
+                if !clip.effect_stack.is_empty() {
+                    let track = self
+                        .project
+                        .tracks
+                        .iter()
+                        .find(|track| track.id == track_id)?;
+                    let ClipContent::Media { media_id } = clip.content else {
+                        return None;
+                    };
+                    let media = self
+                        .project
+                        .media
+                        .iter()
+                        .find(|media| media.id == media_id)?;
+                    crate::timeline::effects::validate_stack(
+                        crate::timeline::effects::EffectTarget {
+                            clip: &clip,
+                            track,
+                            media,
+                        },
+                    )
+                    .ok()?;
                 }
                 let track = self.project.tracks.iter_mut().find(|t| t.id == track_id)?;
                 if track.clips.iter().any(|existing| {
@@ -2032,6 +2364,7 @@ mod tests {
         use crate::timeline::{Clip, ClipContent, Title};
         let mut editor = Editor::new(Project::new("Locked"));
         let clip = Clip {
+            effect_stack: Vec::new(),
             speed: 1.0,
             playback: Playback::Forward,
             effect: None,
@@ -2184,6 +2517,436 @@ mod tests {
             "linked_audio": true
         }]);
         serde_json::from_value(value).unwrap()
+    }
+
+    fn assert_legacy_effect_round_trip(project: &Project) {
+        let mut expected = project.clone();
+        for clip in expected
+            .tracks
+            .iter_mut()
+            .flat_map(|track| &mut track.clips)
+        {
+            clip.normalize_effect_stack();
+        }
+        let json = crate::project::format::to_json(project).unwrap();
+        let restored = crate::project::format::from_json(&json).unwrap();
+        assert_eq!(restored, expected);
+        let migrated = crate::project::format::to_json(&restored).unwrap();
+        assert_eq!(
+            crate::project::format::from_json(&migrated).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn catalog_effects_apply_remove_and_restore_exact_history() {
+        use crate::timeline::effects::EffectKind;
+        for kind in EffectKind::ALL {
+            let original = speed_project();
+            let mut editor = Editor::new(original.clone());
+            let apply = Command::ApplyEffect {
+                track_id: 0,
+                clip_id: 1,
+                kind,
+                path: Some("effect.file".into()),
+            };
+            assert!(editor.apply(apply.clone()), "{kind:?}");
+            assert_eq!((editor.undo.len(), editor.redo.len()), (1, 0), "{kind:?}");
+            let applied = editor.project().clone();
+            let clip = &applied.tracks[0].clips[0];
+            assert_eq!(clip.effect_stack, vec![kind]);
+            assert!(applied.validate().is_ok());
+            if kind.is_shader() {
+                assert_eq!(clip.effect.as_ref().unwrap().amount, 1.0);
+            }
+            match kind {
+                EffectKind::ColorCorrection => assert_eq!(
+                    clip.color,
+                    ColorAdjust {
+                        brightness: 0.0,
+                        contrast: 1.1,
+                        saturation: 1.15,
+                    }
+                ),
+                EffectKind::Fades => {
+                    assert_eq!((clip.fade_in_frames, clip.fade_out_frames), (15, 15))
+                }
+                EffectKind::Speed => assert_eq!(clip.speed, 2.0),
+                EffectKind::Reverse => assert_eq!(clip.playback, Playback::Reverse),
+                EffectKind::FreezeFrame => assert_eq!(clip.playback, Playback::Freeze),
+                EffectKind::NoiseReduction => assert!(clip.noise_reduction),
+                EffectKind::ChromaKey => assert!(clip.chroma_key.is_some()),
+                EffectKind::Mask => assert!(clip.mask.is_some()),
+                EffectKind::ColorLut => assert_eq!(
+                    clip.lut.as_deref(),
+                    Some(std::path::Path::new("effect.file"))
+                ),
+                EffectKind::Stabilization => assert!(clip.stabilization.is_none()),
+                _ => {}
+            }
+            assert!(!editor.apply(apply));
+            assert_eq!(editor.project(), &applied);
+            assert!(editor.undo());
+            assert_eq!(editor.project(), &original);
+            assert_eq!((editor.undo.len(), editor.redo.len()), (0, 1), "{kind:?}");
+            assert!(editor.redo());
+            assert_eq!(editor.project(), &applied);
+            assert_eq!((editor.undo.len(), editor.redo.len()), (1, 0), "{kind:?}");
+            let remove = Command::RemoveEffect {
+                track_id: 0,
+                clip_id: 1,
+                kind,
+            };
+            assert!(editor.apply(remove.clone()));
+            assert_eq!((editor.undo.len(), editor.redo.len()), (2, 0), "{kind:?}");
+            assert_eq!(editor.project(), &original, "{kind:?}");
+            assert!(!editor.apply(remove));
+            assert!(editor.undo());
+            assert_eq!(editor.project(), &applied);
+            assert_eq!((editor.undo.len(), editor.redo.len()), (1, 1), "{kind:?}");
+            assert!(editor.redo());
+            assert_eq!(editor.project(), &original);
+            assert_eq!((editor.undo.len(), editor.redo.len()), (2, 0), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn effect_replacements_preserve_order_parameters_and_exact_inverses() {
+        use crate::timeline::effects::EffectKind;
+        let mut editor = Editor::new(speed_project());
+        for kind in [
+            EffectKind::Sepia,
+            EffectKind::ColorCorrection,
+            EffectKind::NoiseReduction,
+            EffectKind::Fades,
+            EffectKind::Speed,
+            EffectKind::Reverse,
+        ] {
+            assert!(editor.apply(Command::ApplyEffect {
+                track_id: 0,
+                clip_id: 1,
+                kind,
+                path: None
+            }));
+        }
+        assert!(editor.apply(Command::SetClipEffect {
+            track_id: 0,
+            clip_id: 1,
+            effect: Some(crate::timeline::Effect {
+                shader: crate::timeline::EffectShader::Builtin("sepia".into()),
+                amount: 0.3,
+            }),
+        }));
+        assert!(editor.apply(Command::SetClipColor {
+            track_id: 0,
+            clip_id: 1,
+            color: ColorAdjust::default(),
+        }));
+        let previous = editor.project().clone();
+        assert!(editor.apply(Command::ApplyEffect {
+            track_id: 0,
+            clip_id: 1,
+            kind: EffectKind::Blur,
+            path: None,
+        }));
+        let blurred = editor.project().clone();
+        let stack = &blurred.tracks[0].clips[0].effect_stack;
+        assert!(!stack.contains(&EffectKind::Sepia));
+        assert_eq!(stack.last(), Some(&EffectKind::Blur));
+        assert!(editor.undo());
+        assert_eq!(editor.project(), &previous);
+        assert!(editor.redo());
+        assert!(editor.apply(Command::ApplyEffect {
+            track_id: 0,
+            clip_id: 1,
+            kind: EffectKind::FreezeFrame,
+            path: None,
+        }));
+        let frozen = editor.project().clone();
+        let clip = &frozen.tracks[0].clips[0];
+        assert_eq!(clip.speed, 1.0);
+        assert!(!clip.effect_stack.contains(&EffectKind::Speed));
+        assert!(!clip.effect_stack.contains(&EffectKind::Reverse));
+        assert!(clip.effect_stack.contains(&EffectKind::NoiseReduction));
+        assert!(clip.effect_stack.contains(&EffectKind::Fades));
+        assert_eq!(
+            clip.fade_in_frames,
+            blurred.tracks[0].clips[0].fade_in_frames
+        );
+        assert!(clip.noise_reduction);
+        assert!(editor.undo());
+        assert_eq!(editor.project(), &blurred);
+        assert!(editor.redo());
+        assert!(editor.apply(Command::ApplyEffect {
+            track_id: 0,
+            clip_id: 1,
+            kind: EffectKind::Reverse,
+            path: None,
+        }));
+        assert!(
+            !editor.project().tracks[0].clips[0]
+                .effect_stack
+                .contains(&EffectKind::FreezeFrame)
+        );
+        assert!(editor.undo());
+        assert_eq!(editor.project(), &frozen);
+        for playback in [Playback::Reverse, Playback::Freeze, Playback::Forward] {
+            let before = editor.project().clone();
+            if before.tracks[0].clips[0].playback == playback {
+                assert!(!editor.apply(Command::SetPlayback {
+                    track_id: 0,
+                    clip_id: 1,
+                    playback
+                }));
+                continue;
+            }
+            assert!(editor.apply(Command::SetPlayback {
+                track_id: 0,
+                clip_id: 1,
+                playback
+            }));
+            let clip = &editor.project().tracks[0].clips[0];
+            assert_eq!(
+                clip.effect_stack.contains(&EffectKind::Reverse),
+                playback == Playback::Reverse
+            );
+            assert_eq!(
+                clip.effect_stack.contains(&EffectKind::FreezeFrame),
+                playback == Playback::Freeze
+            );
+            assert!(editor.undo());
+            assert_eq!(editor.project(), &before);
+        }
+    }
+
+    #[test]
+    fn effect_queries_and_commands_reject_missing_locked_and_incompatible_targets() {
+        use crate::timeline::effects::EffectKind;
+        let original = speed_project();
+        for (media_kind, track_kind, linked_audio, expected) in [
+            (
+                MediaKind::Image,
+                TrackKind::Video,
+                false,
+                vec![
+                    EffectKind::Grayscale,
+                    EffectKind::Sepia,
+                    EffectKind::Invert,
+                    EffectKind::Vignette,
+                    EffectKind::Blur,
+                    EffectKind::Pixelate,
+                    EffectKind::ChromaticAberration,
+                    EffectKind::CustomShader,
+                    EffectKind::ChromaKey,
+                    EffectKind::ColorCorrection,
+                    EffectKind::ColorLut,
+                    EffectKind::Mask,
+                ],
+            ),
+            (
+                MediaKind::Audio,
+                TrackKind::Audio,
+                false,
+                vec![
+                    EffectKind::Reverse,
+                    EffectKind::Speed,
+                    EffectKind::NoiseReduction,
+                    EffectKind::Fades,
+                ],
+            ),
+            (
+                MediaKind::Video,
+                TrackKind::Video,
+                false,
+                EffectKind::ALL
+                    .into_iter()
+                    .filter(|kind| !matches!(kind, EffectKind::NoiseReduction | EffectKind::Fades))
+                    .collect(),
+            ),
+        ] {
+            let mut project = original.clone();
+            project.media[0].kind = media_kind;
+            project.tracks[0].kind = track_kind;
+            project.tracks[0].clips[0].linked_audio = linked_audio;
+            assert_eq!(project.applicable_effects(0, 1).unwrap(), expected);
+            for kind in EffectKind::ALL {
+                assert_eq!(
+                    project.can_apply_effect(kind, 0, 1).is_ok(),
+                    expected.contains(&kind)
+                );
+                let mut editor = Editor::new(project.clone());
+                assert_eq!(
+                    editor.apply(Command::ApplyEffect {
+                        track_id: 0,
+                        clip_id: 1,
+                        kind,
+                        path: Some("chosen.file".into()),
+                    }),
+                    expected.contains(&kind),
+                    "{media_kind:?} {kind:?}"
+                );
+                if !expected.contains(&kind) {
+                    assert_eq!(editor.project(), &project);
+                }
+            }
+        }
+        let mut locked = original.clone();
+        locked.tracks[0].locked = true;
+        assert!(locked.applicable_effects(0, 1).unwrap().is_empty());
+        assert_eq!(
+            locked.can_apply_effect(EffectKind::Blur, 0, 1).unwrap_err(),
+            "Track is locked"
+        );
+        assert!(original.effect_target(99, 1).is_err());
+        assert!(original.effect_target(0, 99).is_err());
+        for path in [None, Some(std::path::PathBuf::new())] {
+            for kind in [EffectKind::CustomShader, EffectKind::ColorLut] {
+                let mut editor = Editor::new(original.clone());
+                assert!(!editor.apply(Command::ApplyEffect {
+                    track_id: 0,
+                    clip_id: 1,
+                    kind,
+                    path: path.clone()
+                }));
+                assert_eq!(editor.project(), &original);
+            }
+        }
+    }
+
+    #[test]
+    fn effect_membership_survives_neutral_parameters_and_pending_analysis() {
+        use crate::timeline::effects::EffectKind;
+        let mut editor = Editor::new(speed_project());
+        for kind in [
+            EffectKind::ColorCorrection,
+            EffectKind::Speed,
+            EffectKind::Fades,
+            EffectKind::Stabilization,
+        ] {
+            assert!(editor.apply(Command::ApplyEffect {
+                track_id: 0,
+                clip_id: 1,
+                kind,
+                path: None
+            }));
+        }
+        let stack = editor.project().tracks[0].clips[0].effect_stack.clone();
+        assert!(editor.apply(Command::SetClipColor {
+            track_id: 0,
+            clip_id: 1,
+            color: ColorAdjust::default()
+        }));
+        assert!(editor.apply(Command::SetClipSpeed {
+            track_id: 0,
+            clip_id: 1,
+            speed: 1.0
+        }));
+        assert!(editor.apply(Command::SetClipFades {
+            track_id: 0,
+            clip_id: 1,
+            fade_in_frames: 0,
+            fade_out_frames: 0
+        }));
+        assert_eq!(editor.project().tracks[0].clips[0].effect_stack, stack);
+        assert_eq!(
+            super::super::format::from_json(
+                &super::super::format::to_json(editor.project()).unwrap()
+            )
+            .unwrap(),
+            *editor.project()
+        );
+        assert!(editor.apply(Command::SetClipStabilization {
+            track_id: 0,
+            clip_id: 1,
+            stabilization: Some(crate::timeline::Stabilization::new(30, vec![[0.1, 0.2]])),
+        }));
+        let analyzed = editor.project().clone();
+        assert!(editor.apply(Command::RemoveEffect {
+            track_id: 0,
+            clip_id: 1,
+            kind: EffectKind::Stabilization
+        }));
+        assert!(editor.project().tracks[0].clips[0].stabilization.is_none());
+        assert!(editor.undo());
+        assert_eq!(editor.project(), &analyzed);
+    }
+
+    #[test]
+    fn speed_effect_default_uses_the_preset_constraints_and_one_history_entry() {
+        use crate::timeline::effects::EffectKind;
+        for playback in [Playback::Forward, Playback::Reverse] {
+            for frames in [1_u64, 2, 3, 60] {
+                let mut project = speed_project();
+                project.media[0].duration_us = Some((frames * 1_000_000).div_ceil(30));
+                let clip = &mut project.tracks[0].clips[0];
+                clip.source_start_frame = 0;
+                clip.duration_frames = frames;
+                clip.playback = playback;
+                let mut next = clip.clone();
+                next.id = 2;
+                next.start_frame += frames;
+                project.tracks[0].clips.push(next);
+                let mut editor = Editor::new(project.clone());
+                let preset_valid = editor.can_set_clip_speed(0, 1, 2.0);
+                assert_eq!(preset_valid, frames > 1);
+                assert_eq!(
+                    editor.apply(Command::ApplyEffect {
+                        track_id: 0,
+                        clip_id: 1,
+                        kind: EffectKind::Speed,
+                        path: None
+                    }),
+                    preset_valid
+                );
+                if preset_valid {
+                    assert_eq!(editor.project().tracks[0].clips[0].speed, 2.0);
+                    let applied = editor.project().clone();
+                    assert_eq!(editor.undo.len(), 1);
+                    assert!(editor.undo());
+                    assert_eq!(editor.project(), &project);
+                    assert!(editor.redo());
+                    assert_eq!(editor.project(), &applied);
+                } else {
+                    assert_eq!(editor.project(), &project);
+                    assert!(editor.undo.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn short_effect_defaults_are_bounded_and_freeze_at_syncs_membership() {
+        use crate::timeline::effects::EffectKind;
+        let mut project = speed_project();
+        project.media[0].duration_us = Some(33_334);
+        project.tracks[0].clips[0].source_start_frame = 0;
+        project.tracks[0].clips[0].duration_frames = 1;
+        let mut editor = Editor::new(project);
+        assert!(!editor.apply(Command::ApplyEffect {
+            track_id: 0,
+            clip_id: 1,
+            kind: EffectKind::Speed,
+            path: None
+        }));
+        assert!(editor.undo.is_empty());
+        for kind in [EffectKind::Fades, EffectKind::Reverse] {
+            assert!(editor.apply(Command::ApplyEffect {
+                track_id: 0,
+                clip_id: 1,
+                kind,
+                path: None
+            }));
+        }
+        let previous = editor.project().clone();
+        assert_eq!(previous.tracks[0].clips[0].speed, 1.0);
+        assert!(previous.tracks[0].clips[0].valid_fades());
+        assert!(editor.apply(freeze_at(editor.project(), 0, 1, 10).unwrap()));
+        assert_eq!(
+            editor.project().tracks[0].clips[0].effect_stack,
+            vec![EffectKind::Fades, EffectKind::FreezeFrame]
+        );
+        assert!(editor.undo());
+        assert_eq!(editor.project(), &previous);
     }
 
     #[test]
@@ -2609,8 +3372,7 @@ mod tests {
         assert_eq!(super::super::format::from_json(&legacy).unwrap(), project);
         for speed in [0.25, 0.5, 1.5, 2.0, 4.0] {
             project.tracks[0].clips[0].speed = speed;
-            let json = super::super::format::to_json(&project).unwrap();
-            assert_eq!(super::super::format::from_json(&json).unwrap(), project);
+            assert_legacy_effect_round_trip(&project);
         }
         for speed in [0.0, 4.01] {
             project.tracks[0].clips[0].speed = speed;
@@ -2753,11 +3515,7 @@ mod tests {
             assert!(!editor.apply(command(Some(invalid))));
         }
         assert!(editor.apply(command(Some(Mask::default()))));
-        let saved = crate::project::format::to_json(editor.project()).unwrap();
-        assert_eq!(
-            crate::project::format::from_json(&saved).unwrap(),
-            *editor.project()
-        );
+        assert_legacy_effect_round_trip(editor.project());
         assert!(editor.undo());
         assert_eq!(editor.project().tracks()[0].clips[0].mask, None);
         assert!(editor.redo());
@@ -2803,6 +3561,7 @@ mod tests {
             has_audio: false
         })));
         let clip = Clip {
+            effect_stack: Vec::new(),
             playback: Playback::Forward,
             id: 1,
             start_frame: 0,
@@ -3044,6 +3803,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 speed: 1.0,
                 playback: Playback::Forward,
                 effect: None,
@@ -3121,6 +3881,7 @@ mod tests {
             })));
             let track_id = if kind == MediaKind::Audio { 2 } else { 0 };
             let clip = Clip {
+                effect_stack: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
                 mask: None,
@@ -3210,6 +3971,7 @@ mod tests {
             has_audio: false
         })));
         let clip = Clip {
+            effect_stack: Vec::new(),
             playback: crate::timeline::Playback::Forward,
             effect: None,
             mask: None,
@@ -3294,6 +4056,7 @@ mod tests {
         use crate::timeline::Title;
         let mut editor = Editor::new(Project::new("Film"));
         let title = Clip {
+            effect_stack: Vec::new(),
             playback: crate::timeline::Playback::Forward,
             effect: None,
             mask: None,
@@ -3361,6 +4124,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
                 mask: None,
@@ -3621,11 +4385,7 @@ mod tests {
         }));
         assert!(editor.apply(set(0, 1, key)));
         assert!(!editor.apply(set(0, 1, key)));
-        let json = crate::project::format::to_json(editor.project()).unwrap();
-        assert_eq!(
-            crate::project::format::from_json(&json).unwrap(),
-            *editor.project()
-        );
+        assert_legacy_effect_round_trip(editor.project());
         assert!(editor.undo());
         assert!(editor.project().tracks()[0].clips[0].chroma_key.is_none());
         assert!(editor.redo());
@@ -3703,11 +4463,7 @@ mod tests {
         }));
         assert!(editor.apply(set(0, 1, path.clone())));
         assert!(!editor.apply(set(0, 1, path.clone())));
-        let json = crate::project::format::to_json(editor.project()).unwrap();
-        assert_eq!(
-            crate::project::format::from_json(&json).unwrap(),
-            *editor.project()
-        );
+        assert_legacy_effect_round_trip(editor.project());
         assert!(editor.undo());
         assert!(editor.project().tracks()[0].clips[0].lut.is_none());
         assert!(editor.redo());
@@ -3793,11 +4549,7 @@ mod tests {
         assert!(!editor.apply(set(0, 1, None)));
         assert!(editor.apply(set(0, 1, Some(effect.clone()))));
         assert!(!editor.apply(set(0, 1, Some(effect.clone()))));
-        let json = crate::project::format::to_json(editor.project()).unwrap();
-        assert_eq!(
-            crate::project::format::from_json(&json).unwrap(),
-            *editor.project()
-        );
+        assert_legacy_effect_round_trip(editor.project());
         assert!(editor.undo());
         assert!(editor.project().tracks()[0].clips[0].effect.is_none());
         assert_eq!(editor.project().tracks()[0].clips[0].chroma_key, Some(key));
@@ -3834,6 +4586,7 @@ mod tests {
     fn clip_insertion_rejects_invalid_ranges_overlap_and_missing_media() {
         let mut editor = Editor::new(Project::new("Film"));
         let title = Clip {
+            effect_stack: Vec::new(),
             playback: crate::timeline::Playback::Forward,
             effect: None,
             mask: None,
@@ -3943,6 +4696,7 @@ mod tests {
     fn split_fixture() -> Vec<Track> {
         let mut project = Project::new("Split");
         let clip = Clip {
+            effect_stack: Vec::new(),
             playback: crate::timeline::Playback::Forward,
             effect: None,
             mask: None,
@@ -4049,6 +4803,7 @@ mod tests {
     fn split_move_trim_and_ripple_delete_are_atomic_and_undoable() {
         let mut editor = Editor::new(Project::new("Film"));
         let make_clip = |id, start_frame| Clip {
+            effect_stack: Vec::new(),
             playback: crate::timeline::Playback::Forward,
             effect: None,
             mask: None,
@@ -4156,6 +4911,7 @@ mod tests {
             assert!(editor.apply(Command::InsertClip {
                 track_id,
                 clip: Box::new(Clip {
+                    effect_stack: Vec::new(),
                     playback: crate::timeline::Playback::Forward,
                     effect: None,
                     mask: None,
@@ -4227,6 +4983,7 @@ mod tests {
             has_audio: true,
         })));
         let title = |id, start_frame, duration_frames| Clip {
+            effect_stack: Vec::new(),
             playback: crate::timeline::Playback::Forward,
             effect: None,
             mask: None,
@@ -4262,6 +5019,7 @@ mod tests {
             (
                 2,
                 Clip {
+                    effect_stack: Vec::new(),
                     playback: crate::timeline::Playback::Forward,
                     effect: None,
                     mask: None,
@@ -4345,6 +5103,7 @@ mod tests {
             assert!(editor.apply(Command::InsertClip {
                 track_id,
                 clip: Box::new(Clip {
+                    effect_stack: Vec::new(),
                     playback: crate::timeline::Playback::Forward,
                     effect: None,
                     mask: None,
@@ -4390,6 +5149,7 @@ mod tests {
             has_audio: true,
         })));
         let clip = Clip {
+            effect_stack: Vec::new(),
             playback: crate::timeline::Playback::Forward,
             effect: None,
             mask: None,
@@ -4444,6 +5204,7 @@ mod tests {
         assert!(!editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
                 mask: None,
@@ -4477,6 +5238,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
                 mask: None,
@@ -4525,6 +5287,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
                 mask: None,
@@ -4629,6 +5392,7 @@ mod tests {
             has_audio: false
         })));
         let clip = Clip {
+            effect_stack: Vec::new(),
             speed: 1.0,
             playback: crate::timeline::Playback::Forward,
             noise_reduction: false,

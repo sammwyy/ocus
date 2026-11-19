@@ -40,6 +40,7 @@ fn project(path: &Path) -> Editor {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 id,
                 start_frame: (id - 1) * 60,
                 source_start_frame: 0,

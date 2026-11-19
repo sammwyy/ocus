@@ -44,6 +44,18 @@ cargo run --locked
 1. **Import your media.** Choose **File → Import media…** or drop files into the media bin. Select a source to preview it.
 2. **Build your timeline.** Drag a source from the bin onto a track. Drag a clip's edge to trim it, or move the playhead and press **S** to split the selected clip. Video on V2 appears over V1, the base layer.
 3. **Add a title.** Move the playhead over your footage and choose **Title**. Edit the text and style in the Inspector, then position it in the Program monitor.
+
+Use the left panel's **Media · Effects · Transitions** tabs to build your edit.
+The Effects gallery has searchable Video and Audio groups: click to apply to a
+selected clip, or drag onto a clip or its effects lane. Applied effects appear as
+ordered chips beneath the clip image; select a chip to configure or remove just
+that effect in the Inspector. Click the clip-name breadcrumb to return to base
+clip properties. Shader effects share one slot; picture processing keeps its fixed order.
+
+Drag Fade, Dissolve or Slide from **Transitions** onto a video clip: the first half
+sets its incoming transition, the second half its outgoing one. Select an edge
+marker to edit duration/type/direction or remove it in the Inspector.
+
 4. **Save and export.** Choose **File → Save** to keep an editable `.ocus` project. Choose **Export**, select a preset and destination, and render a file you can share.
 
 The title bar groups project actions in **File**, clip actions in **Edit**, and

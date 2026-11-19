@@ -1052,6 +1052,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 stabilization: None,
                 keyframes: Vec::new(),
                 speed: 1.0,
@@ -1267,6 +1268,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 color: Default::default(),
@@ -1373,6 +1375,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
                 mask: None,
@@ -1537,6 +1540,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
                 mask: None,
@@ -1697,6 +1701,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
                 mask: None,
@@ -1827,6 +1832,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
                 mask: None,
@@ -1906,6 +1912,7 @@ mod tests {
         })));
         let mut layered = editor.project().tracks().to_vec();
         layered[0].clips = vec![Clip {
+            effect_stack: Vec::new(),
             playback: crate::timeline::Playback::Forward,
             effect: None,
             mask: None,
@@ -1931,6 +1938,7 @@ mod tests {
             transform: Transform::default(),
         }];
         layered[1].clips = vec![Clip {
+            effect_stack: Vec::new(),
             playback: crate::timeline::Playback::Forward,
             effect: None,
             mask: None,
@@ -1963,6 +1971,7 @@ mod tests {
             locked: false,
             hidden: false,
             clips: vec![Clip {
+                effect_stack: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
                 mask: None,
@@ -2089,6 +2098,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
                 mask: None,
@@ -2178,6 +2188,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
                 mask: None,
@@ -2359,6 +2370,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
                 mask: None,
@@ -2495,6 +2507,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
                 mask: None,

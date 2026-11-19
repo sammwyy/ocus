@@ -2,14 +2,14 @@ use super::controls::{
     AUDIO, DragOverlay, ExportMeter, Glyph, Help, IMAGE, Layer, PLAYHEAD, STAGE, Scrubber, TITLE,
     Thumb, VIDEO, ZoomSlider, accent, accent_button, background, border, chip, enabled_chip, faint,
     fit, glyph, heading, icon_button, kind_color, list_row, media_item, menu_row, muted, panel,
-    panel_raised, play_button, playback_choice, secondary_button, segment, short_duration,
-    sized_icon_button, surface, surface_hover, text, text_color, timecode, tool_button, with_help,
+    panel_raised, play_button, secondary_button, segment, short_duration, sized_icon_button,
+    surface, surface_hover, text, text_color, timecode, tool_button, with_help,
 };
 use super::edits::ClipRef;
 use super::interaction::{Action, BarMenu, DragPayload, MenuState};
 use super::state::{
-    ChromaGesture, ExportPage, MediaView, PlaybackMonitor, PreviewState, SequenceContent,
-    SettingsPage, SourceRange, TitleGesture, ZOOM_SECONDS, media_frames,
+    ChromaGesture, ClipDetail, ExportPage, LibraryTab, MediaView, PlaybackMonitor, PreviewState,
+    SequenceContent, SettingsPage, SourceRange, TitleGesture, ZOOM_SECONDS, media_frames,
 };
 use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
 use super::waveform::WaveformSlice;
@@ -22,6 +22,7 @@ use crate::media::{Media, MediaKind};
 use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, VideoCodec};
 use crate::project::{Command, Project};
 use crate::settings::ThemeMode;
+use crate::timeline::effects::{EffectCategory, EffectKind};
 use crate::timeline::{
     Clip, ClipContent, ColorAdjust, Mask, MaskShape, Playback, SlideDirection, Title, Track,
     TrackKind, Transform, Transition, TransitionKind,
@@ -219,44 +220,6 @@ fn edit_selection(state: &UiState, edit: impl FnOnce(&Clip, u64, u64) -> Command
 
 fn set_title_text(state: &UiState) {
     change_title(state, |title| title.text = state.title_text.peek());
-}
-
-fn playback_controls(state: &UiState, target: ClipRef, playback: Playback) -> BoxedWidget {
-    let mut choices = Flex::row()
-        .gap(2.0)
-        .padding(3.0)
-        .background(surface())
-        .corner_radius(7.0);
-    for (label, value, hint, shortcut) in [
-        ("Normal", Playback::Forward, "Play the clip forwards", None),
-        (
-            "Reverse",
-            Playback::Reverse,
-            "Play the clip backwards",
-            Some("Shift R"),
-        ),
-        (
-            "Freeze",
-            Playback::Freeze,
-            "Hold the first frame; audio is silent",
-            None,
-        ),
-    ] {
-        let reason = state.playback_reason(target, value);
-        let mut help = Help::new(reason.unwrap_or(hint));
-        if let Some(shortcut) = shortcut {
-            help = help.shortcut(shortcut);
-        }
-        choices = choices.child(playback_choice(
-            label,
-            help,
-            reason.is_none() && !state.busy.get(),
-            playback == value,
-            state,
-            move |state| state.set_playback(target, value),
-        ));
-    }
-    section("Playback", vec![Box::new(choices)])
 }
 
 fn adjust_timing(state: &UiState, source: bool, seconds: bool, increase: bool) {
@@ -538,6 +501,7 @@ fn transition_row(state: &UiState, clip: &Clip, busy: bool, out: bool) -> BoxedW
     Box::new(row)
 }
 
+#[cfg(test)]
 fn transition_section(state: &UiState, clip: &Clip, busy: bool) -> BoxedWidget {
     let mut rows = vec![
         transition_row(state, clip, busy, false),
@@ -1396,7 +1360,7 @@ fn mask_section(state: &UiState, clip: &Clip, inner: f32) -> BoxedWidget {
             10.0,
         ));
     }
-    section("Mask", rows)
+    Box::new(append(Flex::column().gap(7.0), rows))
 }
 
 #[derive(Clone)]
@@ -1583,7 +1547,7 @@ fn chroma_section(
             }));
         }
     }
-    section("Chroma key", rows)
+    Box::new(append(Flex::column().gap(7.0), rows))
 }
 
 fn set_clip_color(state: &UiState, change: impl FnOnce(&mut ColorAdjust)) {
@@ -1780,71 +1744,10 @@ impl Widget for EffectAmount {
 }
 
 fn effect_section(state: &UiState, track_id: u64, clip: &Clip, busy: bool) -> BoxedWidget {
-    use crate::media::effects::{BUILTINS, error};
-    use crate::timeline::{Effect, EffectShader};
+    use crate::media::effects::error;
+    use crate::timeline::EffectShader;
     let clip_id = clip.id;
-    let mut labels = vec!["None"];
-    labels.extend(BUILTINS.iter().map(|(_, label)| *label));
-    let file_name = match clip.effect.as_ref().map(|effect| &effect.shader) {
-        Some(EffectShader::File(path)) => Some(
-            path.file_name()
-                .unwrap_or(path.as_os_str())
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        Some(EffectShader::Builtin(id)) if !BUILTINS.iter().any(|(key, _)| *key == id) => {
-            Some(format!("Unknown: {id}"))
-        }
-        _ => None,
-    };
-    if let Some(name) = &file_name {
-        labels.push(name);
-    }
-    let selected = match clip.effect.as_ref().map(|effect| &effect.shader) {
-        None => 0,
-        Some(EffectShader::Builtin(id)) => BUILTINS
-            .iter()
-            .position(|(key, _)| *key == id)
-            .map_or(labels.len() - 1, |index| index + 1),
-        Some(EffectShader::File(_)) => labels.len() - 1,
-    };
-    if state.effect_select.peek_selected() != selected {
-        state.effect_select.select(selected);
-    }
-    let select_state = state.clone();
-    let mut rows: Vec<BoxedWidget> = vec![
-        Box::new(
-            creamui::widgets::Select::controlled(&labels, state.effect_select.clone()).on_select(
-                move |index| {
-                    if busy {
-                        return;
-                    }
-                    let effect = if index == 0 {
-                        None
-                    } else if let Some((id, _)) = BUILTINS.get(index - 1) {
-                        Some(Effect {
-                            shader: EffectShader::Builtin((*id).into()),
-                            amount: 1.0,
-                        })
-                    } else {
-                        return;
-                    };
-                    select_state.edit(Command::SetClipEffect {
-                        track_id,
-                        clip_id,
-                        effect,
-                    });
-                },
-            ),
-        ),
-        inline(with_help(
-            secondary_button(None, "Load .wgsl…", !busy, state, move |state| {
-                state.choose_effect(track_id, clip_id)
-            }),
-            Help::new("Load your own WGSL picture effect from a file"),
-            state,
-        )),
-    ];
+    let mut rows = Vec::new();
     if let Some(effect) = &clip.effect {
         let amount = state
             .effect_drag
@@ -1869,24 +1772,8 @@ fn effect_section(state: &UiState, track_id: u64, clip: &Clip, busy: bool) -> Bo
             rows.push(text(format!("Effect unavailable: {error}"), muted(), 10.0));
         }
     }
-    rows.push(inline(with_help(
-        secondary_button(
-            None,
-            "Clear effect",
-            !busy && clip.effect.is_some(),
-            state,
-            move |state| {
-                state.edit(Command::SetClipEffect {
-                    track_id,
-                    clip_id,
-                    effect: None,
-                });
-            },
-        ),
-        Help::new("Remove this clip's shader effect and keep its color adjustments"),
-        state,
-    )));
-    section("Effect", rows)
+
+    Box::new(append(Flex::column().gap(7.0), rows))
 }
 
 fn color_control(
@@ -2014,16 +1901,6 @@ fn fade_row(state: &UiState, clip: &Clip, incoming: bool) -> Box<dyn Widget> {
     )
 }
 
-fn toggle_clip_noise_reduction(state: &UiState) {
-    if let Some((track_id, clip)) = selected_clip(state) {
-        state.edit(Command::SetClipNoiseReduction {
-            track_id,
-            clip_id: clip.id,
-            enabled: !clip.noise_reduction,
-        });
-    }
-}
-
 fn media_name(media: &Media) -> String {
     media.path.file_name().map_or_else(
         || media.path.display().to_string(),
@@ -2129,6 +2006,273 @@ fn panel_header(title: &str, detail: BoxedWidget, actions: Vec<BoxedWidget>) -> 
             .child(spacer()),
         actions,
     ))
+}
+
+fn lut_effect_controls(state: &UiState, track_id: u64, clip: &Clip, busy: bool) -> BoxedWidget {
+    let clip_id = clip.id;
+    let name = clip
+        .lut
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .map_or_else(|| "None".into(), |name| name.to_string_lossy().into_owned());
+    section(
+        "Color LUT",
+        vec![
+            property("LUT", name),
+            inline(secondary_button(
+                None,
+                "Choose .cube file…",
+                !busy,
+                state,
+                move |state| state.choose_lut(track_id, clip_id),
+            )),
+            inline(secondary_button(
+                None,
+                "Clear LUT",
+                !busy && clip.lut.is_some(),
+                state,
+                move |state| {
+                    state.edit(Command::SetClipLut {
+                        track_id,
+                        clip_id,
+                        path: None,
+                    });
+                },
+            )),
+        ],
+    )
+}
+fn stabilization_effect_controls(
+    state: &UiState,
+    clip: &Clip,
+    busy: bool,
+    locked: bool,
+) -> BoxedWidget {
+    let mut controls = vec![with_help(
+        secondary_button(
+            None,
+            if state.stabilization_analyzing.get() {
+                "Analyzing…"
+            } else if clip.stabilization.is_some() {
+                "Re-analyze"
+            } else {
+                "Analyze"
+            },
+            !busy && !locked && !state.stabilization_analyzing.get(),
+            state,
+            UiState::stabilize_clip,
+        ),
+        Help::new("Analyze camera shake in the source range without changing your original video"),
+        state,
+    )];
+    if let Some(data) = &clip.stabilization {
+        let strength = state
+            .stabilization_drag
+            .get()
+            .filter(|(_, id, _)| *id == clip.id)
+            .map_or(data.strength, |(_, _, draft)| draft.strength);
+        controls.push(text(
+            format!("Strength · {:.0}%", strength * 100.0),
+            muted(),
+            11.0,
+        ));
+        controls.push(with_help(
+            Box::new(super::controls::StabilizationSlider {
+                state: state.clone(),
+                level: (strength * 100.0).round() as usize,
+            }),
+            Help::new("Smooth more camera shake; automatically crops up to 25% to hide borders"),
+            state,
+        ));
+        controls.push(secondary_button(
+            None,
+            "Remove",
+            !busy && !locked,
+            state,
+            |state| {
+                if let Some((track_id, clip)) = selected_clip(state) {
+                    state.edit(Command::SetClipStabilization {
+                        track_id,
+                        clip_id: clip.id,
+                        stabilization: None,
+                    });
+                }
+            },
+        ));
+    }
+    controls.push(text("Smooths camera shake.", faint(), 10.0));
+    controls.push(text("Original video is untouched.", faint(), 10.0));
+
+    Box::new(append(Flex::column().gap(7.0), controls))
+}
+fn speed_effect_controls(state: &UiState, track_id: u64, clip: &Clip, busy: bool) -> BoxedWidget {
+    let mut presets = Vec::new();
+    let mut unavailable = false;
+    for speed in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] {
+        let enabled = state
+            .editor
+            .borrow()
+            .can_set_clip_speed(track_id, clip.id, speed);
+        unavailable |= !enabled && speed != clip.speed;
+        presets.push(enabled_chip(
+            &format!("{speed}x"),
+            clip.speed == speed,
+            !busy && enabled,
+            state,
+            move |state| {
+                if let Some((track_id, clip)) = selected_clip(state) {
+                    state.edit(Command::SetClipSpeed {
+                        track_id,
+                        clip_id: clip.id,
+                        speed,
+                    });
+                }
+            },
+        ));
+    }
+    return section(
+        &format!("Speed · {}x", clip.speed),
+        vec![
+            Box::new(Grid::new().columns(3).gap(4.0).with_children(presets)),
+            text("Slower is longer · faster is shorter.", faint(), 10.0),
+            text(
+                if unavailable {
+                    if state
+                        .editor
+                        .borrow()
+                        .project()
+                        .tracks()
+                        .iter()
+                        .any(|track| track.id == track_id && track.locked)
+                    {
+                        "Unlock the track to change speed."
+                    } else {
+                        "Not enough source left for some speeds."
+                    }
+                } else {
+                    "Audio keeps its pitch. Stops at the next clip."
+                },
+                faint(),
+                10.0,
+            ),
+        ],
+    );
+}
+fn effects_section(
+    state: &UiState,
+    track_id: u64,
+    clip: &Clip,
+    inner: f32,
+    busy: bool,
+) -> BoxedWidget {
+    let locked = state
+        .editor
+        .borrow()
+        .project()
+        .tracks()
+        .iter()
+        .any(|track| track.id == track_id && track.locked);
+    let mut cards: Vec<BoxedWidget> = Vec::new();
+    let selected = state
+        .selected_detail
+        .get()
+        .and_then(|(target, detail)| match detail {
+            ClipDetail::Effect(kind) if target == (track_id, clip.id) => Some(kind),
+            _ => None,
+        });
+    for &kind in clip
+        .effect_stack
+        .iter()
+        .filter(|kind| Some(**kind) == selected)
+    {
+        let clip_id = clip.id;
+        let category = match kind.categories() {
+            [EffectCategory::Video] => "Video",
+            [EffectCategory::Audio] => "Audio",
+            _ => "Video/Audio",
+        };
+        let header = Box::new(
+            Flex::row()
+                .gap(5.0)
+                .align(Align::Center)
+                .child(Box::new(Flex::row().grow(1.0).basis(0.0).child(with_help(
+                    heading(fit(kind.label(), inner - 100.0, 11.0), text_color(), 11.0),
+                    Help::new(kind.label()),
+                    state,
+                ))))
+                .child(Box::new(
+                    Flex::row()
+                        .padding_xy(5.0, 3.0)
+                        .background(surface_hover())
+                        .corner_radius(7.0)
+                        .child(text(category, muted(), 9.0)),
+                ))
+                .child(with_help(
+                    secondary_button(None, "Remove", !busy && !locked, state, move |state| {
+                        state.edit(Command::RemoveEffect {
+                            track_id,
+                            clip_id,
+                            kind,
+                        });
+                    }),
+                    Help::new("Remove this effect"),
+                    state,
+                )),
+        );
+        let body = if kind.is_shader() {
+            Box::new(
+                Flex::column()
+                    .gap(7.0)
+                    .child(text(kind.description(), muted(), 10.0))
+                    .child(effect_section(state, track_id, clip, busy || locked)),
+            ) as BoxedWidget
+        } else {
+            match kind {
+                EffectKind::ChromaKey => {
+                    chroma_section(state, track_id, clip, inner - 16.0, busy || locked)
+                }
+                EffectKind::ColorLut => lut_effect_controls(state, track_id, clip, busy || locked),
+                EffectKind::Mask => mask_section(state, clip, inner - 16.0),
+                EffectKind::Stabilization => {
+                    stabilization_effect_controls(state, clip, busy, locked)
+                }
+                EffectKind::ColorCorrection => Box::new(append(
+                    Flex::column().gap(7.0),
+                    vec![
+                        color_control(state, inner - 16.0, ColorProperty::Brightness, clip.color),
+                        color_control(state, inner - 16.0, ColorProperty::Contrast, clip.color),
+                        color_control(state, inner - 16.0, ColorProperty::Saturation, clip.color),
+                        inline(secondary_button(
+                            None,
+                            "Reset color",
+                            !busy && !locked && !clip.color.neutral(),
+                            state,
+                            |s| set_clip_color(s, |color| *color = Default::default()),
+                        )),
+                        text("Color affects playback and export.", faint(), 10.0),
+                    ],
+                )),
+                EffectKind::Fades => Box::new(
+                    Flex::column()
+                        .gap(7.0)
+                        .child(fade_row(state, clip, true))
+                        .child(fade_row(state, clip, false)),
+                ),
+                EffectKind::Speed => speed_effect_controls(state, track_id, clip, busy || locked),
+                _ => text(kind.description(), muted(), 10.0),
+            }
+        };
+        cards.push(Box::new(
+            Flex::column()
+                .gap(7.0)
+                .padding(8.0)
+                .background(surface())
+                .corner_radius(7.0)
+                .child(header)
+                .child(body),
+        ));
+    }
+    Box::new(Flex::column().gap(10.0).with_children(cards))
 }
 
 fn section(title: &str, rows: Vec<BoxedWidget>) -> BoxedWidget {
@@ -2788,6 +2932,232 @@ fn monitor(
     ))
 }
 
+fn gallery_effects(query: &str, category: EffectCategory) -> Vec<EffectKind> {
+    let query = query.trim().to_lowercase();
+    EffectKind::ALL
+        .into_iter()
+        .filter(|kind| {
+            kind.categories().contains(&category)
+                && (kind.label().to_lowercase().contains(&query)
+                    || kind.description().to_lowercase().contains(&query))
+        })
+        .collect()
+}
+
+fn effects_gallery(state: &UiState, width: f32) -> BoxedWidget {
+    let query = state.effect_query.value();
+    let mut groups = Vec::new();
+    for (category, label) in [
+        (EffectCategory::Video, "Video effects"),
+        (EffectCategory::Audio, "Audio effects"),
+    ] {
+        let mut rows = vec![heading(label, muted(), 11.0)];
+        for kind in gallery_effects(&query, category) {
+            let icon = match kind {
+                EffectKind::Reverse => Glyph::Reverse,
+                EffectKind::FreezeFrame => Glyph::Freeze,
+                EffectKind::Speed => Glyph::StepForward,
+                EffectKind::Fades => Glyph::Volume,
+                EffectKind::NoiseReduction => Glyph::Music,
+                EffectKind::Stabilization => Glyph::Expand,
+                EffectKind::Mask => Glyph::Picture,
+                EffectKind::CustomShader | EffectKind::ColorLut => Glyph::Document,
+                _ => Glyph::Film,
+            };
+            let (click, start, drag, end) =
+                (state.clone(), state.clone(), state.clone(), state.clone());
+            let row = RawButton::new(
+                Style::default()
+                    .size(width - 26.0, 42.0)
+                    .flex_row()
+                    .gap(8.0)
+                    .padding_all(8.0),
+                move || click.click_gallery_effect(kind),
+            )
+            .with_drag_start(move |point, rect| {
+                start.begin_effect_drag(
+                    kind,
+                    Point {
+                        x: point.x + rect.x,
+                        y: point.y + rect.y,
+                    },
+                )
+            })
+            .with_drag(move |point, rect| {
+                drag.drag_pointer(Point {
+                    x: point.x + rect.x,
+                    y: point.y + rect.y,
+                })
+            })
+            .with_drag_end(move || end.end_effect_drag())
+            .background(panel())
+            .corner_radius(5.0)
+            .hover_style(StateStyle::new().background(surface()))
+            .focus_style(StateStyle::new().outline(accent(), 2.0))
+            .child(glyph(
+                icon,
+                if category == EffectCategory::Audio {
+                    AUDIO
+                } else {
+                    VIDEO
+                },
+                18.0,
+            ))
+            .child(Box::new(
+                Flex::column()
+                    .gap(3.0)
+                    .child(heading(kind.label(), text_color(), 11.0))
+                    .child(text(
+                        fit(kind.description(), width - 66.0, 10.0),
+                        muted(),
+                        10.0,
+                    )),
+            ));
+            rows.push(with_help(
+                Box::new(row),
+                Help::new(kind.description()).instance(if category == EffectCategory::Audio {
+                    1
+                } else {
+                    0
+                }),
+                state,
+            ));
+        }
+        if rows.len() == 1 {
+            rows.push(text("No matching effects", faint(), 10.0));
+        }
+        groups.push(Box::new(Flex::column().gap(6.0).with_children(rows)) as BoxedWidget);
+    }
+    Box::new(
+        Flex::column()
+            .width(width)
+            .gap(8.0)
+            .padding(10.0)
+            .background(panel())
+            .corner_radius(10.0)
+            .child(library_tabs(state))
+            .child(Box::new(
+                TextInput::controlled(&state.effect_query)
+                    .width(width - 20.0)
+                    .height(30.0)
+                    .placeholder("Search effects"),
+            ))
+            .child(Box::new(
+                RawScrollView::controlled(fill_style(), state.effect_scroll.clone())
+                    .child(Box::new(Flex::column().gap(16.0).with_children(groups))),
+            )),
+    )
+}
+
+fn transitions_gallery(state: &UiState, width: f32) -> BoxedWidget {
+    let mut rows = Flex::column()
+        .width(width)
+        .padding(10.0)
+        .gap(8.0)
+        .background(panel())
+        .corner_radius(10.0)
+        .child(library_tabs(state))
+        .child(heading("Video transitions", muted(), 11.0));
+    for (label, description, kind) in [
+        (
+            "Fade",
+            "Dip through black or reveal the layer below.",
+            TransitionKind::Fade,
+        ),
+        (
+            "Dissolve",
+            "Blend smoothly between clips.",
+            TransitionKind::Dissolve,
+        ),
+        (
+            "Slide",
+            "Move the clip in or out from an edge.",
+            TransitionKind::Slide,
+        ),
+    ] {
+        let (start, drag, end) = (state.clone(), state.clone(), state.clone());
+        rows = rows.child(Box::new(
+            RawButton::new(
+                Style::default()
+                    .size(width - 20.0, 46.0)
+                    .padding_all(8.0)
+                    .flex_row()
+                    .gap(8.0),
+                || {},
+            )
+            .with_drag_start(move |p, rect| {
+                start.begin_transition_drag(
+                    kind,
+                    Point {
+                        x: p.x + rect.x,
+                        y: p.y + rect.y,
+                    },
+                )
+            })
+            .with_drag(move |p, rect| {
+                drag.drag_pointer(Point {
+                    x: p.x + rect.x,
+                    y: p.y + rect.y,
+                })
+            })
+            .with_drag_end(move || end.end_effect_drag())
+            .background(panel())
+            .hover_style(StateStyle::new().background(surface()))
+            .corner_radius(5.0)
+            .child(glyph(Glyph::Film, VIDEO, 18.0))
+            .child(Box::new(
+                Flex::column()
+                    .gap(3.0)
+                    .child(heading(label, text_color(), 11.0))
+                    .child(text(fit(description, width - 66.0, 10.0), muted(), 10.0)),
+            )),
+        ));
+    }
+    Box::new(rows.child(text(
+        "Drag onto a clip: left half in · right half out",
+        faint(),
+        10.0,
+    )))
+}
+
+fn library_tabs(state: &UiState) -> BoxedWidget {
+    let tab = state.library_tab.get();
+    let compact = state.tooltip_viewport.get().width < 1200.0;
+    let mut row = Flex::row().gap(2.0).align(Align::Center);
+    for (label, value, sidebar) in [
+        ("Media", LibraryTab::Media, Sidebar::Media),
+        ("Effects", LibraryTab::Effects, Sidebar::Effects),
+        ("Transitions", LibraryTab::Transitions, Sidebar::Transitions),
+    ] {
+        row = row.child(chip(
+            label,
+            tab == value && (!compact || state.sidebar.get() != Sidebar::Inspector),
+            state,
+            move |s| {
+                s.library_tab.set(value);
+                s.sidebar.set(sidebar);
+            },
+        ));
+    }
+    if compact {
+        row = row.child(chip(
+            "Inspector",
+            state.sidebar.get() == Sidebar::Inspector,
+            state,
+            |s| s.sidebar.set(Sidebar::Inspector),
+        ));
+    }
+    Box::new(row)
+}
+
+fn library_panel(state: &UiState, project: &Project, width: f32, busy: bool) -> BoxedWidget {
+    match state.library_tab.get() {
+        LibraryTab::Media => media_bin(state, project, width, busy),
+        LibraryTab::Effects => effects_gallery(state, width),
+        LibraryTab::Transitions => transitions_gallery(state, width),
+    }
+}
+
 fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> BoxedWidget {
     let fps = (
         project.settings().frame_rate.numerator,
@@ -3028,47 +3398,55 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
             .background(panel())
             .corner_radius(10.0),
         vec![
-            panel_header(
-                "Media",
-                text(
-                    if count == project.media().len() {
-                        format!("{count}")
-                    } else {
-                        format!("{count} of {}", project.media().len())
-                    },
-                    faint(),
-                    11.0,
-                ),
-                vec![
-                    sized_icon_button(
-                        Glyph::Grid,
-                        Help::new("Grid view"),
-                        26.0,
-                        true,
-                        view == MediaView::Grid,
-                        state,
-                        |s| s.media_view.set(MediaView::Grid),
-                    ),
-                    sized_icon_button(
-                        Glyph::List,
-                        Help::new("List view"),
-                        26.0,
-                        true,
-                        view == MediaView::List,
-                        state,
-                        |s| s.media_view.set(MediaView::List),
-                    ),
-                    sized_icon_button(
-                        Glyph::Import,
-                        Help::new("Import media").shortcut("Ctrl+I"),
-                        26.0,
-                        !busy,
-                        false,
-                        state,
-                        |s| s.import_dialog(),
-                    ),
-                ],
-            ),
+            {
+                let actions = Box::new(
+                    Flex::row()
+                        .gap(2.0)
+                        .child(sized_icon_button(
+                            Glyph::Grid,
+                            Help::new("Grid view"),
+                            26.0,
+                            true,
+                            view == MediaView::Grid,
+                            state,
+                            |s| s.media_view.set(MediaView::Grid),
+                        ))
+                        .child(sized_icon_button(
+                            Glyph::List,
+                            Help::new("List view"),
+                            26.0,
+                            true,
+                            view == MediaView::List,
+                            state,
+                            |s| s.media_view.set(MediaView::List),
+                        ))
+                        .child(sized_icon_button(
+                            Glyph::Import,
+                            Help::new("Import media").shortcut("Ctrl+I"),
+                            26.0,
+                            !busy,
+                            false,
+                            state,
+                            |s| s.import_dialog(),
+                        )),
+                );
+                if state.tooltip_viewport.get().width < 1200.0 {
+                    Box::new(
+                        Flex::column()
+                            .gap(4.0)
+                            .child(library_tabs(state))
+                            .child(Box::new(Flex::row().justify(Justify::End).child(actions))),
+                    ) as BoxedWidget
+                } else {
+                    Box::new(
+                        Flex::row()
+                            .align(Align::Center)
+                            .child(library_tabs(state))
+                            .child(Box::new(Flex::row().grow(1.0)))
+                            .child(actions),
+                    ) as BoxedWidget
+                }
+            },
             if state.missing_media.get().is_empty() {
                 Box::new(Flex::row())
             } else {
@@ -3457,6 +3835,66 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
             (_, Some(media)) => (media_name(media), kind_color(media.kind)),
             _ => ("Missing source".into(), muted()),
         };
+        if let Some((target, detail)) = state
+            .selected_detail
+            .get()
+            .filter(|(target, _)| *target == (track_id, clip.id))
+        {
+            let title = match detail {
+                ClipDetail::Effect(kind) => kind.label(),
+                ClipDetail::Transition(false) => "Incoming transition",
+                ClipDetail::Transition(true) => "Outgoing transition",
+            };
+            let content = match detail {
+                ClipDetail::Effect(_) => effects_section(state, track_id, &clip, inner, busy),
+                ClipDetail::Transition(out) => Box::new(
+                    Flex::column()
+                        .gap(10.0)
+                        .child(heading(title, text_color(), 13.0))
+                        .child(transition_row(state, &clip, busy, out))
+                        .child(secondary_button(
+                            None,
+                            "Remove",
+                            !busy && track.is_some_and(|track| !track.locked),
+                            state,
+                            move |s| {
+                                edit_transition(s, target.0, target.1, out, None);
+                            },
+                        )),
+                ) as BoxedWidget,
+            };
+            return Box::new(
+                Flex::column()
+                    .width(width)
+                    .gap(12.0)
+                    .padding(12.0)
+                    .background(panel())
+                    .corner_radius(10.0)
+                    .child(if state.tooltip_viewport.get().width < 1200.0 {
+                        library_tabs(state)
+                    } else {
+                        panel_header("Inspector", text("Selection", faint(), 11.0), Vec::new())
+                    })
+                    .child(Box::new(
+                        Flex::row()
+                            .gap(6.0)
+                            .align(Align::Center)
+                            .child(secondary_button(
+                                None,
+                                &fit(&name, inner * 0.5 - 20.0, 11.0),
+                                true,
+                                state,
+                                |s| s.selected_detail.set(None),
+                            ))
+                            .child(text("›", faint(), 11.0))
+                            .child(text(fit(title, inner * 0.5 - 6.0, 11.0), muted(), 11.0)),
+                    ))
+                    .child(Box::new(
+                        RawScrollView::controlled(fill_style(), state.inspector_scroll.clone())
+                            .child(content),
+                    )),
+            );
+        }
         subtitle = match (&clip.content, track_kind) {
             (ClipContent::Title(_), _) => "Title clip",
             (_, TrackKind::Audio) => "Audio clip",
@@ -3489,9 +3927,6 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 .child(dot(color, 8.0))
                 .child(heading(fit(&name, inner - 20.0, 13.0), text_color(), 13.0)),
         ));
-        if track_kind == TrackKind::Video && matches!(clip.content, ClipContent::Media { .. }) {
-            rows.push(playback_controls(state, (track_id, clip.id), clip.playback));
-        }
         let mut timing = vec![
             property("Track", label_of(track_id)),
             property("Start", timecode(clip.start_frame, fps)),
@@ -3514,45 +3949,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         timing.push(text("Length", muted(), 11.0));
         timing.push(timing_steps(state, false));
         rows.push(section("Timing", timing));
-        if track_kind == TrackKind::Video {
-            rows.push(transition_section(state, &clip, busy));
-            if matches!(clip.content, ClipContent::Media { .. }) {
-                let clip_id = clip.id;
-                let name = clip
-                    .lut
-                    .as_ref()
-                    .and_then(|path| path.file_name())
-                    .map_or_else(|| "None".into(), |name| name.to_string_lossy().into_owned());
-                rows.push(section(
-                    "Color LUT",
-                    vec![
-                        property("LUT", name),
-                        inline(secondary_button(
-                            None,
-                            "Choose .cube file…",
-                            !busy,
-                            state,
-                            move |state| state.choose_lut(track_id, clip_id),
-                        )),
-                        inline(secondary_button(
-                            None,
-                            "Clear LUT",
-                            !busy && clip.lut.is_some(),
-                            state,
-                            move |state| {
-                                state.edit(Command::SetClipLut {
-                                    track_id,
-                                    clip_id,
-                                    path: None,
-                                });
-                            },
-                        )),
-                    ],
-                ));
-                rows.push(effect_section(state, track_id, &clip, busy));
-                rows.push(chroma_section(state, track_id, &clip, inner, busy));
-            }
-        }
+
         if let ClipContent::Title(title) = &clip.content {
             rows.push(section(
                 "Title",
@@ -3798,80 +4195,6 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         if track_kind == TrackKind::Video
             && media.is_some_and(|media| media.kind != MediaKind::Audio)
         {
-            if media.is_some_and(|media| media.kind == MediaKind::Video) {
-                let mut controls = vec![with_help(
-                    secondary_button(
-                        None,
-                        if state.stabilization_analyzing.get() {
-                            "Analyzing…"
-                        } else if clip.stabilization.is_some() {
-                            "Re-analyze"
-                        } else {
-                            "Stabilize"
-                        },
-                        !busy
-                            && track.is_some_and(|t| !t.locked)
-                            && !state.stabilization_analyzing.get(),
-                        state,
-                        UiState::stabilize_clip,
-                    ),
-                    Help::new(
-                        "Analyze camera shake in the source range without changing your original video",
-                    ),
-                    state,
-                )];
-                if let Some(data) = &clip.stabilization {
-                    let strength = state
-                        .stabilization_drag
-                        .get()
-                        .filter(|(_, id, _)| *id == clip.id)
-                        .map_or(data.strength, |(_, _, draft)| draft.strength);
-                    controls.push(text(
-                        format!("Strength · {:.0}%", strength * 100.0),
-                        muted(),
-                        11.0,
-                    ));
-                    controls.push(with_help(Box::new(super::controls::StabilizationSlider {
-                        state: state.clone(),
-                        level: (strength * 100.0).round() as usize,
-                    }), Help::new("Smooth more camera shake; automatically crops up to 25% to hide borders"), state));
-                    controls.push(secondary_button(
-                        None,
-                        "Remove",
-                        !busy && track.is_some_and(|t| !t.locked),
-                        state,
-                        |state| {
-                            if let Some((track_id, clip)) = selected_clip(state) {
-                                state.edit(Command::SetClipStabilization {
-                                    track_id,
-                                    clip_id: clip.id,
-                                    stabilization: None,
-                                });
-                            }
-                        },
-                    ));
-                }
-                controls.push(text("Smooths camera shake.", faint(), 10.0));
-                controls.push(text("Original video is untouched.", faint(), 10.0));
-                rows.push(section("Stabilization", controls));
-            }
-            rows.push(mask_section(state, &clip, inner));
-            rows.push(section(
-                "Color",
-                vec![
-                    color_control(state, inner, ColorProperty::Brightness, clip.color),
-                    color_control(state, inner, ColorProperty::Contrast, clip.color),
-                    color_control(state, inner, ColorProperty::Saturation, clip.color),
-                    inline(secondary_button(
-                        None,
-                        "Reset color",
-                        !clip.color.neutral(),
-                        state,
-                        |s| set_clip_color(s, |color| *color = Default::default()),
-                    )),
-                    text("Color affects playback and export.", faint(), 10.0),
-                ],
-            ));
             rows.push(picture_in_picture_section(
                 state,
                 clip.transform,
@@ -3885,7 +4208,6 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
             ));
         } else if (track_kind == TrackKind::Audio || clip.linked_audio) && media.is_some() {
             let volume = clip.volume;
-            let audio_state = state.clone();
             rows.push(section(
                 "Audio",
                 vec![
@@ -3966,16 +4288,6 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         state,
                         |s| set_clip_audio(s, |clip| (clip.volume, !clip.muted)),
                     )),
-                    Box::new(
-                        Flex::row()
-                            .gap(8.0)
-                            .align(Align::Center)
-                            .child(Box::new(Checkbox::new(clip.noise_reduction, move || {
-                                toggle_clip_noise_reduction(&audio_state);
-                            })))
-                            .child(text("Noise reduction", text_color(), 11.0)),
-                    ),
-                    text("Best for speech with background noise.", faint(), 10.0),
                     inline(with_help(
                         secondary_button(
                             None,
@@ -4020,8 +4332,6 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         ),
                         state,
                     )),
-                    fade_row(state, &clip, true),
-                    fade_row(state, &clip, false),
                     if clip.linked_audio {
                         inline(secondary_button(
                             Some(Glyph::Unlink),
@@ -4042,67 +4352,12 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         Box::new(Flex::row().height(0.0))
                     },
                     text(
-                        "Volume, mute and fades affect playback and export.",
+                        "Volume and mute affect playback and export.",
                         faint(),
                         10.0,
                     ),
                 ],
             ));
-        }
-        if media.is_some_and(|media| media.kind != MediaKind::Image)
-            && clip.playback != crate::timeline::Playback::Freeze
-        {
-            let mut presets = Vec::new();
-            let mut unavailable = false;
-            for speed in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] {
-                let enabled = state
-                    .editor
-                    .borrow()
-                    .can_set_clip_speed(track_id, clip.id, speed);
-                unavailable |= !enabled && speed != clip.speed;
-                presets.push(enabled_chip(
-                    &format!("{speed}x"),
-                    clip.speed == speed,
-                    !busy && enabled,
-                    state,
-                    move |state| {
-                        if let Some((track_id, clip)) = selected_clip(state) {
-                            state.edit(Command::SetClipSpeed {
-                                track_id,
-                                clip_id: clip.id,
-                                speed,
-                            });
-                        }
-                    },
-                ));
-            }
-            rows.push(section(
-                &format!("Speed · {}x", clip.speed),
-                vec![
-                    Box::new(Grid::new().columns(3).gap(4.0).with_children(presets)),
-                    text("Slower is longer · faster is shorter.", faint(), 10.0),
-                    text(
-                        if unavailable {
-                            if project
-                                .tracks()
-                                .iter()
-                                .any(|track| track.id == track_id && track.locked)
-                            {
-                                "Unlock the track to change speed."
-                            } else {
-                                "Not enough source left for some speeds."
-                            }
-                        } else {
-                            "Audio keeps its pitch. Stops at the next clip."
-                        },
-                        faint(),
-                        10.0,
-                    ),
-                ],
-            ));
-        }
-        if track_kind == TrackKind::Audio && matches!(clip.content, ClipContent::Media { .. }) {
-            rows.push(playback_controls(state, (track_id, clip.id), clip.playback));
         }
         let destinations = compatible_destinations(project.tracks(), track_id, &clip);
         let mut move_buttons = Flex::row()
@@ -4373,11 +4628,11 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
             .padding(12.0)
             .background(panel())
             .corner_radius(10.0)
-            .child(panel_header(
-                "Inspector",
-                text(subtitle, faint(), 11.0),
-                Vec::new(),
-            ))
+            .child(if state.tooltip_viewport.get().width < 1200.0 {
+                library_tabs(state)
+            } else {
+                panel_header("Inspector", text(subtitle, faint(), 11.0), Vec::new())
+            })
             .child(Box::new(
                 RawScrollView::controlled(fill_style(), state.inspector_scroll.clone())
                     .child(Box::new(Flex::column().gap(10.0).with_children(rows))),
@@ -4449,6 +4704,7 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                         transition_out_frames = transition_out_frames.min(clip.duration_frames / 2);
                     }
                     LaneClip {
+                        effects: clip.effect_stack.clone(),
                         keyframes: clip
                             .keyframes
                             .iter()
@@ -4804,6 +5060,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     waveform: WaveformSlice {
                         peaks,
                         clip: Clip {
+                            effect_stack: Vec::new(),
                             stabilization: None,
                             keyframes: Vec::new(),
                             speed: 1.0,
@@ -4920,6 +5177,13 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
     for lane in &lanes {
         for help in lane.toggle_help() {
             help.register(state);
+        }
+        for clip in &lane.clips {
+            if !clip.effects.is_empty() {
+                Help::new("Applied effects")
+                    .instance(clip.clip_id)
+                    .register(state);
+            }
         }
     }
     let zoom = state.timeline_zoom.get();
@@ -5124,34 +5388,14 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             Flex::row()
                 .gap(6.0)
                 .height(workspace_height)
-                .child(Box::new(
-                    Flex::column()
-                        .width(side_width)
-                        .gap(6.0)
-                        .child(Box::new(
-                            Flex::row()
-                                .gap(2.0)
-                                .padding(2.0)
-                                .background(panel())
-                                .corner_radius(8.0)
-                                .child(chip("Media", active == Sidebar::Media, state, |s| {
-                                    s.sidebar.set(Sidebar::Media)
-                                }))
-                                .child(chip(
-                                    "Inspector",
-                                    active == Sidebar::Inspector,
-                                    state,
-                                    |s| s.sidebar.set(Sidebar::Inspector),
-                                )),
-                        ))
-                        .child(Box::new(Flex::column().grow(1.0).child(
-                            if active == Sidebar::Media {
-                                media_bin(state, project, side_width, busy)
-                            } else {
-                                inspector(state, project, side_width, busy)
-                            },
-                        ))),
-                ))
+                .child(Box::new(Flex::column().width(side_width).gap(6.0).child(
+                    Box::new(Flex::column().grow(1.0).child(match active {
+                        Sidebar::Media => media_bin(state, project, side_width, busy),
+                        Sidebar::Effects => effects_gallery(state, side_width),
+                        Sidebar::Transitions => transitions_gallery(state, side_width),
+                        Sidebar::Inspector => inspector(state, project, side_width, busy),
+                    })),
+                )))
                 .child(monitors),
         )
     } else {
@@ -5159,7 +5403,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             Flex::row()
                 .gap(6.0)
                 .height(workspace_height)
-                .child(media_bin(state, project, side_width, busy))
+                .child(library_panel(state, project, side_width, busy))
                 .child(monitors)
                 .child(inspector(state, project, side_width + 4.0, busy)),
         )
@@ -6745,7 +6989,11 @@ fn context_menu(state: &UiState, menu: MenuState, viewport: Size) -> BoxedWidget
         None => 244.0,
     };
     let top = if menu.bar.is_some() { 46.0 } else { 0.0 };
-    let separators = menu.entries.iter().filter(|e| e.command.is_none()).count() as f32;
+    let separators = menu
+        .entries
+        .iter()
+        .filter(|e| e.command.is_none() && e.label.is_empty())
+        .count() as f32;
     let rows = menu.entries.len() as f32 - separators;
     let header = if menu.bar.is_some() { 0.0 } else { 26.0 };
     let natural_height = 12.0 + header + rows * 28.0 + separators * 9.0;
@@ -6771,6 +7019,12 @@ fn context_menu(state: &UiState, menu: MenuState, viewport: Size) -> BoxedWidget
                 state,
                 move |s| s.run_menu(command),
             ),
+            None if !entry.label.is_empty() => Box::new(
+                Flex::row()
+                    .height(28.0)
+                    .padding_xy(10.0, 6.0)
+                    .child(heading(entry.label.to_uppercase(), faint(), 10.0)),
+            ) as BoxedWidget,
             None => Box::new(
                 Flex::row()
                     .height(9.0)
@@ -7186,8 +7440,445 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
+    #[test]
+    fn gallery_search_groups_and_click_apply_to_the_selected_clip() {
+        for category in [EffectCategory::Video, EffectCategory::Audio] {
+            let all = gallery_effects("", category);
+            assert!(all.contains(&EffectKind::Reverse));
+            assert!(all.contains(&EffectKind::Speed));
+        }
+        assert_eq!(
+            gallery_effects(" SePiA ", EffectCategory::Video),
+            [EffectKind::Sepia]
+        );
+        assert!(gallery_effects("sepia", EffectCategory::Audio).is_empty());
+        assert!(gallery_effects("no such effect", EffectCategory::Video).is_empty());
+        assert!(
+            gallery_effects("noise", EffectCategory::Audio).contains(&EffectKind::NoiseReduction)
+        );
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "scene.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(10_000_000),
+            has_audio: false,
+        })));
+        state.insert_media(1);
+        let before = state.editor.borrow().project().clone();
+        state.effect_query.set_value("sepia");
+        let mut painter = TestPainter::default();
+        let scene = creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            Renderer::new().render(
+                effects_gallery(&state, 288.0),
+                Size {
+                    width: 288.0,
+                    height: 896.0,
+                },
+                &mut painter,
+            )
+        });
+        assert!(painter.labels.iter().any(|label| label == "Video effects"));
+        assert!(painter.labels.iter().any(|label| label == "Audio effects"));
+        assert!(!painter.labels.iter().any(|label| label == "Reverse"));
+        let rect = painter
+            .bounds
+            .iter()
+            .find(|(label, _)| label == "Sepia")
+            .unwrap()
+            .1;
+        let pointer = Point {
+            x: rect.x + 4.0,
+            y: rect.y + 4.0,
+        };
+        let index = scene.drag_hit_test(pointer).unwrap();
+        assert_eq!(scene.draggable_at(index).unwrap().0.width, 260.0);
+        let help = state.tooltip_controller((EffectKind::Sepia.description(), 0));
+        help.focus(true);
+        let (area, start) = scene.drag_start_at(pointer).unwrap();
+        start(
+            Point {
+                x: pointer.x - area.x,
+                y: pointer.y - area.y,
+            },
+            area,
+        );
+        assert!(!help.visible());
+        state.end_effect_drag();
+        scene
+            .hit_test(Point {
+                x: rect.x + 4.0,
+                y: rect.y + 4.0,
+            })
+            .unwrap()();
+        assert_eq!(
+            selected_clip(&state).unwrap().1.effect_stack,
+            [EffectKind::Sepia]
+        );
+        state.undo();
+        assert_eq!(state.editor.borrow().project(), &before);
+    }
+
+    #[test]
+    fn gallery_tabs_remain_selected_across_layouts_and_effect_chips_select_controls() {
+        let state = UiState::new();
+        let draw = |width| {
+            let mut painter = TestPainter::default();
+            let scene = creamui::reactive::with_context_scope(|| {
+                creamui::reactive::provide_context(creamui::ThemeProvider::new(
+                    creamui::Theme::dark(),
+                ));
+                let size = Size {
+                    width,
+                    height: 896.0,
+                };
+                Renderer::new().render(build(&state, size), size, &mut painter)
+            });
+            (scene, painter)
+        };
+        let (scene, painter) = draw(1280.0);
+        let rect = painter
+            .bounds
+            .iter()
+            .find(|(label, _)| label == "Effects")
+            .unwrap()
+            .1;
+        scene
+            .hit_test(Point {
+                x: rect.x + 3.0,
+                y: rect.y + 3.0,
+            })
+            .unwrap()();
+        assert!(state.library_tab.peek() == LibraryTab::Effects);
+        assert!(state.sidebar.peek() == Sidebar::Effects);
+        for width in [1000.0, 1280.0] {
+            let (_, painter) = draw(width);
+            assert!(painter.labels.iter().any(|label| label == "Video effects"));
+        }
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "scene.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(10_000_000),
+            has_audio: false,
+        })));
+        state.insert_media(1);
+        assert!(!draw(1280.0).1.labels.iter().any(|label| label == "fx"));
+        for kind in [EffectKind::Sepia, EffectKind::ColorCorrection] {
+            state.click_gallery_effect(kind);
+        }
+        state.select_clip(None);
+        state.library_tab.set(LibraryTab::Media);
+        let (_, painter) = draw(1280.0);
+        assert!(!painter.labels.iter().any(|label| label == "fx"));
+        let (scene, painter) = draw(1280.0);
+        for label in ["Sepia", "Color correction"] {
+            assert!(painter.labels.iter().any(|text| text == label), "{label}");
+        }
+        let chip = painter
+            .bounds
+            .iter()
+            .find(|(label, _)| label == "Sepia")
+            .unwrap()
+            .1;
+        scene
+            .hit_test(Point {
+                x: chip.x + chip.width / 2.0,
+                y: chip.y + chip.height / 2.0,
+            })
+            .unwrap()();
+        assert!(matches!(
+            state.selected_detail.peek(),
+            Some((_, ClipDetail::Effect(EffectKind::Sepia)))
+        ));
+        assert!(draw(1280.0).1.labels.iter().any(|label| label == "Amount"));
+        state.select_clip(state.primary_clip());
+        assert!(state.selected_detail.peek().is_none());
+        assert!(!draw(1280.0).1.labels.iter().any(|label| label == "Amount"));
+        state.undo();
+        state.undo();
+        assert!(!draw(1280.0).1.labels.iter().any(|label| label == "Sepia"));
+    }
+
+    #[test]
+    fn gallery_applies_effects_and_selected_effect_inspector_removes_with_one_undo() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "scene.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(10_000_000),
+            has_audio: true
+        })));
+        state.insert_media(1);
+        let target = state.primary_clip().unwrap();
+        for kind in [
+            EffectKind::Sepia,
+            EffectKind::ColorCorrection,
+            EffectKind::Reverse,
+        ] {
+            state.click_gallery_effect(kind);
+        }
+        let applied = state.editor.borrow().project().clone();
+        assert_eq!(
+            selected_clip(&state).unwrap().1.effect_stack,
+            [
+                EffectKind::Sepia,
+                EffectKind::ColorCorrection,
+                EffectKind::Reverse
+            ]
+        );
+        let labels = render(&state, 1280.0, 896.0).labels;
+        assert!(
+            !labels
+                .iter()
+                .any(|label| label == "Add effect" || label == "Amount" || label == "Contrast")
+        );
+        for kind in [
+            EffectKind::Sepia,
+            EffectKind::ColorCorrection,
+            EffectKind::Reverse,
+        ] {
+            state.select_detail(target, ClipDetail::Effect(kind));
+            let labels = render(&state, 1280.0, 896.0).labels;
+            assert!(labels.iter().any(|label| label == "Remove"));
+            assert!(!labels.iter().any(|label| label == "Add effect"));
+            assert!(labels.iter().any(|label| label == kind.label()));
+        }
+        state.select_detail(target, ClipDetail::Effect(EffectKind::Sepia));
+        let mut painter = TestPainter::default();
+        let scene = creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            Renderer::new().render(
+                inspector(&state, &applied, 288.0, false),
+                Size {
+                    width: 288.0,
+                    height: 896.0,
+                },
+                &mut painter,
+            )
+        });
+        let rect = painter
+            .bounds
+            .iter()
+            .find(|(label, _)| label == "Remove")
+            .unwrap()
+            .1;
+        scene
+            .hit_test(Point {
+                x: rect.x + rect.width / 2.0,
+                y: rect.y + rect.height / 2.0,
+            })
+            .unwrap()();
+        assert_eq!(
+            selected_clip(&state).unwrap().1.effect_stack,
+            [EffectKind::ColorCorrection, EffectKind::Reverse]
+        );
+        assert!(state.selected_detail.peek().is_none());
+        state.undo();
+        assert_eq!(state.editor.borrow().project(), &applied);
+        state.redo();
+        assert!(
+            !selected_clip(&state)
+                .unwrap()
+                .1
+                .effect_stack
+                .contains(&EffectKind::Sepia)
+        );
+    }
+
+    #[test]
+    fn transition_markers_select_editors_and_remove_clears_detail() {
+        let state = UiState::new();
+        state.timeline_rect.set(Rect {
+            width: 1128.0,
+            height: 400.0,
+            ..Rect::default()
+        });
+        assert!(state.add_title());
+        let target = state.primary_clip().unwrap();
+        set_transition_kind(&state, false, Some(TransitionKind::Slide));
+        let project = state.editor.borrow().project().clone();
+        let mut timeline = view(&state);
+        timeline.span = 300;
+        let mut painter = TestPainter::default();
+        let scene = creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            Renderer::new().render(
+                Box::new(timeline),
+                Size {
+                    width: 1128.0,
+                    height: 400.0,
+                },
+                &mut painter,
+            )
+        });
+        let marker = painter
+            .bounds
+            .iter()
+            .find(|(label, _)| label == "↘")
+            .unwrap()
+            .1;
+        scene
+            .hit_test(Point {
+                x: marker.x + marker.width / 2.0,
+                y: marker.y + marker.height / 2.0,
+            })
+            .unwrap()();
+        assert!(state.selected_detail.peek() == Some((target, ClipDetail::Transition(false))));
+        let mut painter = TestPainter::default();
+        let scene = creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            Renderer::new().render(
+                inspector(&state, &project, 288.0, false),
+                Size {
+                    width: 288.0,
+                    height: 896.0,
+                },
+                &mut painter,
+            )
+        });
+        for label in ["Incoming transition", "From", "Remove"] {
+            assert!(painter.labels.iter().any(|text| text == label));
+        }
+        let remove = painter
+            .bounds
+            .iter()
+            .find(|(label, _)| label == "Remove")
+            .unwrap()
+            .1;
+        scene
+            .hit_test(Point {
+                x: remove.x + remove.width / 2.0,
+                y: remove.y + remove.height / 2.0,
+            })
+            .unwrap()();
+        assert!(state.selected_detail.peek().is_none());
+        assert!(selected_clip(&state).unwrap().1.transition.is_none());
+        state.undo();
+        assert_eq!(state.editor.borrow().project(), &project);
+        state.select_clip(Some(target));
+        let mut painter = TestPainter::default();
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            Renderer::new().render(
+                inspector(&state, &project, 288.0, false),
+                Size {
+                    width: 288.0,
+                    height: 3000.0,
+                },
+                &mut painter,
+            )
+        });
+        assert!(
+            !painter
+                .labels
+                .iter()
+                .any(|label| label == "From" || label == "Remove" || label == "Add effect")
+        );
+    }
+
+    #[test]
+    fn gallery_rejects_incompatible_and_applied_effects() {
+        for (media_kind, accepted, rejected) in [
+            (
+                MediaKind::Image,
+                EffectKind::Sepia,
+                EffectKind::NoiseReduction,
+            ),
+            (
+                MediaKind::Audio,
+                EffectKind::NoiseReduction,
+                EffectKind::Sepia,
+            ),
+        ] {
+            let state = UiState::new();
+            assert!(state.edit(Command::ImportMedia(Media {
+                id: 1,
+                path: "source".into(),
+                kind: media_kind,
+                duration_us: Some(1_000_000),
+                has_audio: media_kind == MediaKind::Audio
+            })));
+            state.insert_media(1);
+            let before = state.editor.borrow().project().clone();
+            state.click_gallery_effect(rejected);
+            assert_eq!(state.editor.borrow().project(), &before);
+            assert_eq!(state.status.peek(), "Select a clip or drag onto one");
+            state.click_gallery_effect(accepted);
+            let applied = state.editor.borrow().project().clone();
+            state.click_gallery_effect(accepted);
+            assert_eq!(state.editor.borrow().project(), &applied);
+        }
+    }
+
+    #[test]
+    fn shader_and_lut_menu_use_picker_validation_before_applying() {
+        use super::super::state::load_effect_file;
+        let dir = tempfile::tempdir().unwrap();
+        for (kind, name, contents) in [
+            (
+                EffectKind::CustomShader,
+                "effect.wgsl",
+                "fn effect(uv: vec2<f32>) -> vec4<f32> { return sample(uv); }",
+            ),
+            (
+                EffectKind::ColorLut,
+                "effect.cube",
+                "LUT_1D_SIZE 2\n0 0 0\n1 1 1\n",
+            ),
+        ] {
+            let state = UiState::new();
+            assert!(state.edit(Command::ImportMedia(Media {
+                id: 1,
+                path: "scene.mp4".into(),
+                kind: MediaKind::Video,
+                duration_us: Some(1_000_000),
+                has_audio: true
+            })));
+            state.insert_media(1);
+            let target = state.primary_clip().unwrap();
+            state.click_gallery_effect(kind);
+            assert!(selected_clip(&state).unwrap().1.effect_stack.is_empty());
+            let path = dir.path().join(name);
+            std::fs::write(&path, contents).unwrap();
+            let revision = state.revision.peek();
+            let picked = std::cell::Cell::new(false);
+            let result = load_effect_file(kind, || {
+                picked.set(true);
+                Some(path.clone())
+            });
+            assert!(picked.get());
+            assert_eq!(result.as_ref().unwrap(), &Some(path.clone()));
+            state.finish_effect_file(revision, target.0, target.1, kind, Ok(None));
+            assert!(selected_clip(&state).unwrap().1.effect_stack.is_empty());
+            state.finish_effect_file(revision + 1, target.0, target.1, kind, result.clone());
+            assert!(selected_clip(&state).unwrap().1.effect_stack.is_empty());
+            std::fs::write(&path, "invalid").unwrap();
+            let error = load_effect_file(kind, || Some(path.clone()));
+            assert!(error.is_err());
+            state.finish_effect_file(revision, target.0, target.1, kind, error);
+            assert!(selected_clip(&state).unwrap().1.effect_stack.is_empty());
+            state.finish_effect_file(revision, target.0, target.1, kind, result);
+            assert_eq!(selected_clip(&state).unwrap().1.effect_stack, [kind]);
+            let labels = render(&state, 1440.0, 2600.0).labels;
+            assert!(labels.iter().any(|label| label == kind.label()));
+            state.undo();
+            assert!(selected_clip(&state).unwrap().1.effect_stack.is_empty());
+        }
+    }
+
+    fn apply_selected_effect(state: &UiState, kind: EffectKind) {
+        let target = state.primary_clip().unwrap();
+        state.click_gallery_effect(kind);
+        state.select_detail(target, ClipDetail::Effect(kind));
+        assert!(selected_clip(state).unwrap().1.effect_stack.contains(&kind));
+    }
+
     fn destination_clip(start_frame: u64, duration_frames: u64) -> Clip {
         Clip {
+            effect_stack: Vec::new(),
             playback: crate::timeline::Playback::Forward,
             effect: None,
             mask: None,
@@ -7389,6 +8080,7 @@ mod tests {
                 ..Default::default()
             }
         }));
+        apply_selected_effect(&state, EffectKind::ColorCorrection);
         assert!(state.edit(Command::SetClipColor {
             track_id: target.0,
             clip_id: target.1,
@@ -7406,6 +8098,7 @@ mod tests {
             .thumbnails
             .borrow_mut()
             .insert(media.path.clone(), bin_image.clone());
+        state.selected_detail.set(None);
         for playback in [Playback::Forward, Playback::Reverse, Playback::Freeze] {
             state.set_playback(target, playback);
             let clip = selected_clip(&state).unwrap().1;
@@ -7488,7 +8181,7 @@ mod tests {
                         .iter()
                         .filter(|label| *label == "100%")
                         .count(),
-                    2
+                    0
                 );
                 for label in ["Mute", "Detach audio to its own track"] {
                     assert!(!inspector_painter.labels.iter().any(|text| text == label));
@@ -7540,7 +8233,7 @@ mod tests {
             for width in [210.0, 360.0] {
                 let size = Size {
                     width,
-                    height: 1000.0,
+                    height: 4000.0,
                 };
                 let mut painter = TestPainter::default();
                 creamui::reactive::with_context_scope(|| {
@@ -7554,7 +8247,7 @@ mod tests {
                         &mut painter,
                     );
                 });
-                for label in ["PLAYBACK", "Normal", "Reverse", "Freeze"] {
+                for label in ["TIMING", "Length"] {
                     let (_, rect) = painter
                         .bounds
                         .iter()
@@ -7630,9 +8323,10 @@ mod tests {
             clip: Box::new(clip)
         }));
         state.select_clip(Some((0, id)));
+        apply_selected_effect(&state, EffectKind::ColorCorrection);
         let painter = render(&state, 1280.0, 2600.0);
         for label in [
-            "COLOR",
+            "Color correction",
             "Brightness",
             "Contrast",
             "Saturation",
@@ -7689,6 +8383,7 @@ mod tests {
             clip: Box::new(clip)
         }));
         state.select_clip(Some((0, id)));
+        apply_selected_effect(&state, EffectKind::Invert);
         state.missing_media.set(HashSet::new());
         state.preview_available.set(true);
         let viewport = Size {
@@ -7708,7 +8403,7 @@ mod tests {
                 )
             })
         };
-        let (scene, index, rect) = (0..30)
+        let (scene, index, rect) = (0..100)
             .find_map(|step| {
                 state.inspector_scroll.set(step as f32 * 40.0);
                 let scene = draw();
@@ -7726,7 +8421,7 @@ mod tests {
             .expect("scrolled Effect slider is visible");
         let offset = state.inspector_scroll.peek();
         let max_offset = state.inspector_scroll.max_offset();
-        assert!(offset > 0.0);
+        assert_eq!(offset, 0.0);
         let pointer = Point {
             x: rect.x + rect.width - 6.0,
             y: rect.y + 14.0,
@@ -7793,6 +8488,7 @@ mod tests {
             clip: Box::new(clip)
         }));
         state.select_clip(Some((0, id)));
+        apply_selected_effect(&state, EffectKind::Invert);
         let rect = Rect {
             x: 100.0,
             y: 200.0,
@@ -7817,14 +8513,7 @@ mod tests {
         state.redo();
         assert_eq!(selected_clip(&state).unwrap().1.effect.unwrap().amount, 0.5);
         let painter = render(&state, 1280.0, 2600.0);
-        for label in [
-            "EFFECT",
-            "Invert",
-            "Load .wgsl…",
-            "Amount",
-            "Clear effect",
-            "CHROMA KEY",
-        ] {
+        for label in ["Invert", "Amount", "Remove"] {
             assert!(painter.labels.iter().any(|text| text == label), "{label}");
         }
         slider().on_drag_start().unwrap()(Point { x: 58.0, y: 14.0 }, rect);
@@ -7835,14 +8524,14 @@ mod tests {
             !render(&state, 1280.0, 900.0)
                 .labels
                 .iter()
-                .any(|text| text == "EFFECT")
+                .any(|text| text == "Amount")
         );
         assert!(state.add_title());
         assert!(
             !render(&state, 1280.0, 2600.0)
                 .labels
                 .iter()
-                .any(|text| text == "EFFECT")
+                .any(|text| text == "Amount")
         );
     }
 
@@ -8579,6 +9268,7 @@ mod tests {
             has_audio: false,
         })));
         state.insert_media(1);
+        apply_selected_effect(&state, EffectKind::Mask);
         set_clip_mask(&state, Some(Mask::default()));
         state.preview_available.set(true);
         creamui::reactive::with_context_scope(|| {
@@ -9782,12 +10472,13 @@ mod tests {
             "content":{"media":{"media_id":1}},"volume":1.0,"muted":false
         }))
         .unwrap();
+        clip.effect_stack.push(EffectKind::Stabilization);
         clip.stabilization = Some(crate::timeline::Stabilization::new(0, vec![[0.0, 0.0]; 60]));
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
             clip: Box::new(clip)
         }));
-        state.select_clip(Some((0, 1)));
+        state.select_detail((0, 1), ClipDetail::Effect(EffectKind::Stabilization));
         for width in [210.0, 360.0] {
             let mut painter = TestPainter::default();
             creamui::reactive::with_context_scope(|| {
@@ -9804,7 +10495,7 @@ mod tests {
                 );
             });
             for label in [
-                "STABILIZATION",
+                "Stabilization",
                 "Re-analyze",
                 "Strength · 50%",
                 "Remove",
@@ -9836,6 +10527,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 noise_reduction: false,
@@ -10098,6 +10790,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id,
                 clip: Box::new(Clip {
+                    effect_stack: Vec::new(),
                     speed: 1.0,
                     playback: crate::timeline::Playback::Forward,
                     id: id + 100,
@@ -10495,12 +11188,15 @@ mod tests {
     fn transitions_are_visible_for_video_but_not_audio_and_ignore_busy_edits() {
         let state = UiState::new();
         state.run(Action::AddTitle);
+        set_transition_kind(&state, false, Some(TransitionKind::Fade));
+        state.select_detail(state.primary_clip().unwrap(), ClipDetail::Transition(false));
         assert!(
             render(&state, 1280.0, 760.0)
                 .labels
                 .iter()
-                .any(|label| label == "TRANSITION")
+                .any(|label| label == "Incoming transition")
         );
+        set_transition_kind(&state, false, None);
         state.busy.set(true);
         set_transition_kind(&state, false, Some(TransitionKind::Fade));
         assert!(selected_clip(&state).unwrap().1.transition.is_none());
@@ -10680,7 +11376,7 @@ mod tests {
             !render(&state, 1280.0, 1100.0)
                 .labels
                 .iter()
-                .any(|label| label == "CHROMA KEY")
+                .any(|label| label == "Chroma key")
         );
         for (id, kind) in [
             (1, MediaKind::Video),
@@ -10695,9 +11391,12 @@ mod tests {
                 has_audio: false,
             })));
             state.insert_media(id);
+            if kind != MediaKind::Audio {
+                apply_selected_effect(&state, EffectKind::ChromaKey);
+            }
             let labels = render(&state, 1280.0, 2600.0).labels;
             assert_eq!(
-                labels.iter().any(|label| label == "CHROMA KEY"),
+                labels.iter().any(|label| label == "Green"),
                 kind != MediaKind::Audio
             );
             if kind == MediaKind::Audio {
@@ -10705,11 +11404,7 @@ mod tests {
             }
             let (track_id, clip) = selected_clip(&state).unwrap();
             let clip_id = clip.id;
-            assert!(state.edit(Command::SetClipChromaKey {
-                track_id,
-                clip_id,
-                key: Some(Default::default())
-            }));
+            assert_eq!(clip.chroma_key, Some(Default::default()));
             let labels = render(&state, 1280.0, 2600.0).labels;
             assert!(labels.iter().any(|label| label == "Green"));
             assert!(labels.iter().any(|label| label == "Blue"));
@@ -10786,7 +11481,7 @@ mod tests {
         let state = UiState::new();
         state.run(Action::AddTitle);
         assert!(
-            !render(&state, 1280.0, 1100.0)
+            !render(&state, 1280.0, 2600.0)
                 .labels
                 .iter()
                 .any(|label| label == "LUT")
@@ -10803,7 +11498,20 @@ mod tests {
                 has_audio: false
             })));
             state.insert_media(id);
-            let labels = render(&state, 1280.0, 1100.0).labels;
+            if kind == MediaKind::Video {
+                let (track_id, clip) = selected_clip(&state).unwrap();
+                assert!(state.edit(Command::ApplyEffect {
+                    track_id,
+                    clip_id: clip.id,
+                    kind: EffectKind::ColorLut,
+                    path: Some("/looks/initial.cube".into())
+                }));
+                state.select_detail(
+                    (track_id, clip.id),
+                    ClipDetail::Effect(EffectKind::ColorLut),
+                );
+            }
+            let labels = render(&state, 1280.0, 2600.0).labels;
             assert_eq!(
                 labels.iter().any(|label| label == "LUT"),
                 kind == MediaKind::Video
@@ -10817,7 +11525,7 @@ mod tests {
                     path: Some("/looks/summer.cube".into())
                 }));
                 assert!(
-                    render(&state, 1280.0, 1100.0)
+                    render(&state, 1280.0, 2600.0)
                         .labels
                         .iter()
                         .any(|label| label == "summer.cube")
@@ -10839,6 +11547,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
                 mask: None,
@@ -10890,6 +11599,7 @@ mod tests {
                 base: true,
                 removable: false,
                 clips: vec![LaneClip {
+                    effects: Vec::new(),
                     keyframes: Vec::new(),
                     playback: Playback::Forward,
                     transition_frames: 0,
@@ -11101,6 +11811,12 @@ mod tests {
             new_id: 99,
         }));
         state.select_clip(Some((track_id, 99)));
+        apply_selected_effect(&state, EffectKind::Speed);
+        assert!(state.edit(Command::SetClipSpeed {
+            track_id,
+            clip_id: 99,
+            speed: 1.0
+        }));
         let before = state.editor.borrow().project().clone();
         let status = state.status.peek();
         creamui::reactive::with_context_scope(|| {
@@ -11110,7 +11826,7 @@ mod tests {
                 inspector(&state, &before, 300.0, false),
                 Size {
                     width: 300.0,
-                    height: 2000.0,
+                    height: 4000.0,
                 },
                 &mut painter,
             );
@@ -11174,6 +11890,15 @@ mod tests {
                 has_audio: false
             })));
             state.insert_media(id);
+            if kind == MediaKind::Video {
+                apply_selected_effect(&state, EffectKind::Speed);
+                let (track_id, clip) = selected_clip(&state).unwrap();
+                assert!(state.edit(Command::SetClipSpeed {
+                    track_id,
+                    clip_id: clip.id,
+                    speed: 1.0
+                }));
+            }
             let labels = render(&state, 1440.0, 2400.0).labels;
             if kind == MediaKind::Image {
                 assert!(!labels.iter().any(|label| label.starts_with("SPEED ·")));
@@ -11224,7 +11949,7 @@ mod tests {
             }
         }
         assert!(state.add_title());
-        let painter = render(&state, 1440.0, 900.0);
+        let painter = render(&state, 1440.0, 2400.0);
         assert!(painter.labels.iter().any(|text| text == "Title 1"));
         assert!(painter.labels.iter().any(|text| text == "Title clip"));
         assert!(!painter.labels.iter().any(|text| text == "Noise reduction"));
@@ -11254,7 +11979,7 @@ mod tests {
             has_audio: true,
         })));
         state.insert_media(7);
-        let painter = render(&state, 1440.0, 900.0);
+        let painter = render(&state, 1440.0, 2400.0);
         assert!(
             painter
                 .labels
@@ -11263,14 +11988,22 @@ mod tests {
         );
         assert!(painter.labels.iter().any(|label| label == "100%"));
         assert!(painter.labels.iter().any(|label| label == "Audio source"));
-        let painter = render(&state, 1440.0, 1600.0);
+        apply_selected_effect(&state, EffectKind::Fades);
+        let (track_id, clip) = selected_clip(&state).unwrap();
+        assert!(state.edit(Command::SetClipFades {
+            track_id,
+            clip_id: clip.id,
+            fade_in_frames: 0,
+            fade_out_frames: 0
+        }));
+        let painter = render(&state, 1440.0, 2400.0);
         assert!(painter.labels.iter().any(|label| label == "Fade in"));
         assert!(painter.labels.iter().any(|label| label == "Fade out"));
         assert!(painter.labels.iter().any(|label| label == "Off"));
         for (label, rect) in &painter.bounds {
             if label == "Fade in" || label == "Fade out" {
                 assert!(rect.x >= 0.0 && rect.x + rect.width <= 1440.0);
-                assert!(rect.y >= 0.0 && rect.y + rect.height <= 1600.0);
+                assert!(rect.y >= 0.0 && rect.y + rect.height <= 2400.0);
             }
         }
         change_clip_fade(&state, true, true);
@@ -11281,16 +12014,11 @@ mod tests {
             clip.fade_in_frames + clip.fade_out_frames,
             clip.duration_frames
         );
-        let painter = render(&state, 1440.0, 1600.0);
+        let painter = render(&state, 1440.0, 2400.0);
         assert!(painter.labels.iter().any(|label| label == "0.5 s"));
-        assert!(
-            painter
-                .labels
-                .iter()
-                .any(|label| label == "Noise reduction")
-        );
+
         assert!(!selected_clip(&state).unwrap().1.noise_reduction);
-        toggle_clip_noise_reduction(&state);
+        apply_selected_effect(&state, EffectKind::NoiseReduction);
         assert!(selected_clip(&state).unwrap().1.noise_reduction);
         state.undo();
         assert!(!selected_clip(&state).unwrap().1.noise_reduction);
@@ -11298,7 +12026,7 @@ mod tests {
         assert!(selected_clip(&state).unwrap().1.noise_reduction);
         set_clip_audio(&state, |clip| (clip.volume - 0.5, true));
         assert!(selected_clip(&state).unwrap().1.noise_reduction);
-        let painter = render(&state, 1440.0, 900.0);
+        let painter = render(&state, 1440.0, 2400.0);
         assert!(painter.labels.iter().any(|label| label == "50%"));
         assert!(painter.labels.iter().any(|label| label == "Unmute"));
         let (track_id, clip) = selected_clip(&state).unwrap();

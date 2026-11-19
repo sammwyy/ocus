@@ -619,7 +619,12 @@ mod tests {
         );
         assert!(editor.redo());
         let json = format::to_json(editor.project()).unwrap();
-        assert_eq!(format::from_json(&json).unwrap(), *editor.project());
+        let mut expected = serde_json::to_value(editor.project()).unwrap();
+        expected["tracks"][0]["clips"][0]["effect_stack"] = serde_json::json!(["stabilization"]);
+        assert_eq!(
+            serde_json::to_value(format::from_json(&json).unwrap()).unwrap(),
+            expected
+        );
         for invalid in [
             Stabilization {
                 strength: f32::NAN,

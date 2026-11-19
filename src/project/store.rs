@@ -356,6 +356,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
                 mask: None,

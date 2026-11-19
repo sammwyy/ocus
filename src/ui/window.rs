@@ -238,7 +238,7 @@ fn transition_section(state: &UiState, clip: &Clip, busy: bool) -> BoxedWidget {
         (
             "Fade",
             Some(TransitionKind::Fade),
-            "Dip through black into this clip",
+            "Fade in; dip through black between adjacent clips",
         ),
         (
             "Dissolve",
@@ -292,7 +292,7 @@ fn transition_section(state: &UiState, clip: &Clip, busy: bool) -> BoxedWidget {
     rows.push(text(
         match current {
             None => "Choose how this clip appears.",
-            Some(TransitionKind::Fade) => "Dip through black into this clip.",
+            Some(TransitionKind::Fade) => "Fade in; dip through black between adjacent clips.",
             Some(TransitionKind::Dissolve) => "Blend smoothly into this clip.",
             Some(TransitionKind::Slide) => "Slide this clip in from the right.",
         },

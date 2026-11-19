@@ -114,7 +114,9 @@ one clip; the Program monitor and export share the layered composition rules.
 Video clips may store an optional fade, dissolve, or slide into their start.
 The shared compositor clamps transition length to the clip duration and uses
 the adjacent previous clip's continued picture (holding at source EOF), or
-the lower tracks, as the outgoing picture. Transitions are edited through
+the lower tracks, as the outgoing picture. Fade dips through black only at an
+adjacent cut; otherwise the incoming clip fades in over the lower tracks.
+Transitions are edited through
 `SetTransition`; splitting leaves the transition only on the left piece.
 The optional field remains compatible with version 1 projects. The Inspector
 offers transition choices and quarter-second duration steps; the timeline

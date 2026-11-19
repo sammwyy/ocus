@@ -307,6 +307,7 @@ impl Compositor {
                 continue;
             };
             let mut incoming = pixels.clone();
+            let dip_through_black = transition.kind == TransitionKind::Fade && previous.is_some();
             if let Some(previous) = previous {
                 self.draw_clip(&previous, position, &mut pixels, &mut active, cancelled)?;
             }
@@ -334,7 +335,7 @@ impl Compositor {
                         .zip(incoming.as_chunks::<4>().0)
                     {
                         for channel in 0..3 {
-                            let value = if transition.kind == TransitionKind::Dissolve {
+                            let value = if !dip_through_black {
                                 f64::from(dest[channel]) * (1.0 - t) + f64::from(src[channel]) * t
                             } else if t < 0.5 {
                                 f64::from(dest[channel]) * (1.0 - 2.0 * t)
@@ -680,6 +681,46 @@ mod tests {
         let red = source(1, [240, 0, 0, 255], 0, 20);
         let blue = source(2, [0, 0, 240, 255], 5, 10);
         let cancelled = Arc::new(AtomicBool::new(false));
+        for alpha in [0, 128] {
+            let overlay_plan = VisualPlan {
+                resolution: (4, 2),
+                transitions: HashMap::from([(
+                    3,
+                    Transition {
+                        kind: TransitionKind::Fade,
+                        duration_frames: 3,
+                    },
+                )]),
+                tracks: vec![
+                    vec![red.clone()],
+                    vec![source(3, [0, 0, 240, alpha], 5, 10)],
+                ],
+            };
+            let mut normal_plan = overlay_plan.clone();
+            normal_plan.transitions.clear();
+            let background = full_blend(&normal_plan, 4);
+            let foreground = full_blend(&normal_plan, 5);
+            let mut compositor = Compositor::new(overlay_plan, 4, 2, (30, 1));
+            for position in 5..=8 {
+                let t = f64::from((position - 4).min(4) as u32) / 4.0;
+                let expected: Vec<_> = background
+                    .iter()
+                    .zip(&foreground)
+                    .map(|(&under, &over)| {
+                        (f64::from(under) * (1.0 - t) + f64::from(over) * t).round() as u8
+                    })
+                    .collect();
+                assert_eq!(
+                    compositor
+                        .frame(position, &cancelled)
+                        .unwrap()
+                        .unwrap()
+                        .pixels,
+                    expected,
+                    "overlay alpha={alpha}, position={position}"
+                );
+            }
+        }
         for adjacent in [false, true] {
             let mut underneath = red.clone();
             if adjacent && let VisualClip::Media(source) = &mut underneath {
@@ -712,10 +753,15 @@ mod tests {
                         (6, [120, 0, 120, 255]),
                         (7, [60, 0, 180, 255]),
                     ],
-                    TransitionKind::Fade => vec![
+                    TransitionKind::Fade if adjacent => vec![
                         (5, [120, 0, 0, 255]),
                         (6, [0, 0, 0, 255]),
                         (7, [0, 0, 120, 255]),
+                    ],
+                    TransitionKind::Fade => vec![
+                        (5, [180, 0, 60, 255]),
+                        (6, [120, 0, 120, 255]),
+                        (7, [60, 0, 180, 255]),
                     ],
                     TransitionKind::Slide => vec![
                         (5, [240, 0, 0, 255]),

@@ -249,6 +249,7 @@ pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Op
             }),
             volume: 1.0,
             muted: false,
+            transition: None,
             linked_audio: false,
         },
     ))
@@ -379,6 +380,7 @@ pub(crate) fn insert_media(
         content: ClipContent::Media { media_id },
         volume: 1.0,
         muted: false,
+        transition: None,
         linked_audio: media.kind == MediaKind::Video && media.has_audio,
     };
     let end = start.checked_add(duration).ok_or("Clip range overflows")?;
@@ -585,6 +587,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            transition: None,
             linked_audio: false,
         }
     }

@@ -3281,6 +3281,7 @@ mod tests {
                     content: ClipContent::Media { media_id: 1 },
                     volume: 1.0,
                     muted: false,
+                    transition: None,
                     linked_audio: false,
                 }
             }));
@@ -4131,6 +4132,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: true,
+                transition: None,
                 linked_audio: false,
             }
         }));

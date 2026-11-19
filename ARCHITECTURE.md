@@ -111,6 +111,13 @@ default output device; video pacing follows the consumed-sample clock so
 picture and sound stay aligned, skipping late video frames instead of delaying
 the timeline when composition is slower than playback. Source preview decodes
 one clip; the Program monitor and export share the layered composition rules.
+Video clips may store an optional fade, dissolve, or slide into their start.
+The shared compositor clamps transition length to the clip duration and uses
+the adjacent previous clip's continued picture (holding at source EOF), or
+the lower tracks, as the outgoing picture. Transitions are edited through
+`SetTransition`; splitting leaves the transition only on the left piece.
+The optional field remains compatible with version 1 projects. Transition
+controls are not yet exposed in the UI.
 
 ## Where new work belongs
 

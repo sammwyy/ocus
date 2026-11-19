@@ -52,6 +52,50 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn transitions_round_trip_and_validate_without_changing_version() {
+        let mut document = serde_json::to_value(Project::new("Transitions")).unwrap();
+        document["version"] = 1.into();
+        document["tracks"][0]["clips"] = serde_json::json!([{
+            "id": 1, "start_frame": 0, "source_start_frame": 0,
+            "duration_frames": 3, "content": {"title": Title::default()},
+            "volume": 1.0, "muted": false
+        }]);
+        let legacy = from_json(&document.to_string()).unwrap();
+        assert!(!to_json(&legacy).unwrap().contains("transition"));
+        for kind in ["fade", "dissolve", "slide"] {
+            document["tracks"][0]["clips"][0]["transition"] =
+                serde_json::json!({"kind": kind, "duration_frames": 20});
+            let project = from_json(&document.to_string()).unwrap();
+            let saved: serde_json::Value =
+                serde_json::from_str(&to_json(&project).unwrap()).unwrap();
+            assert_eq!(
+                saved["tracks"][0]["clips"][0]["transition"],
+                document["tracks"][0]["clips"][0]["transition"]
+            );
+            assert_eq!(saved["version"], 1);
+        }
+        document["tracks"][0]["clips"][0]["transition"]["duration_frames"] = 0.into();
+        assert!(from_json(&document.to_string()).is_err());
+        document["tracks"][0]["clips"][0]["transition"]["duration_frames"] = 1.into();
+        document["tracks"][0]["kind"] = "audio".into();
+        document["media"] = serde_json::json!([Media {
+            id: 2,
+            path: PathBuf::from("sound.wav"),
+            kind: MediaKind::Audio,
+            duration_us: None,
+            has_audio: true,
+        }]);
+        document["tracks"][0]["clips"][0]["content"] =
+            serde_json::json!({"media": {"media_id": 2}});
+        assert!(from_json(&document.to_string()).is_err());
+        document["tracks"][0]["clips"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("transition");
+        assert!(from_json(&document.to_string()).is_ok());
+    }
+
+    #[test]
     fn project_round_trips_media_and_title_clips() {
         let mut fixture: serde_json::Value =
             serde_json::from_str(&to_json(&Project::new("A short film")).unwrap()).unwrap();
@@ -70,6 +114,7 @@ mod tests {
             content: ClipContent::Media { media_id: 4 },
             volume: 1.0,
             muted: false,
+            transition: None,
             linked_audio: false,
         }]);
         fixture["tracks"][1]["clips"] = serde_json::json!([Clip {
@@ -92,6 +137,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            transition: None,
             linked_audio: false,
         }]);
         let project = from_json(&fixture.to_string()).unwrap();
@@ -162,6 +208,7 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 1.0,
             muted: false,
+            transition: None,
             linked_audio: false,
         })
         .unwrap();
@@ -222,6 +269,7 @@ mod tests {
             content: ClipContent::Media { media_id: 8 },
             volume: 1.0,
             muted: false,
+            transition: None,
             linked_audio: false,
         };
         document["tracks"][0]["clips"] = serde_json::json!([clip.clone()]);

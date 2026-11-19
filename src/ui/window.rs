@@ -3994,6 +3994,7 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 1.0,
             muted: false,
+            transition: None,
             linked_audio: false,
         }
     }
@@ -5240,6 +5241,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                transition: None,
                 linked_audio: false
             }
         }));

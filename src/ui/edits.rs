@@ -192,12 +192,14 @@ pub(crate) fn compatible_track(project: &Project, media_id: u64, preferred: u64)
     project
         .tracks()
         .iter()
-        .find(|track| track.id == preferred && track.kind == wanted && !track.locked)
+        .find(|track| {
+            track.id == preferred && track.kind == wanted && !track.subtitles && !track.locked
+        })
         .or_else(|| {
             project
                 .tracks()
                 .iter()
-                .find(|track| track.kind == wanted && !track.locked)
+                .find(|track| track.kind == wanted && !track.subtitles && !track.locked)
         })
         .map(|track| track.id)
 }
@@ -454,6 +456,7 @@ fn push_track(tracks: &mut Vec<Track>, kind: TrackKind) -> Option<u64> {
         Track {
             id,
             kind,
+            subtitles: false,
             name: String::new(),
             locked: false,
             hidden: false,

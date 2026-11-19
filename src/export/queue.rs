@@ -310,6 +310,67 @@ mod tests {
     }
 
     #[test]
+    fn queued_subtitle_exports_preserve_burn_setting_and_sidecar_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = Queue::default();
+        for (name, burn, subtitles) in [
+            ("on.mp4", true, true),
+            ("off.mp4", false, true),
+            ("plain.mp4", false, false),
+            ("collision.mp4", false, true),
+        ] {
+            let mut job = request(dir.path().join(name));
+            let mut tracks = job.project.tracks().to_vec();
+            tracks[0].subtitles = subtitles;
+            let ClipContent::Title(title) = &mut tracks[0].clips[0].content else {
+                unreachable!()
+            };
+            title.text = "Cue".into();
+            title.font_size = 20.0;
+            title.background = Some([255, 0, 0, 255]);
+            title.y = 0.5;
+            let mut editor = Editor::new(job.project);
+            assert!(editor.apply(Command::ReplaceTracks(tracks)));
+            job.project = editor.project().clone();
+            job.output.settings.burn_subtitles = burn;
+            queue.enqueue(job).unwrap();
+        }
+        fs::write(dir.path().join("collision.srt"), "keep").unwrap();
+        for (burn, subtitles) in [(true, true), (false, true), (false, false)] {
+            let (output, result) = run(&mut queue);
+            result.unwrap();
+            assert_eq!(output.settings.burn_subtitles, burn);
+            assert_eq!(
+                output.path.with_extension("srt").exists(),
+                !burn && subtitles
+            );
+            let image = crate::media::thumbnail(&output.path).unwrap();
+            assert_eq!(
+                image
+                    .pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| pixel[0] > 100),
+                burn || !subtitles
+            );
+        }
+        let cues =
+            crate::subtitles::parse(&fs::read_to_string(dir.path().join("off.srt")).unwrap())
+                .unwrap();
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].text, "Cue");
+        let (_, result) = run(&mut queue);
+        assert!(result.unwrap_err().contains("sidecar already exists"));
+        assert!(!dir.path().join("collision.mp4").exists());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("collision.srt")).unwrap(),
+            "keep"
+        );
+        assert!(matches!(queue.jobs()[3].status, Status::Failed(_)));
+    }
+
+    #[test]
     fn cancellation_waits_for_worker_and_skips_removed_jobs() {
         let dir = tempfile::tempdir().unwrap();
         let first = dir.path().join("active.gif");

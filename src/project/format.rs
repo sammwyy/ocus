@@ -57,6 +57,52 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn subtitle_fields_round_trip_without_a_version_change() {
+        let project = Project::new("Legacy");
+        let legacy = to_json(&project).unwrap();
+        assert!(!legacy.contains("subtitles"));
+        let loaded = from_json(&legacy).unwrap();
+        assert!(loaded.tracks().iter().all(|track| !track.subtitles));
+        let mut tracks = loaded.tracks().to_vec();
+        tracks.push(
+            crate::subtitles::track(
+                &loaded,
+                &[crate::subtitles::Cue {
+                    start_us: 0,
+                    end_us: 1_000_000,
+                    text: "Hello".into(),
+                }],
+            )
+            .unwrap(),
+        );
+        let ClipContent::Title(title) = &mut tracks.last_mut().unwrap().clips[0].content else {
+            unreachable!()
+        };
+        title.background = Some([0, 0, 0, 180]);
+        let mut editor = crate::project::Editor::new(loaded);
+        assert!(editor.apply(crate::project::Command::ReplaceTracks(tracks)));
+        let json = to_json(editor.project()).unwrap();
+        assert!(json.contains("\"version\": 1"));
+        let restored = from_json(&json).unwrap();
+        assert_eq!(restored.tracks(), editor.project().tracks());
+        let mut document: serde_json::Value = serde_json::from_str(&json).unwrap();
+        document["tracks"][4]["clips"][0]["content"]["title"]
+            .as_object_mut()
+            .unwrap()
+            .remove("background");
+        document["tracks"][4]
+            .as_object_mut()
+            .unwrap()
+            .remove("subtitles");
+        let restored = from_json(&document.to_string()).unwrap();
+        assert!(!restored.tracks()[4].subtitles);
+        let ClipContent::Title(title) = &restored.tracks()[4].clips[0].content else {
+            unreachable!()
+        };
+        assert_eq!(title.background, None);
+    }
+
+    #[test]
     fn out_transitions_and_slide_directions_round_trip_and_validate() {
         use crate::timeline::SlideDirection;
         let mut document = serde_json::to_value(Project::new("Out transitions")).unwrap();
@@ -219,6 +265,7 @@ mod tests {
                 font_family: "Sans".into(),
                 font_size: 48.0,
                 color: [255, 150, 40, 180],
+                background: Some([0, 0, 0, 128]),
                 x: 0.3,
                 y: 0.7,
                 bold: false,

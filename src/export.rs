@@ -1,4 +1,5 @@
 pub mod presets;
+pub(crate) mod queue;
 
 use crate::media::audio::{self, AudioPlan, AudioQueue};
 use crate::media::composite::{Compositor, VisualPlan};
@@ -13,6 +14,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
+
+pub(crate) const CANCELLED: &str = "Export cancelled";
 
 #[derive(Default)]
 pub struct ExportControl {
@@ -31,7 +34,7 @@ impl ExportControl {
 
     fn check(&self) -> Result<(), String> {
         if self.cancelled.load(Ordering::Relaxed) {
-            Err("Export cancelled".into())
+            Err(CANCELLED.into())
         } else {
             Ok(())
         }

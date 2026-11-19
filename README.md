@@ -163,6 +163,12 @@ remembered in editor preferences across projects and sessions. The destination
 is also shown beside the export actions on every settings tab; **Change…** opens
 the full path and folder picker.
 
+Ocus encodes one export at a time. Open **Queue** to track progress and use
+**Add export…** to set up another output without waiting. **Remove** skips a
+waiting job; **Cancel** stops the current job. The queue continues after a
+cancellation or failure and keeps recent results until cleared or the app
+closes. Project editing stays locked until the queue finishes.
+
 **Animated GIF** exports the visual timeline and titles as a silent loop.
 It defaults to 15 fps and fits the project within 640 × 640;
 you can adjust the size and frame rate in the Video tab. **Audio only (WAV)**

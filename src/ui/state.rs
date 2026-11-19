@@ -17,7 +17,7 @@ use crate::project::export_settings::{
 };
 use crate::project::{Command, Editor, Project, recovery, store};
 use crate::settings::{self, Settings, ThemeMode};
-use crate::timeline::{Clip, ClipContent, Playback, Title, TrackKind};
+use crate::timeline::{Clip, ClipContent, Playback, Title, TrackKind, Transform};
 use creamui::core::{Modifiers, Point, Rect, RgbaImage};
 use creamui::widgets::{
     ColorPickerController, ScrollController, TextController, TooltipController,
@@ -134,6 +134,7 @@ pub(super) fn clip_storyboard_key(
     let first = clip.source_frame_at(0)?;
     let last = clip.source_frame_at(clip.duration_frames.checked_sub(1)?)?;
     Some(StoryboardKey {
+        transform_bits: StoryboardKey::transform_bits(clip.transform),
         color_bits: [
             clip.color.brightness,
             clip.color.contrast,
@@ -1530,6 +1531,7 @@ impl UiState {
                         start: clip.start_frame,
                         source_start: clip.source_start_frame,
                         duration: clip.duration_frames,
+                        transform: clip.transform,
                     });
                 }
             }
@@ -1591,6 +1593,7 @@ impl UiState {
                     start: 0,
                     source_start: range.source_start,
                     duration: range.duration,
+                    transform: Transform::default(),
                 })
                 .collect(),
             fps,
@@ -2048,6 +2051,7 @@ impl UiState {
             .and_then(|images| images.first().cloned())
             .or_else(|| {
                 (clip.color.neutral()
+                    && clip.transform.is_identity()
                     && clip.lut.is_none()
                     && (media.kind == MediaKind::Image || clip.source_frame_at(0) == Some(0)))
                 .then(|| self.thumbnails.borrow().get(&media.path).cloned())
@@ -3734,6 +3738,7 @@ mod tests {
         state.finish_storyboard(
             key.clone(),
             Ok(vec![FrameImage {
+                picture: (0, 0, 1, 1),
                 width: 1,
                 height: 1,
                 pixels: vec![255; 4],
@@ -4193,6 +4198,9 @@ mod tests {
             .map(|index| {
                 (
                     StoryboardKey {
+                        transform_bits: StoryboardKey::transform_bits(
+                            crate::timeline::Transform::default(),
+                        ),
                         lut: None,
                         color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
                         playback: crate::timeline::Playback::Forward,
@@ -4350,6 +4358,7 @@ mod tests {
                     fade_out_frames: 0,
                     noise_reduction: false,
                     linked_audio: false,
+                    transform: Transform::default(),
                 }
             }));
         }
@@ -5204,6 +5213,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                transform: Transform::default(),
             }
         }));
         state.play();

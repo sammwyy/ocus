@@ -95,6 +95,61 @@ pub struct Clip {
     pub playback: Playback,
     #[serde(default, skip_serializing_if = "ColorAdjust::neutral")]
     pub color: ColorAdjust,
+    #[serde(default, skip_serializing_if = "Transform::is_identity")]
+    pub transform: Transform,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Transform {
+    pub scale: f32,
+    pub x: f32,
+    pub y: f32,
+    pub rotation: f32,
+    pub crop_left: f32,
+    pub crop_top: f32,
+    pub crop_right: f32,
+    pub crop_bottom: f32,
+    pub opacity: f32,
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            x: 0.0,
+            y: 0.0,
+            rotation: 0.0,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+            opacity: 1.0,
+        }
+    }
+}
+
+impl Transform {
+    pub fn is_identity(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn valid(&self) -> bool {
+        [
+            (self.scale, 0.1, 4.0),
+            (self.x, -1.0, 1.0),
+            (self.y, -1.0, 1.0),
+            (self.rotation, -360.0, 360.0),
+            (self.crop_left, 0.0, 1.0),
+            (self.crop_top, 0.0, 1.0),
+            (self.crop_right, 0.0, 1.0),
+            (self.crop_bottom, 0.0, 1.0),
+            (self.opacity, 0.0, 1.0),
+        ]
+        .into_iter()
+        .all(|(v, min, max)| v.is_finite() && (min..=max).contains(&v))
+            && self.crop_left + self.crop_right < 1.0
+            && self.crop_top + self.crop_bottom < 1.0
+    }
 }
 
 impl Clip {
@@ -290,5 +345,35 @@ mod playback_tests {
         clip.source_start_frame = u64::MAX;
         clip.playback = Playback::Forward;
         assert_eq!(clip.source_frame_at(1), None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_is_backward_compatible() {
+        let json = r#"{"id":1,"start_frame":0,"source_start_frame":0,"duration_frames":10,"content":{"media":{"media_id":1}},"volume":1.0,"muted":false}"#;
+        let clip: Clip = serde_json::from_str(json).unwrap();
+        assert!(clip.transform.is_identity());
+        assert!(!serde_json::to_string(&clip).unwrap().contains("transform"));
+        for invalid in [
+            Transform {
+                scale: f32::NAN,
+                ..Default::default()
+            },
+            Transform {
+                crop_left: 0.5,
+                crop_right: 0.5,
+                ..Default::default()
+            },
+            Transform {
+                opacity: 1.1,
+                ..Default::default()
+            },
+        ] {
+            assert!(!invalid.valid());
+        }
     }
 }

@@ -36,6 +36,7 @@ fn thumbnail_in(root: Option<&Path>, path: &Path) -> Result<Thumbnail, String> {
     let image = super::thumbnail(path)?;
     if let (Some(root), Some(entry)) = (root, entry) {
         let frames = [FrameImage {
+            picture: (0, 0, image.width, image.height),
             width: image.width,
             height: image.height,
             pixels: image.pixels.clone(),
@@ -88,6 +89,9 @@ fn storyboard_selected(
     params.extend(request.fps.1.to_le_bytes());
     for channel in request.color_bits {
         params.extend(channel.to_le_bytes());
+    }
+    for value in request.transform_bits {
+        params.extend(value.to_le_bytes());
     }
     let entry = root.and_then(|root| {
         if let Some(lut) = &request.lut {
@@ -169,6 +173,7 @@ fn read(path: &Path, expected: usize) -> Option<Vec<FrameImage>> {
             let pixels = data.get(..size)?.to_vec();
             data = &data[size..];
             frames.push(FrameImage {
+                picture: (0, 0, width, height),
                 width,
                 height,
                 pixels,
@@ -273,6 +278,7 @@ mod tests {
                 .success()
         );
         StoryboardKey {
+            transform_bits: StoryboardKey::transform_bits(crate::timeline::Transform::default()),
             lut: None,
             color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
             playback: crate::timeline::Playback::Forward,
@@ -378,6 +384,21 @@ mod tests {
         let after = storyboard_in(Some(&root), &request, cancel(false)).unwrap();
         assert_ne!(before[0].pixels, after[0].pixels);
         assert_eq!(fs::read_dir(root.join("frames")).unwrap().count(), 7);
+        request.transform_bits = StoryboardKey::transform_bits(crate::timeline::Transform {
+            opacity: 0.0,
+            ..Default::default()
+        });
+        let hidden = storyboard_in(Some(&root), &request, cancel(false)).unwrap();
+        assert_ne!(after[0].pixels, hidden[0].pixels);
+        assert!(hidden.iter().all(|image| {
+            image
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == [0, 0, 0, 255])
+        }));
+        assert_eq!(fs::read_dir(root.join("frames")).unwrap().count(), 8);
         fs::remove_file(&lut).unwrap();
         assert!(storyboard_in(Some(&root), &request, cancel(false)).is_err());
     }
@@ -403,6 +424,7 @@ mod tests {
 
     fn pixel() -> Vec<FrameImage> {
         vec![FrameImage {
+            picture: (0, 0, 1, 1),
             width: 1,
             height: 1,
             pixels: vec![1, 2, 3, 4],

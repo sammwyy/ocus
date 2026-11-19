@@ -903,6 +903,7 @@ fn stereo_samples(frame: &ffmpeg::frame::Audio, channels: u16) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::timeline::Transform;
     use std::fs;
 
     fn mixed_project() -> Project {
@@ -1628,7 +1629,10 @@ mod tests {
                         cancelled.store(true, Ordering::Relaxed);
                     }
                 }
-                None if queue.is_done() => break,
+                None if queue.is_done() => {
+                    heard.extend(std::iter::from_fn(|| queue.pop()));
+                    break;
+                }
                 None => std::thread::yield_now(),
             }
         }
@@ -1882,6 +1886,7 @@ mod tests {
                 linked_audio: false,
                 color: Default::default(),
                 lut: None,
+                transform: Transform::default(),
             },
         }));
         let dry_plan = Arc::new(AudioPlan::from_project(editor.project()));

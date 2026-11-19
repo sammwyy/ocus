@@ -189,7 +189,9 @@ use exact interpolation to avoid floating-point cancellation errors. Relative
 LUT paths resolve beside the project file, like media paths. Caches live only
 as long as the compositor or storyboard worker. Alpha is unchanged. Clip
 filmstrips and Inspector thumbnails follow playback mapping and use the same
-color-then-LUT order. Their cache keys include color settings and LUT paths;
+color-then-LUT order, followed by the shared scale, position, rotation, crop,
+and opacity transform over black. Their cache keys include transform and color
+settings and LUT paths;
 disk cache keys also include LUT file metadata. Media-bin thumbnails and source
 preview remain ungraded.
 

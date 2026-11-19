@@ -23,8 +23,8 @@ use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, Vide
 use crate::project::{Command, Project};
 use crate::settings::ThemeMode;
 use crate::timeline::{
-    Clip, ClipContent, ColorAdjust, Playback, SlideDirection, Title, Track, TrackKind, Transition,
-    TransitionKind,
+    Clip, ClipContent, ColorAdjust, Playback, SlideDirection, Title, Track, TrackKind, Transform,
+    Transition, TransitionKind,
 };
 use creamui::core::layout::{Dimension, Style};
 use creamui::core::{Painter, Point, Rect, TextAlign, Widget};
@@ -601,6 +601,189 @@ fn set_clip_audio(state: &UiState, change: impl FnOnce(&Clip) -> (f32, bool)) {
     }
 }
 
+fn set_clip_transform(state: &UiState, change: impl FnOnce(&mut Transform)) {
+    if let Some((track_id, clip)) = selected_clip(state) {
+        let mut transform = clip.transform;
+        change(&mut transform);
+        if state.edit(Command::SetClipTransform {
+            track_id,
+            clip_id: clip.id,
+            transform,
+        }) {
+            state.request_preview();
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TransformField {
+    label: &'static str,
+    accessor: fn(&mut Transform) -> &mut f32,
+    min: f32,
+    max: f32,
+    step: f32,
+    display_unit: &'static str,
+    display_scale: f32,
+    decrease_help: &'static str,
+    increase_help: &'static str,
+}
+
+fn transform_rows(state: &UiState, transform: Transform, inner: f32) -> Vec<BoxedWidget> {
+    let fields = [
+        TransformField {
+            label: "Scale",
+            accessor: |transform| &mut transform.scale,
+            min: 0.1,
+            max: 4.0,
+            step: 0.05,
+            display_unit: "%",
+            display_scale: 100.0,
+            decrease_help: "Decrease scale",
+            increase_help: "Increase scale",
+        },
+        TransformField {
+            label: "Position X",
+            accessor: |transform| &mut transform.x,
+            min: -1.0,
+            max: 1.0,
+            step: 0.01,
+            display_unit: "%",
+            display_scale: 100.0,
+            decrease_help: "Move picture left",
+            increase_help: "Move picture right",
+        },
+        TransformField {
+            label: "Position Y",
+            accessor: |transform| &mut transform.y,
+            min: -1.0,
+            max: 1.0,
+            step: 0.01,
+            display_unit: "%",
+            display_scale: 100.0,
+            decrease_help: "Move picture up",
+            increase_help: "Move picture down",
+        },
+        TransformField {
+            label: "Rotation",
+            accessor: |transform| &mut transform.rotation,
+            min: -360.0,
+            max: 360.0,
+            step: 5.0,
+            display_unit: "°",
+            display_scale: 1.0,
+            decrease_help: "Rotate counterclockwise",
+            increase_help: "Rotate clockwise",
+        },
+        TransformField {
+            label: "Crop left",
+            accessor: |transform| &mut transform.crop_left,
+            min: 0.0,
+            max: (0.99 - transform.crop_right).max(0.0),
+            step: 0.01,
+            display_unit: "%",
+            display_scale: 100.0,
+            decrease_help: "Decrease left crop",
+            increase_help: "Increase left crop",
+        },
+        TransformField {
+            label: "Crop top",
+            accessor: |transform| &mut transform.crop_top,
+            min: 0.0,
+            max: (0.99 - transform.crop_bottom).max(0.0),
+            step: 0.01,
+            display_unit: "%",
+            display_scale: 100.0,
+            decrease_help: "Decrease top crop",
+            increase_help: "Increase top crop",
+        },
+        TransformField {
+            label: "Crop right",
+            accessor: |transform| &mut transform.crop_right,
+            min: 0.0,
+            max: (0.99 - transform.crop_left).max(0.0),
+            step: 0.01,
+            display_unit: "%",
+            display_scale: 100.0,
+            decrease_help: "Decrease right crop",
+            increase_help: "Increase right crop",
+        },
+        TransformField {
+            label: "Crop bottom",
+            accessor: |transform| &mut transform.crop_bottom,
+            min: 0.0,
+            max: (0.99 - transform.crop_top).max(0.0),
+            step: 0.01,
+            display_unit: "%",
+            display_scale: 100.0,
+            decrease_help: "Decrease bottom crop",
+            increase_help: "Increase bottom crop",
+        },
+        TransformField {
+            label: "Opacity",
+            accessor: |transform| &mut transform.opacity,
+            min: 0.0,
+            max: 1.0,
+            step: 0.05,
+            display_unit: "%",
+            display_scale: 100.0,
+            decrease_help: "Decrease opacity",
+            increase_help: "Increase opacity",
+        },
+    ];
+    let mut rows = Vec::new();
+    for field in fields {
+        let mut current = transform;
+        let value = *(field.accessor)(&mut current);
+        let mut row = Flex::row()
+            .gap(4.0)
+            .align(Align::Center)
+            .child(Box::new(
+                Flex::row().width((inner - 112.0).max(60.0)).child(text(
+                    field.label,
+                    muted(),
+                    11.0,
+                )),
+            ))
+            .child(Box::new(Flex::row().width(44.0).child(text(
+                format!("{:.0}{}", value * field.display_scale, field.display_unit),
+                text_color(),
+                11.0,
+            ))));
+        for (glyph, direction, help) in [
+            (Glyph::Minus, -1.0, field.decrease_help),
+            (Glyph::Plus, 1.0, field.increase_help),
+        ] {
+            row = row.child(sized_icon_button(
+                glyph,
+                Help::new(help),
+                24.0,
+                if direction < 0.0 {
+                    value > field.min
+                } else {
+                    value < field.max
+                },
+                false,
+                state,
+                move |state| {
+                    set_clip_transform(state, |transform| {
+                        let value = (field.accessor)(transform);
+                        *value = (((*value + direction * field.step) * 1000.0).round() / 1000.0)
+                            .clamp(field.min, field.max);
+                    });
+                },
+            ));
+        }
+        rows.push(Box::new(row) as BoxedWidget);
+    }
+    rows.push(inline(secondary_button(
+        None,
+        "Reset transform",
+        !transform.is_identity(),
+        state,
+        |state| set_clip_transform(state, |transform| *transform = Transform::default()),
+    )));
+    rows
+}
 fn set_clip_color(state: &UiState, change: impl FnOnce(&mut ColorAdjust)) {
     if let Some((track_id, clip)) = selected_clip(state) {
         let mut color = clip.color;
@@ -734,7 +917,6 @@ fn color_control(
     }
     Box::new(row)
 }
-
 fn change_clip_fade(state: &UiState, incoming: bool, increase: bool) {
     if let Some((track_id, clip)) = selected_clip(state) {
         let fps = state.frame_rate();
@@ -2394,6 +2576,12 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 ],
             ));
         }
+        if track_kind == TrackKind::Video && matches!(clip.content, ClipContent::Media { .. }) {
+            rows.push(section(
+                "Transform",
+                transform_rows(state, clip.transform, inner),
+            ));
+        }
         if track_kind == TrackKind::Video
             && media.is_some_and(|media| media.kind != MediaKind::Audio)
         {
@@ -3302,6 +3490,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     waveform: WaveformSlice {
                         peaks,
                         clip: Clip {
+                            transform: crate::timeline::Transform::default(),
                             noise_reduction: false,
                             lut: None,
                             transition_out: None,
@@ -5205,6 +5394,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            transform: Transform::default(),
         }
     }
 
@@ -5368,6 +5558,18 @@ mod tests {
         let bin_image = Arc::new(RgbaImage::new(1, 1, vec![0, 0, 0, 255]).unwrap());
         let lut = dir.path().join("invert.cube");
         std::fs::write(&lut, "LUT_1D_SIZE 2\n1 1 1\n0 0 0\n").unwrap();
+        assert!(state.edit(Command::SetClipTransform {
+            track_id: target.0,
+            clip_id: target.1,
+            transform: Transform {
+                scale: 0.8,
+                rotation: 15.0,
+                x: 0.1,
+                opacity: 0.7,
+                crop_left: 0.1,
+                ..Default::default()
+            }
+        }));
         assert!(state.edit(Command::SetClipColor {
             track_id: target.0,
             clip_id: target.1,
@@ -5434,7 +5636,7 @@ mod tests {
                     inspector(&state, editor.project(), 300.0, false),
                     Size {
                         width: 300.0,
-                        height: 1000.0,
+                        height: 2000.0,
                     },
                     &mut inspector_painter,
                 );
@@ -5483,6 +5685,7 @@ mod tests {
         let mut clip = selected_clip(&state).unwrap().1;
         clip.playback = Playback::Forward;
         clip.source_start_frame = 0;
+        clip.transform = Transform::default();
         clip.color = Default::default();
         clip.lut = None;
         assert_eq!(
@@ -5492,6 +5695,9 @@ mod tests {
         clip.color.brightness = 0.1;
         assert!(state.clip_thumbnail(&clip, &media, (30, 1)).is_none());
         clip.color = Default::default();
+        clip.transform.opacity = 0.5;
+        assert!(state.clip_thumbnail(&clip, &media, (30, 1)).is_none());
+        clip.transform = Transform::default();
         clip.lut = Some(lut);
         assert!(state.clip_thumbnail(&clip, &media, (30, 1)).is_none());
         clip.duration_frames = 0;
@@ -5602,7 +5808,7 @@ mod tests {
         let id = clip.id;
         assert!(state.edit(Command::InsertClip { track_id: 0, clip }));
         state.select_clip(Some((0, id)));
-        let painter = render(&state, 1280.0, 1600.0);
+        let painter = render(&state, 1280.0, 2600.0);
         for label in [
             "COLOR",
             "Brightness",
@@ -5618,7 +5824,7 @@ mod tests {
             color.contrast = 1.3;
             color.saturation = 0.0;
         });
-        let painter = render(&state, 1280.0, 1600.0);
+        let painter = render(&state, 1280.0, 2600.0);
         for label in ["+20", "130%", "0%"] {
             assert!(painter.labels.iter().any(|text| text == label), "{label}");
         }
@@ -5834,6 +6040,7 @@ mod tests {
             .next()
             .unwrap();
         let key = StoryboardKey {
+            transform_bits: StoryboardKey::transform_bits(crate::timeline::Transform::default()),
             lut: None,
             color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
             playback: Playback::Forward,
@@ -7338,6 +7545,148 @@ mod tests {
     }
 
     #[test]
+    fn transform_inspector_is_media_only_and_fits() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "image.png".into(),
+            kind: MediaKind::Image,
+            duration_us: None,
+            has_audio: false
+        })));
+        assert!(state.edit(Command::InsertClip {
+            track_id: 0,
+            clip: Clip {
+                playback: crate::timeline::Playback::Forward,
+                noise_reduction: false,
+                lut: None,
+                transition_out: None,
+                id: 1,
+                start_frame: 0,
+                source_start_frame: 0,
+                duration_frames: 30,
+                content: ClipContent::Media { media_id: 1 },
+                volume: 1.0,
+                muted: false,
+                transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
+                linked_audio: false,
+                color: Default::default(),
+                transform: Default::default()
+            }
+        }));
+        state.select_clip(Some((0, 1)));
+        for width in [220.0, 280.0, 340.0] {
+            creamui::reactive::with_context_scope(|| {
+                creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
+                    creamui::Theme::dark(),
+                ));
+                let project = state.editor.borrow();
+                let mut painter = TestPainter::default();
+                Renderer::new().render(
+                    inspector(&state, project.project(), width, false),
+                    Size {
+                        width,
+                        height: 1600.0,
+                    },
+                    &mut painter,
+                );
+                assert!(painter.labels.iter().any(|l| l == "TRANSFORM"));
+                for (label, rect) in &painter.bounds {
+                    if [
+                        "Scale",
+                        "Position X",
+                        "Position Y",
+                        "Rotation",
+                        "Crop left",
+                        "Crop top",
+                        "Crop right",
+                        "Crop bottom",
+                        "Opacity",
+                    ]
+                    .contains(&label.as_str())
+                    {
+                        assert!(
+                            rect.x >= 0.0 && rect.x + rect.width <= width,
+                            "{label}: {rect:?}"
+                        );
+                    }
+                }
+            });
+        }
+        set_clip_transform(&state, |transform| transform.scale = 0.5);
+        assert_eq!(selected_clip(&state).unwrap().1.transform.scale, 0.5);
+        state.run(Action::Undo);
+        assert!(selected_clip(&state).unwrap().1.transform.is_identity());
+        state.run(Action::AddTitle);
+        assert!(
+            !render(&state, 1280.0, 1000.0)
+                .labels
+                .iter()
+                .any(|l| l == "TRANSFORM")
+        );
+        let title = selected_clip(&state).unwrap();
+        assert!(!state.edit(Command::SetClipTransform {
+            track_id: title.0,
+            clip_id: title.1.id,
+            transform: Transform {
+                scale: 0.5,
+                ..Default::default()
+            }
+        }));
+        for (id, kind, track_id) in [(2, MediaKind::Video, 1), (3, MediaKind::Audio, 2)] {
+            assert!(state.edit(Command::ImportMedia(Media {
+                id,
+                path: format!("source-{id}.mp4").into(),
+                kind,
+                duration_us: Some(1_000_000),
+                has_audio: true
+            })));
+            assert!(state.edit(Command::InsertClip {
+                track_id,
+                clip: Clip {
+                    playback: crate::timeline::Playback::Forward,
+                    id: id + 100,
+                    noise_reduction: false,
+                    lut: None,
+                    transition_out: None,
+                    start_frame: 400,
+                    source_start_frame: 0,
+                    duration_frames: 30,
+                    content: ClipContent::Media { media_id: id },
+                    volume: 1.0,
+                    muted: false,
+                    transition: None,
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
+                    linked_audio: false,
+                    color: Default::default(),
+                    transform: Default::default()
+                }
+            }));
+            state.select_clip(Some((track_id, id + 100)));
+            assert_eq!(
+                render(&state, 1280.0, 1600.0)
+                    .labels
+                    .iter()
+                    .any(|l| l == "TRANSFORM"),
+                kind == MediaKind::Video
+            );
+            if kind == MediaKind::Audio {
+                assert!(!state.edit(Command::SetClipTransform {
+                    track_id,
+                    clip_id: id + 100,
+                    transform: Transform {
+                        scale: 0.5,
+                        ..Default::default()
+                    }
+                }));
+            }
+        }
+    }
+
+    #[test]
     fn out_transition_controls_keep_independent_undo_bounds_and_direction() {
         use crate::timeline::SlideDirection;
         let state = UiState::new();
@@ -7686,6 +8035,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                transform: Transform::default(),
             }
         }));
         state.select_clip(Some((0, 1)));

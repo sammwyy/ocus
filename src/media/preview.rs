@@ -1,7 +1,7 @@
 use super::MediaKind;
 use super::audio::Clock;
-use super::composite::{Compositor, VisualPlan, adjust_color, apply_lut};
-use crate::timeline::{ColorAdjust, Playback};
+use super::composite::{Compositor, VisualPlan, adjust_color, apply_lut, draw_transformed};
+use crate::timeline::{ColorAdjust, Playback, Transform};
 use ffmpeg_next as ffmpeg;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,6 +20,7 @@ pub struct FrameSource {
     pub start: u64,
     pub source_start: u64,
     pub duration: u64,
+    pub transform: Transform,
 }
 
 impl FrameSource {
@@ -34,6 +35,7 @@ impl FrameSource {
 
 #[derive(Clone)]
 pub struct FrameImage {
+    pub picture: (u32, u32, u32, u32),
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
@@ -41,6 +43,7 @@ pub struct FrameImage {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct StoryboardKey {
+    pub transform_bits: [u32; 9],
     pub color_bits: [u32; 3],
     pub lut: Option<PathBuf>,
     pub playback: crate::timeline::Playback,
@@ -49,6 +52,48 @@ pub struct StoryboardKey {
     pub source_start: u64,
     pub duration: u64,
     pub fps: (u32, u32),
+}
+
+impl StoryboardKey {
+    pub fn transform_bits(transform: Transform) -> [u32; 9] {
+        [
+            transform.scale,
+            transform.x,
+            transform.y,
+            transform.rotation,
+            transform.crop_left,
+            transform.crop_top,
+            transform.crop_right,
+            transform.crop_bottom,
+            transform.opacity,
+        ]
+        .map(f32::to_bits)
+    }
+
+    fn transform(&self) -> Transform {
+        let [
+            scale,
+            x,
+            y,
+            rotation,
+            crop_left,
+            crop_top,
+            crop_right,
+            crop_bottom,
+            opacity,
+        ] = self.transform_bits.map(f32::from_bits);
+        Transform {
+            scale,
+            x,
+            y,
+            rotation,
+            crop_left,
+            crop_top,
+            crop_right,
+            crop_bottom,
+            opacity,
+        }
+    }
 }
 
 pub fn storyboard(
@@ -80,6 +125,7 @@ pub fn storyboard(
         start: 0,
         source_start: key.source_start,
         duration: key.duration,
+        transform: key.transform(),
     };
     let mut frames = Vec::new();
     let mut luts = HashMap::new();
@@ -107,6 +153,21 @@ pub fn storyboard(
         };
         let image = apply_lut(&mut luts, &source, adjust_color(image, source.color))?;
         let mut image = Arc::unwrap_or_clone(image);
+        if !source.transform.is_identity() {
+            let mut pixels = vec![0; image.pixels.len()];
+            for pixel in pixels.as_chunks_mut::<4>().0 {
+                pixel[3] = 255;
+            }
+            draw_transformed(
+                &mut pixels,
+                image.width,
+                image.height,
+                &image,
+                source.transform,
+            );
+            image.pixels = pixels;
+            image.picture = (0, 0, image.width, image.height);
+        }
         for pixel in image.pixels.as_chunks_mut::<4>().0 {
             for channel in 0..3 {
                 pixel[channel] =
@@ -172,6 +233,7 @@ impl VideoLayers {
         }
         self.retain(&active);
         Ok((!active.is_empty()).then_some(FrameImage {
+            picture: (0, 0, self.output.0, self.output.1),
             width: self.output.0,
             height: self.output.1,
             pixels,
@@ -554,6 +616,7 @@ impl FrameReader {
                 .copy_from_slice(&scaled.pixels[start..start + row_size]);
         }
         let image = Arc::new(FrameImage {
+            picture: (left as u32, top as u32, scaled.width, scaled.height),
             width: self.output.0,
             height: self.output.1,
             pixels,
@@ -636,6 +699,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration,
+            transform: Transform::default(),
         }
     }
 
@@ -949,6 +1013,7 @@ mod tests {
                 path.clone()
             };
             let mut source = FrameSource {
+                transform: crate::timeline::Transform::default(),
                 lut: None,
                 color: Default::default(),
                 playback: Playback::Forward,
@@ -1003,6 +1068,7 @@ mod tests {
             assert_eq!(freeze.readers[&1].decoded_frames, decoded);
             assert!(freeze.layer_at(&source, 80, &cancelled).is_err());
             let key = StoryboardKey {
+                transform_bits: StoryboardKey::transform_bits(crate::timeline::Transform::default()),
                 lut: None,
                 color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
                 playback: Playback::Freeze,
@@ -1054,6 +1120,7 @@ mod tests {
                 .success()
         );
         let mut source = FrameSource {
+            transform: crate::timeline::Transform::default(),
             lut: None,
             color: Default::default(),
             playback: Playback::Forward,
@@ -1147,6 +1214,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 30,
+                transform: Transform::default(),
             };
             let cancelled = Arc::new(AtomicBool::new(false));
             let frame = FrameReader::open(&source, 0, (30, 1), (64, 64), cancelled.clone())
@@ -1186,6 +1254,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 1800,
+                transform: Transform::default(),
             };
             for target in [0, 300, 901, 1500, 1790] {
                 let mut runs = Vec::new();
@@ -1236,6 +1305,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 300,
+            transform: Transform::default(),
         };
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut reader =
@@ -1281,6 +1351,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: frames,
+                transform: Transform::default(),
             };
             let cancelled = Arc::new(AtomicBool::new(false));
             let mut reader =
@@ -1343,6 +1414,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 1,
+            transform: Transform::default(),
         };
         let cancelled = Arc::new(AtomicBool::new(false));
         let image = FrameReader::open(&source, 0, (1, 1), (1280, 720), cancelled.clone())
@@ -1416,6 +1488,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 1,
+                transform: Transform::default(),
             };
             let cancelled = Arc::new(AtomicBool::new(false));
             let image = FrameReader::open(&source, 0, (1, 1), output, cancelled.clone())
@@ -1475,6 +1548,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 1,
+                transform: Transform::default(),
             };
             let cancelled = Arc::new(AtomicBool::new(false));
             let image = VideoLayers::new((30, 1), output)
@@ -1564,6 +1638,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 120,
+            transform: Transform::default(),
         };
         let mut reader =
             FrameReader::open(&source, 0, (30, 1), (32, 32), cancelled.clone()).unwrap();
@@ -1600,6 +1675,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 6,
+            transform: Transform::default(),
         }];
         let plan = PreviewPlan {
             use_proxies: false,
@@ -1670,21 +1746,25 @@ mod tests {
                 .last()
                 .is_some_and(|frame| frame.0 == 5 && frame.1 > 140)
         );
-        let storyboard_frames = storyboard(
-            &StoryboardKey {
-                lut: None,
-                color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
-                playback: crate::timeline::Playback::Forward,
-                path: path.clone(),
-                kind: MediaKind::Video,
-                source_start: 2,
-                duration: 3,
-                fps: (30, 1),
-            },
-            Arc::new(AtomicBool::new(false)),
-            false,
-        )
-        .unwrap();
+        let storyboard_frames =
+            storyboard(
+                &StoryboardKey {
+                    transform_bits: StoryboardKey::transform_bits(
+                        crate::timeline::Transform::default(),
+                    ),
+                    lut: None,
+                    color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
+                    playback: crate::timeline::Playback::Forward,
+                    path: path.clone(),
+                    kind: MediaKind::Video,
+                    source_start: 2,
+                    duration: 3,
+                    fps: (30, 1),
+                },
+                Arc::new(AtomicBool::new(false)),
+                false,
+            )
+            .unwrap();
         assert_eq!(storyboard_frames.len(), 3);
         let center = (45 * 160 + 80) * 4;
         assert!(storyboard_frames[0].pixels[center] < 120);
@@ -1701,6 +1781,7 @@ mod tests {
                 start: 3,
                 source_start: 2,
                 duration: 2,
+                transform: Transform::default(),
             }],
             visual: None,
             end: 5,

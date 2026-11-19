@@ -860,6 +860,7 @@ mod tests {
     use super::{ExportControl, render_with_settings};
     use crate::media::{Media, MediaKind};
     use crate::project::{Command, Editor, Project, format};
+    use crate::timeline::Transform;
     use crate::timeline::{Clip, ClipContent, Title, Track, TrackKind};
     use ffmpeg_next as ffmpeg;
     use std::fs;
@@ -920,6 +921,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                transform: crate::timeline::Transform::default(),
                 noise_reduction: false,
                 lut: None,
                 transition_out: None,
@@ -948,6 +950,21 @@ mod tests {
         for graded in [false, true] {
             let mut editor = Editor::new(original.clone());
             if graded {
+                assert!(editor.apply(Command::SetClipTransform {
+                    track_id: 0,
+                    clip_id: 1,
+                    transform: Transform {
+                        scale: 0.8,
+                        x: 0.1,
+                        y: -0.1,
+                        rotation: 15.0,
+                        crop_left: 0.1,
+                        crop_top: 0.1,
+                        crop_right: 0.1,
+                        crop_bottom: 0.1,
+                        opacity: 0.7
+                    }
+                }));
                 assert!(editor.apply(Command::SetClipColor {
                     track_id: 0,
                     clip_id: 1,
@@ -1127,7 +1144,9 @@ mod tests {
                 transition: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
+                transform: Transform::default(),
             }
         }));
         let target = directory.path().join("export.mp4");
@@ -1227,6 +1246,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                transform: Transform::default(),
             }
         }));
         let target = dir.join("export.mp4");
@@ -1384,6 +1404,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                transform: Transform::default(),
             },
         }));
         let control = Arc::new(ExportControl::default());
@@ -1461,6 +1482,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                transform: Transform::default(),
             },
         }));
         let progress = std::sync::Arc::new(super::ExportControl::default());
@@ -1584,6 +1606,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                transform: Transform::default(),
             },
         }));
         let with_audio = dir.join("audio.mp4");
@@ -1656,6 +1679,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            transform: Transform::default(),
         }];
         layered[1].clips = vec![Clip {
             playback: crate::timeline::Playback::Forward,
@@ -1674,6 +1698,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            transform: Transform::default(),
         }];
         layered.push(Track {
             id: 4,
@@ -1704,6 +1729,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                transform: Transform::default(),
             }],
         });
         assert!(editor.apply(Command::ReplaceTracks(layered)));
@@ -1817,6 +1843,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                transform: Transform::default(),
             },
         }));
         super::render(editor.project(), &target).unwrap();
@@ -1905,6 +1932,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                transform: Transform::default(),
             },
         }));
         super::render(editor.project(), &target).unwrap();
@@ -2073,6 +2101,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                transform: Transform::default(),
             },
         }));
         let mut settings = ExportSettings::for_project(
@@ -2202,6 +2231,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                transform: Transform::default(),
             },
         }));
         let mut settings = ExportSettings::for_project(

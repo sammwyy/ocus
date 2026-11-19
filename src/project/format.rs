@@ -53,7 +53,7 @@ pub fn to_json(project: &Project) -> Result<String, serde_json::Error> {
 mod tests {
     use super::*;
     use crate::media::{Media, MediaKind};
-    use crate::timeline::{Clip, ClipContent, Title};
+    use crate::timeline::{Clip, ClipContent, Title, Transform};
     use std::path::PathBuf;
 
     #[test]
@@ -207,6 +207,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            transform: Transform::default(),
         }]);
         fixture["tracks"][1]["clips"] = serde_json::json!([Clip {
             playback: crate::timeline::Playback::Forward,
@@ -237,6 +238,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            transform: Transform::default(),
         }]);
         let project = from_json(&fixture.to_string()).unwrap();
         assert_eq!(from_json(&to_json(&project).unwrap()).unwrap(), project);
@@ -333,6 +335,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            transform: Transform::default(),
         })
         .unwrap();
         for field in ["bold", "italic", "outline", "parse_html", "parse_markdown"] {
@@ -423,12 +426,32 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            transform: Transform::default(),
         };
         document["tracks"][0]["clips"] = serde_json::json!([clip.clone()]);
         document["tracks"][2]["clips"] = serde_json::json!([Clip { id: 10, ..clip }]);
         let project = from_json(&document.to_string()).unwrap();
         assert_eq!(from_json(&to_json(&project).unwrap()).unwrap(), project);
         assert!(!to_json(&project).unwrap().contains("linked_audio"));
+        assert!(!to_json(&project).unwrap().contains("transform"));
+        document["tracks"][0]["clips"][0]["transform"] = serde_json::json!(Transform {
+            scale: 0.5,
+            rotation: 90.0,
+            crop_left: 0.1,
+            opacity: 0.5,
+            ..Default::default()
+        });
+        let transformed = from_json(&document.to_string()).unwrap();
+        assert_eq!(
+            from_json(&to_json(&transformed).unwrap()).unwrap(),
+            transformed
+        );
+        document["tracks"][0]["clips"][0]["transform"]["opacity"] = serde_json::json!(2.0);
+        assert!(from_json(&document.to_string()).is_err());
+        document["tracks"][0]["clips"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("transform");
 
         document["tracks"][2]["clips"] = serde_json::json!([]);
         document["tracks"][0]["clips"][0]["linked_audio"] = serde_json::json!(true);

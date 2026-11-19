@@ -2525,7 +2525,32 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             .map(media_name),
         (None, None) => None,
     };
+    let missing_source = primary
+        .and_then(|_| selected_clip(state))
+        .and_then(|(_, clip)| match clip.content {
+            ClipContent::Media { media_id } => Some(media_id),
+            ClipContent::Title(_) => None,
+        })
+        .or_else(|| primary.is_none().then_some(selected_media).flatten())
+        .filter(|id| missing.contains(id))
+        .and_then(|id| project.media().iter().find(|media| media.id == id));
     let source_stage: BoxedWidget = match (&range, &selected_title) {
+        _ if missing_source.is_some() => {
+            let media = missing_source.unwrap();
+            let id = media.id;
+            stage_message(
+                Glyph::Film,
+                "Missing source",
+                &format!("{} is missing.", media_name(media)),
+                Some(accent_button(
+                    Some(Glyph::Locate),
+                    "Relink media…",
+                    !busy,
+                    state,
+                    move |s| s.relink_dialog(Some(id)),
+                )),
+            )
+        }
         (Some(range), _) if range.kind == MediaKind::Audio => stage_message(
             Glyph::Music,
             "Audio source",
@@ -4143,6 +4168,44 @@ mod tests {
                 .any(|label| label == "No clip at this frame")
         );
         assert!(!painter.labels.iter().any(|label| label == "Audio only"));
+    }
+
+    #[test]
+    fn source_monitor_explains_missing_bin_and_clip_sources() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/tmp/lost.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: false,
+        })));
+        state.missing_media.set(HashSet::from([1]));
+        state.select_media(1);
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(
+            painter
+                .labels
+                .iter()
+                .any(|label| label == "lost.mp4 is missing.")
+        );
+        assert!(painter.labels.iter().any(|label| label == "Relink media…"));
+        assert!(
+            !painter
+                .labels
+                .iter()
+                .any(|label| label == "No source selected")
+        );
+        state.missing_media.set(HashSet::new());
+        state.insert_media(1);
+        state.missing_media.set(HashSet::from([1]));
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(
+            painter
+                .labels
+                .iter()
+                .any(|label| label == "lost.mp4 is missing.")
+        );
     }
 
     #[test]

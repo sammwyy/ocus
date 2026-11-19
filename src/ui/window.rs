@@ -2775,6 +2775,11 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
     );
 
     let lanes = timeline_lanes(state, project, fps);
+    for lane in &lanes {
+        for help in lane.toggle_help() {
+            help.register(state);
+        }
+    }
     let zoom = state.timeline_zoom.get();
     let span = state.visible_frames();
     let selected = !selection.is_empty();
@@ -4539,6 +4544,58 @@ mod tests {
             assert!(painter.labels.iter().any(|label| label == "Undo"));
             assert!(scene.hit_test(point).is_none());
         });
+    }
+
+    #[test]
+    fn track_toggle_hover_help_survives_window_rebuilds() {
+        for (width, height) in [(1280.0, 760.0), (2560.0, 1856.0)] {
+            let state = UiState::new();
+            for (track_id, hidden, locked, label) in [
+                (0, false, false, "Lock track"),
+                (0, false, true, "Unlock track"),
+                (0, false, false, "Hide track"),
+                (0, true, false, "Show track"),
+                (2, false, false, "Mute track"),
+                (2, true, false, "Unmute track"),
+            ] {
+                state.edit(Command::SetTrackHidden { track_id, hidden });
+                state.edit(Command::SetTrackLocked { track_id, locked });
+                render(&state, width, height);
+                let help = state.tooltip_controller((label, track_id));
+                creamui::reactive::with_context_scope(|| {
+                    creamui::reactive::provide_context(creamui::ThemeProvider::new(
+                        creamui::Theme::dark(),
+                    ));
+                    let viewport = Size { width, height };
+                    let mut painter = TestPainter::default();
+                    let scene =
+                        Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+                    let caption = if track_id == 0 { "V1" } else { "A1" };
+                    let header = painter
+                        .bounds
+                        .iter()
+                        .find(|(text, _)| text == caption)
+                        .unwrap()
+                        .1;
+                    let point = Point {
+                        x: state.timeline_rect.get().x
+                            + if matches!(label, "Lock track" | "Unlock track") {
+                                111.0
+                            } else {
+                                137.0
+                            },
+                        y: header.y + 9.0,
+                    };
+                    scene.hover_hit_test(point).unwrap().1(true);
+                });
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                render(&state, width, height);
+                let painter = render(&state, width, height);
+                assert!(help.visible(), "{label} at {width}×{height}");
+                assert!(painter.labels.iter().any(|text| text == label));
+                help.hover(false);
+            }
+        }
     }
 
     #[test]

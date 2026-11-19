@@ -651,6 +651,10 @@ impl Help {
         self.instance = instance;
         self
     }
+
+    pub fn register(&self, state: &UiState) {
+        state.tooltip_controller((self.label, self.instance));
+    }
 }
 
 fn with_help(widget: BoxedWidget, help: Help, state: &UiState) -> BoxedWidget {

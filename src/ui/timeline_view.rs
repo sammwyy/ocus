@@ -93,6 +93,24 @@ pub(super) struct Lane {
 }
 
 impl Lane {
+    pub(super) fn toggle_help(&self) -> [Help; 2] {
+        [
+            Help::new(if self.locked {
+                "Unlock track"
+            } else {
+                "Lock track"
+            })
+            .instance(self.track_id),
+            Help::new(match (self.kind, self.hidden) {
+                (TrackKind::Audio, true) => "Unmute track",
+                (TrackKind::Audio, false) => "Mute track",
+                (TrackKind::Video, true) => "Show track",
+                (TrackKind::Video, false) => "Hide track",
+            })
+            .instance(self.track_id),
+        ]
+    }
+
     fn linked(&self) -> bool {
         self.clips.iter().any(|clip| clip.linked_audio)
     }
@@ -1193,9 +1211,10 @@ impl Widget for TimelineView {
             let locked = lane.locked;
             let hidden = lane.hidden;
             let audio = lane.kind == TrackKind::Audio;
+            let [lock_help, visibility_help] = lane.toggle_help();
             let lock = sized_icon_button(
                 Glyph::Lock,
-                Help::new(if locked { "Unlock track" } else { "Lock track" }).instance(id),
+                lock_help,
                 22.0,
                 true,
                 locked,
@@ -1215,13 +1234,7 @@ impl Widget for TimelineView {
                 } else {
                     Glyph::Eye
                 },
-                Help::new(match (audio, hidden) {
-                    (true, true) => "Unmute track",
-                    (true, false) => "Mute track",
-                    (false, true) => "Show track",
-                    (false, false) => "Hide track",
-                })
-                .instance(id),
+                visibility_help,
                 22.0,
                 true,
                 hidden,

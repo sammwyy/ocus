@@ -128,6 +128,7 @@ mod tests {
     use super::*;
     use crate::project::export_settings::{ExportSettings, LastExport};
     use crate::project::{Command, Editor};
+    use crate::timeline::Transform;
     use crate::timeline::{Clip, ClipContent, Title};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -349,6 +350,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                transform: Transform::default(),
             },
         }));
         let last_export = LastExport {

@@ -36,6 +36,7 @@ fn thumbnail_in(root: Option<&Path>, path: &Path) -> Result<Thumbnail, String> {
     let image = super::thumbnail(path)?;
     if let (Some(root), Some(entry)) = (root, entry) {
         let frames = [FrameImage {
+            picture: (0, 0, image.width, image.height),
             width: image.width,
             height: image.height,
             pixels: image.pixels.clone(),
@@ -158,6 +159,7 @@ fn read(path: &Path, expected: usize) -> Option<Vec<FrameImage>> {
             let pixels = data.get(..size)?.to_vec();
             data = &data[size..];
             frames.push(FrameImage {
+                picture: (0, 0, width, height),
                 width,
                 height,
                 pixels,
@@ -348,6 +350,7 @@ mod tests {
 
     fn pixel() -> Vec<FrameImage> {
         vec![FrameImage {
+            picture: (0, 0, 1, 1),
             width: 1,
             height: 1,
             pixels: vec![1, 2, 3, 4],

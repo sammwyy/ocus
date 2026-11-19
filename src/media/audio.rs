@@ -808,6 +808,7 @@ fn stereo_samples(frame: &ffmpeg::frame::Audio, channels: u16) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::timeline::Transform;
     use std::fs;
 
     fn mixed_project() -> Project {
@@ -1578,6 +1579,7 @@ mod tests {
                 linked_audio: false,
                 color: Default::default(),
                 lut: None,
+                transform: Transform::default(),
             },
         }));
         let dry_plan = Arc::new(AudioPlan::from_project(editor.project()));

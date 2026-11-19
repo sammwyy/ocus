@@ -1,7 +1,7 @@
 use super::edits::{self, ClipRef, CopiedClip};
 use super::interaction::{DragState, Gesture, MenuState};
 use crate::export::{self, ExportControl, presets};
-use crate::media::audio::{self, AudioPlan, AudioSource, Clock, carries_sound};
+use crate::media::audio::{self, AudioPlan, AudioSource, Clock, Waveform, carries_sound};
 use crate::media::composite::VisualPlan;
 use crate::media::preview::{
     FrameImage, FrameSource, PreviewEvent, PreviewPlan, StoryboardKey, decode_sequence, storyboard,
@@ -75,6 +75,12 @@ const SAVE_CHOICE: &str = "Save";
 const DISCARD_CHOICE: &str = "Don't Save";
 const CANCEL_CHOICE: &str = "Cancel";
 const MAX_THUMBNAILS: usize = 256;
+
+#[derive(Clone, Default)]
+struct Waveforms {
+    peaks: Rc<RefCell<HashMap<PathBuf, Option<Arc<Waveform>>>>>,
+    pending: Rc<RefCell<Option<Arc<AtomicBool>>>>,
+}
 
 fn missing_sources(project: &Project) -> HashSet<u64> {
     project
@@ -271,6 +277,7 @@ pub(crate) struct UiState {
     pub export_scroll: ScrollController,
     pub thumbnails: Rc<RefCell<HashMap<PathBuf, Arc<RgbaImage>>>>,
     pub storyboards: Rc<RefCell<HashMap<StoryboardKey, Storyboard>>>,
+    waveforms: Waveforms,
     pub media_scroll: ScrollController,
     pub inspector_scroll: ScrollController,
     pub timeline_start: Signal<u64>,
@@ -433,6 +440,7 @@ impl UiState {
             export_scroll: ScrollController::default(),
             thumbnails: Rc::new(RefCell::new(HashMap::new())),
             storyboards: Rc::new(RefCell::new(HashMap::new())),
+            waveforms: Waveforms::default(),
             media_scroll: ScrollController::default(),
             inspector_scroll: ScrollController::default(),
             timeline_start: Signal::new(0),
@@ -731,6 +739,7 @@ impl UiState {
                     state.request_preview();
                     state.request_source_preview();
                     state.queue_storyboards();
+                    state.queue_waveforms();
                 }
             },
         );
@@ -1147,6 +1156,7 @@ impl UiState {
         self.stop(&self.source);
         self.source.position.set(0);
         self.request_source_preview();
+        self.queue_waveforms();
     }
 
     pub fn play_source(&self) {
@@ -1475,6 +1485,83 @@ impl UiState {
         self.timeline_start.set(0);
     }
 
+    pub(super) fn waveform(&self, path: &Path) -> Option<Arc<Waveform>> {
+        self.waveforms.peaks.borrow().get(path)?.clone()
+    }
+
+    fn queue_waveforms(&self) {
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        if self.waveforms.pending.borrow().is_some() {
+            return;
+        }
+        let source = self
+            .source_range()
+            .filter(|range| range.kind == MediaKind::Audio);
+        let editor = self.editor.borrow();
+        let project = editor.project();
+        let missing = self.missing_media.peek();
+        let mut peaks = self.waveforms.peaks.borrow_mut();
+        peaks.retain(|path, _| {
+            project
+                .media()
+                .iter()
+                .any(|media| media.path == *path && !missing.contains(&media.id))
+        });
+        let needed = project.tracks().iter().flat_map(|track| {
+            track.clips.iter().filter_map(|clip| {
+                let ClipContent::Media { media_id } = clip.content else {
+                    return None;
+                };
+                if missing.contains(&media_id) {
+                    return None;
+                }
+                let media = project.media().iter().find(|media| media.id == media_id)?;
+                carries_sound(track.kind, clip, media).then_some(media.path.as_path())
+            })
+        });
+        let path = source
+            .iter()
+            .map(|range| range.path.as_path())
+            .chain(needed)
+            .find(|path| !peaks.contains_key(*path))
+            .map(Path::to_path_buf);
+        drop(peaks);
+        drop(editor);
+        let Some(path) = path else { return };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancelled.clone();
+        *self.waveforms.pending.borrow_mut() = Some(cancelled.clone());
+        let state = self.clone();
+        app.spawn_background(
+            move || {
+                let result = audio::waveform(&path, worker_cancel);
+                (path, result)
+            },
+            move |(path, result)| {
+                if cancelled.load(Ordering::Relaxed) {
+                    return;
+                }
+                state.waveforms.pending.borrow_mut().take();
+                let peaks = result.ok().flatten().map(Arc::new);
+                let changed = peaks.is_some();
+                state.waveforms.peaks.borrow_mut().insert(path, peaks);
+                if changed {
+                    state.ui_revision.update(|revision| *revision += 1);
+                }
+                state.queue_waveforms();
+            },
+        );
+    }
+
+    fn reset_waveforms(&self) {
+        if let Some(cancelled) = self.waveforms.pending.borrow_mut().take() {
+            cancelled.store(true, Ordering::Relaxed);
+        }
+        self.waveforms.peaks.borrow_mut().clear();
+    }
+
     fn cancel_storyboards(&self) {
         if let Some(cancel) = self.storyboard_cancel.borrow_mut().take() {
             cancel.store(true, Ordering::Relaxed);
@@ -1653,6 +1740,7 @@ impl UiState {
             return;
         }
         self.replace_project(Project::new("Untitled"));
+        self.reset_waveforms();
         self.missing_media.set(HashSet::new());
         self.export_modal.set(false);
         self.project_path.set(None);
@@ -1731,6 +1819,7 @@ impl UiState {
         recovered: bool,
         missing: HashSet<u64>,
     ) {
+        self.reset_waveforms();
         let sources = project
             .media()
             .iter()
@@ -1768,6 +1857,7 @@ impl UiState {
         });
         self.load_thumbnails(sources);
         self.queue_storyboards();
+        self.queue_waveforms();
         self.request_preview();
     }
 
@@ -2470,6 +2560,7 @@ impl UiState {
                 }
                 state.load_thumbnails(paths);
                 state.queue_storyboards();
+                state.queue_waveforms();
                 state.request_preview();
                 state.request_source_preview();
                 let remaining = state.missing_media.peek().len();

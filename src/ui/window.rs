@@ -12,8 +12,10 @@ use super::state::{
     TitleGesture, ZOOM_SECONDS, media_frames,
 };
 use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
+use super::waveform::WaveformSlice;
 use super::{MediaFilter, Sidebar, UiState};
 use super::{title_fonts, title_markup};
+use crate::media::audio::carries_sound;
 use crate::media::composite::title_outline_radius;
 use crate::media::preview::StoryboardKey;
 use crate::media::{Media, MediaKind};
@@ -54,6 +56,54 @@ impl Widget for Logo {
 
     fn paint(&self, painter: &mut dyn Painter, rect: Rect) {
         painter.draw_image(rect, logo().image(), None);
+    }
+}
+
+struct SourceWaveform {
+    waveform: WaveformSlice,
+    position: u64,
+}
+
+impl Widget for SourceWaveform {
+    fn style(&self) -> creamui::Style {
+        fill_style().into()
+    }
+
+    fn paint(&self, painter: &mut dyn Painter, rect: Rect) {
+        let width = rect.width - 32.0;
+        let height = (rect.height - 52.0).min(152.0);
+        if width < 4.0 || height < 4.0 {
+            return;
+        }
+        let wave = Rect {
+            x: rect.x + 16.0,
+            y: rect.y + (rect.height - height + 20.0) * 0.5,
+            width,
+            height,
+        };
+        painter.fill_text(
+            Rect {
+                y: wave.y - 26.0,
+                height: 18.0,
+                ..wave
+            },
+            "Audio source",
+            muted(),
+            11.0,
+            TextAlign::Start,
+        );
+        self.waveform.paint(painter, wave, wave, 1.0, AUDIO);
+        let progress =
+            (self.position as f64 / self.waveform.duration.max(1) as f64).clamp(0.0, 1.0);
+        painter.fill_rect(
+            Rect {
+                x: wave.x + (wave.width - 1.0) * progress as f32,
+                width: 1.0,
+                ..wave
+            },
+            VIDEO,
+            0.0,
+        );
     }
 }
 
@@ -2224,6 +2274,18 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                         fallback: media
                             .filter(|_| video)
                             .and_then(|media| state.thumbnails.borrow().get(&media.path).cloned()),
+                        waveform: media
+                            .filter(|media| {
+                                !state.missing_media.get().contains(&media.id)
+                                    && carries_sound(track.kind, clip, media)
+                            })
+                            .and_then(|media| state.waveform(&media.path))
+                            .map(|peaks| WaveformSlice {
+                                peaks,
+                                start: clip.source_start_frame,
+                                duration: clip.duration_frames,
+                                fps,
+                            }),
                         volume: clip.volume,
                         muted: clip.muted,
                         linked_audio: clip.linked_audio,
@@ -2525,13 +2587,28 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             .map(media_name),
         (None, None) => None,
     };
+    let source_position = state.source.position.get();
     let source_stage: BoxedWidget = match (&range, &selected_title) {
-        (Some(range), _) if range.kind == MediaKind::Audio => stage_message(
-            Glyph::Music,
-            "Audio source",
-            "Audio plays through the default output device.",
-            None,
-        ),
+        (Some(range), _) if range.kind == MediaKind::Audio => {
+            if let Some(peaks) = state.waveform(&range.path) {
+                Box::new(SourceWaveform {
+                    waveform: WaveformSlice {
+                        peaks,
+                        start: range.source_start,
+                        duration: range.duration,
+                        fps,
+                    },
+                    position: source_position,
+                })
+            } else {
+                stage_message(
+                    Glyph::Music,
+                    "Audio source",
+                    "Audio plays through the default output device.",
+                    None,
+                )
+            }
+        }
         (Some(_), _) if gpu_preview => monitor_viewport(&state.source.slot, aspect),
         (Some(_), _) => stage_message(
             Glyph::Film,
@@ -2587,7 +2664,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             state,
             Transport {
                 program: false,
-                position: state.source.position.get(),
+                position: source_position,
                 end: source_end,
                 fps,
                 playing: state.source.playing.get(),
@@ -5273,6 +5350,7 @@ mod tests {
                     look: ClipLook::Video,
                     images: Some(Arc::new(vec![image.clone(), image.clone(), image])),
                     fallback: None,
+                    waveform: None,
                     volume: 1.0,
                     muted: false,
                     linked_audio: false,

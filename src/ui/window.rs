@@ -3,7 +3,7 @@ use super::controls::{
     Thumb, VIDEO, ZoomSlider, accent, accent_button, background, border, chip, faint, fit, glyph,
     heading, icon_button, kind_color, list_row, media_item, menu_row, muted, panel, panel_raised,
     play_button, secondary_button, segment, short_duration, sized_icon_button, surface,
-    surface_hover, text, text_color, timecode, tool_button,
+    surface_hover, text, text_color, timecode, tool_button, with_help,
 };
 use super::edits::ClipRef;
 use super::interaction::{Action, DragPayload, MenuState};
@@ -2391,7 +2391,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 .child(if state.exporting.get() {
                     secondary_button(None, "Cancel export", true, state, UiState::cancel_export)
                 } else {
-                    accent_button(
+                    let button = accent_button(
                         Some(Glyph::Export),
                         if project.last_export().is_some() {
                             "Export again"
@@ -2401,7 +2401,16 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                         !busy && state.sequence_end() > 0,
                         state,
                         UiState::quick_export,
-                    )
+                    );
+                    if state.sequence_end() == 0 {
+                        with_help(
+                            button,
+                            Help::new("Add clips to the timeline to export"),
+                            state,
+                        )
+                    } else {
+                        button
+                    }
                 })
                 .child(
                     if project.last_export().is_some() && !state.exporting.get() {
@@ -3486,7 +3495,11 @@ fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidg
                 UiState::submit_export,
             )),
     );
-    let status = state.status.get();
+    let status = if state.export_error.get().is_some() {
+        String::new()
+    } else {
+        state.status.get()
+    };
     let footer_status = if narrow {
         Box::new(
             Flex::column()
@@ -3528,6 +3541,9 @@ fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidg
                 .child(glyph(Glyph::Save, muted(), 12.0))
                 .child(text("Export also saves your project", muted(), 11.0)),
         ));
+    }
+    if let Some(reason) = state.export_error.get() {
+        footer = footer.child(text(reason, PLAYHEAD, 11.0));
     }
     let footer = Box::new(footer.child(footer_status));
     let close = state.clone();
@@ -4206,6 +4222,49 @@ mod tests {
                 .any(|label| label == "No clip at this frame")
         );
         assert!(!painter.labels.iter().any(|label| label == "Audio only"));
+    }
+
+    #[test]
+    fn empty_export_explains_how_to_enable_it() {
+        let state = UiState::new();
+        render(&state, 1280.0, 760.0);
+        state
+            .tooltip_controller(("Add clips to the timeline to export", 0))
+            .focus(true);
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(
+            painter
+                .labels
+                .iter()
+                .any(|label| label == "Add clips to the timeline to export")
+        );
+    }
+
+    #[test]
+    fn export_dialog_wraps_full_error_reasons() {
+        let state = UiState::new();
+        let reason = "Cannot export: relink the missing media used in your timeline first. The source file could not be found at its original location. Open the media bin, select the missing source, and use Relink media to choose its new location before exporting again.";
+        state.export_error.set(Some(reason.into()));
+        state.status.set(reason.into());
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let viewport = Size {
+                width: 760.0,
+                height: 760.0,
+            };
+            let mut painter = TestPainter::default();
+            Renderer::new().render(
+                export_modal(&state, state.editor.borrow().project(), viewport),
+                viewport,
+                &mut painter,
+            );
+            let (_, rect) = painter
+                .bounds
+                .iter()
+                .find(|(label, _)| label == reason)
+                .expect("full export error");
+            assert!(rect.height > 11.0 * 1.4, "{rect:?}");
+        });
     }
 
     #[test]

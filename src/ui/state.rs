@@ -292,6 +292,7 @@ pub(crate) struct UiState {
     pub exporting: Signal<bool>,
     pub export_total: Signal<u64>,
     pub export_modal: Signal<bool>,
+    pub export_error: Signal<Option<String>>,
     pub export_page: Signal<ExportPage>,
     pub export_draft: Signal<ExportSettings>,
     pub export_preset: Signal<String>,
@@ -449,6 +450,7 @@ impl UiState {
             exporting: Signal::new(false),
             export_total: Signal::new(0),
             export_modal: Signal::new(false),
+            export_error: Signal::new(None),
             export_page: Signal::new(ExportPage::Presets),
             export_draft: Signal::new(ExportSettings::for_project(
                 1920,
@@ -2089,6 +2091,7 @@ impl UiState {
         if self.busy.peek() || !export::can_render(self.editor.borrow().project()) {
             return;
         }
+        self.export_error.set(None);
         let (settings, path, has_last) = {
             let editor = self.editor.borrow();
             let project = editor.project();
@@ -2382,22 +2385,28 @@ impl UiState {
     }
 
     pub fn submit_export(&self) {
+        self.export_error.set(None);
         let settings = match self.export_form() {
             Ok(settings) => settings,
             Err(error) => {
-                self.status.set(error);
+                self.set_export_error(error);
                 return;
             }
         };
         let mut path = PathBuf::from(self.export_path.peek().trim());
         if !path.is_absolute() {
-            self.status.set("Choose an absolute output path".into());
+            self.set_export_error("Choose an absolute output path".into());
             return;
         }
         if path.extension().is_none() {
             path.set_extension(settings.container.extension());
         }
         self.start_export(path, settings, false);
+    }
+
+    fn set_export_error(&self, reason: String) {
+        self.export_error.set(Some(reason.clone()));
+        self.status.set(reason);
     }
 
     pub fn quick_export(&self) {
@@ -2419,8 +2428,9 @@ impl UiState {
 
     fn start_export(&self, path: PathBuf, settings: ExportSettings, quick: bool) {
         if self.has_missing_timeline_media() {
-            self.status
-                .set("Cannot export: relink the missing media used in your timeline first".into());
+            self.set_export_error(
+                "Cannot export: relink the missing media used in your timeline first".into(),
+            );
             return;
         }
         if self.busy.peek() || !export::can_render(self.editor.borrow().project()) {
@@ -2431,11 +2441,11 @@ impl UiState {
             path: path.clone(),
         };
         if let Err(error) = last.validate() {
-            self.status.set(error);
+            self.set_export_error(error);
             return;
         }
         let Some(app) = self.app.borrow().clone() else {
-            self.status.set("Export requires a running app".into());
+            self.set_export_error("Export requires a running app".into());
             return;
         };
         let project = self.editor.borrow().project().clone();
@@ -2456,6 +2466,7 @@ impl UiState {
             .unwrap_or(0),
         );
         self.export_modal.set(false);
+        self.export_error.set(None);
         *self.export_control.borrow_mut() = Some(control.clone());
         self.exporting.set(true);
         self.busy.set(true);
@@ -2477,6 +2488,13 @@ impl UiState {
                 state.exporting.set(false);
                 state.export_control.borrow_mut().take();
                 state.busy.set(false);
+                if let Err(error) = &result
+                    && error != "Export cancelled"
+                {
+                    state
+                        .export_error
+                        .set(Some(format!("Export failed: {error}")));
+                }
                 if result
                     .as_ref()
                     .is_err_and(|error| error != "Export cancelled")
@@ -3127,6 +3145,27 @@ fn import_summary(imported: usize, total: usize, errors: &[(PathBuf, String)]) -
 mod tests {
     use super::*;
     use crate::timeline::Clip;
+
+    #[test]
+    fn export_validation_preserves_a_dedicated_error() {
+        let state = UiState::new();
+        state.set_export_draft(state.export_draft.peek());
+        state.export_path.set_value("relative.mp4");
+        state.submit_export();
+        assert_eq!(
+            state.export_error.peek().as_deref(),
+            Some("Choose an absolute output path")
+        );
+        state.export_width.set_value("invalid");
+        state.submit_export();
+        assert!(state.export_error.peek().unwrap().contains("width"));
+        state.set_export_error("Export failed: encoder unavailable".into());
+        state.status.set("Other operation".into());
+        assert_eq!(
+            state.export_error.peek().as_deref(),
+            Some("Export failed: encoder unavailable")
+        );
+    }
 
     #[test]
     fn import_progress_advances_with_each_completed_file() {

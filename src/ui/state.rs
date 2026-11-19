@@ -877,6 +877,7 @@ impl UiState {
             return;
         }
         self.pause_source();
+        self.audio_failed.set(false);
         self.program.playing.set(true);
         if self.program.position.peek() >= end.saturating_sub(1) {
             self.focus_frame(0);
@@ -1120,6 +1121,7 @@ impl UiState {
             return;
         }
         self.pause();
+        self.audio_failed.set(false);
         self.source.playing.set(true);
         if self.source.position.peek() >= range.duration.saturating_sub(1) {
             self.source.position.set(0);
@@ -1368,14 +1370,9 @@ impl UiState {
         if plan.sources.is_empty() {
             return None;
         }
-        if self.audio_output.borrow().is_none() && !self.audio_failed.get() {
-            match playback::Output::open() {
-                Ok(output) => *self.audio_output.borrow_mut() = Some(output),
-                Err(error) => {
-                    self.audio_failed.set(true);
-                    self.status.set(error);
-                }
-            }
+        if self.audio_output.borrow().is_none() {
+            let output = self.open_audio_output(playback::Output::open);
+            *self.audio_output.borrow_mut() = output;
         }
         let output = self.audio_output.borrow();
         let session = playback::play(output.as_ref()?);
@@ -1397,6 +1394,20 @@ impl UiState {
             },
         );
         Some(clock)
+    }
+
+    fn open_audio_output<T>(&self, open: impl FnOnce() -> Result<T, String>) -> Option<T> {
+        if self.audio_failed.get() {
+            return None;
+        }
+        match open() {
+            Ok(output) => Some(output),
+            Err(error) => {
+                self.audio_failed.set(true);
+                self.status.set(error);
+                None
+            }
+        }
     }
 
     fn reset_monitors(&self) {
@@ -2857,6 +2868,43 @@ fn import_summary(imported: usize, total: usize, errors: &[(PathBuf, String)]) -
 mod tests {
     use super::*;
     use crate::timeline::Clip;
+
+    #[test]
+    fn next_play_retries_failed_audio_output() {
+        for source in [false, true] {
+            let state = UiState::new();
+            assert!(state.edit(Command::ImportMedia(Media {
+                id: 1,
+                path: "tone.wav".into(),
+                kind: MediaKind::Audio,
+                duration_us: Some(2_000_000),
+                has_audio: true,
+            })));
+            state.insert_media(1);
+            state.select_media(1);
+            let play = || {
+                if source {
+                    state.play_source();
+                } else {
+                    state.play();
+                }
+            };
+            play();
+            assert_eq!(
+                state.open_audio_output::<()>(|| Err("Device unavailable".into())),
+                None
+            );
+            assert_eq!(state.status.peek(), "Device unavailable");
+            assert_eq!(
+                state.open_audio_output(|| panic!("must not retry within one Play")),
+                None::<()>
+            );
+            state.pause();
+            state.pause_source();
+            play();
+            assert_eq!(state.open_audio_output(|| Ok(())), Some(()));
+        }
+    }
 
     #[test]
     fn empty_recovery_check_leaves_editor_available_and_does_not_finish_other_work() {

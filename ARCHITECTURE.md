@@ -24,7 +24,7 @@ src/
   media/composite.rs  shared preview/export visual composition
   media/audio.rs    background audio decoding, mixing and the playback clock
   playback.rs       default output device and monitor sound sessions
-  export.rs         H.264/HEVC/VP9 video and AAC/Opus encoding with cancellation
+  export.rs         timeline video, GIF and WAV encoding with cancellation
   export/presets.rs  built-in profiles and global named preset storage
   timeline.rs       tracks, clips, and title data
   ui/
@@ -73,7 +73,9 @@ own track's Z order with the same markup parser and font shaping in preview
 and export; gaps show black. `export.rs` encodes MP4, Matroska or WebM using
 the configured compatible H.264, HEVC or VP9 codec; it mixes sound from audio
 tracks and linked video sound through the bounded stereo queue used by preview
-playback, and encodes AAC or Opus. Audio-only timelines use black video.
+playback, and encodes AAC or Opus. GIF uses the same compositor with
+per-frame palettes and skips the sound mix; WAV only renders the sound mix.
+Audio-only timelines use black video when exported to a video format.
 Output resolution, bitrate or constant-quality CRF, encoder speed and frame rate
 are independent of the edit
 timeline; the visual composition is letterboxed when output aspect differs

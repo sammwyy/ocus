@@ -138,8 +138,8 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 
 ### v0.9: Formats and stabilization
 - [x] WebM export
-- [ ] GIF export
-- [ ] Audio-only export
+- [x] GIF export
+- [x] Audio-only export (WAV)
 - [ ] Bug fixing, UX cleanup and feature freeze
 - [ ] Packaging and installer tests on all platforms
 

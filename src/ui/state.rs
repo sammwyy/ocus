@@ -2112,6 +2112,9 @@ impl UiState {
 
     fn export_form_for_quality(&self, constant_quality: bool) -> Result<ExportSettings, String> {
         let mut settings = self.export_draft.peek();
+        if !settings.container.has_video() {
+            return Ok(settings);
+        }
         let field = |controller: &TextController, label: &str| {
             controller
                 .peek()
@@ -2123,6 +2126,10 @@ impl UiState {
         settings.height = field(&self.export_height, "height")?;
         settings.frame_rate.numerator = field(&self.export_fps_num, "frame rate numerator")?;
         settings.frame_rate.denominator = field(&self.export_fps_den, "frame rate denominator")?;
+        if !settings.container.uses_video_codec() {
+            settings.validate()?;
+            return Ok(settings);
+        }
         settings.audio_bitrate_kbps = field(&self.export_audio_bitrate, "audio bitrate")?;
         if constant_quality {
             settings.video_quality = Some(
@@ -2165,7 +2172,25 @@ impl UiState {
         video: Option<VideoCodec>,
         audio: Option<AudioCodec>,
     ) {
-        let Ok(mut settings) = self.export_form() else {
+        let current = self.export_draft.peek().container;
+        let settings = match container {
+            Some(Container::Gif) if current != Container::Gif => {
+                Ok(presets::gif_settings(self.editor.borrow().project()))
+            }
+            Some(next)
+                if next != current && (next == Container::Wav || !current.uses_video_codec()) =>
+            {
+                let editor = self.editor.borrow();
+                let project = editor.project().settings();
+                Ok(ExportSettings::for_project(
+                    project.width,
+                    project.height,
+                    project.frame_rate.clone(),
+                ))
+            }
+            _ => self.export_form(),
+        };
+        let Ok(mut settings) = settings else {
             self.status
                 .set("Fix the numeric export fields first".into());
             return;
@@ -2183,7 +2208,7 @@ impl UiState {
                     settings.video_codec = VideoCodec::Vp9;
                     settings.audio_codec = AudioCodec::Opus;
                 }
-                Container::Matroska => {}
+                Container::Matroska | Container::Gif | Container::Wav => {}
             }
         }
         if let Some(video) = video {
@@ -2217,8 +2242,15 @@ impl UiState {
         let settings = self.export_draft.peek();
         let path = PathBuf::from(self.export_path.peek());
         let mut dialog = FileDialog::new()
-            .set_title("Export video")
-            .add_filter("Video", &[settings.container.extension()])
+            .set_title("Export timeline")
+            .add_filter(
+                match settings.container {
+                    Container::Gif => "Animated GIF",
+                    Container::Wav => "WAV audio",
+                    _ => "Video",
+                },
+                &[settings.container.extension()],
+            )
             .set_file_name(
                 path.file_name()
                     .and_then(|name| name.to_str())
@@ -2372,7 +2404,7 @@ impl UiState {
         let control = Arc::new(ExportControl::default());
         let end = self.sequence_end();
         let fps = &project.settings().frame_rate;
-        self.export_total.set(
+        self.export_total.set(if settings.container.has_video() {
             export::output_frames(
                 end,
                 (fps.numerator, fps.denominator),
@@ -2381,8 +2413,10 @@ impl UiState {
                     settings.frame_rate.denominator,
                 ),
             )
-            .unwrap_or(0),
-        );
+            .unwrap_or(0)
+        } else {
+            end
+        });
         self.export_modal.set(false);
         *self.export_control.borrow_mut() = Some(control.clone());
         self.exporting.set(true);

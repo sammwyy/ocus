@@ -6,7 +6,7 @@ clip commands do not complete the corresponding editor workflows.
 
 ## Project and editing foundation
 
-- [ ] Extend existing settings/ID/range/compatibility and probed duration
+- [x] Extend existing settings/ID/range/compatibility and probed duration
   checks with linked AV clips and media path migration/repair.
 - [x] Add project file open/save with atomic writes, external media paths,
   useful errors, and round-trip tests; retain explicit schema-version handling.
@@ -39,6 +39,8 @@ clip commands do not complete the corresponding editor workflows.
 - [x] Present video and still-image frames through CreamUI's GPU viewport.
 - [x] Composite overlapping video layers and titles consistently between
   preview and export.
+- [x] Add undoable fade, dissolve, and slide transitions with Inspector controls,
+  timeline markers, and shared preview/export rendering.
 
 ## Audio, titles, and export
 
@@ -46,8 +48,7 @@ clip commands do not complete the corresponding editor workflows.
   playback and seeking to it.
 - [x] Add per-clip volume and mute controls that affect both preview and
   export, with tests.
-- [ ] Draw audio waveforms in timeline clips and the source monitor; both
-  currently show only the clip's volume level.
+- [x] Draw audio waveforms in timeline clips and the Source monitor.
 - [x] Extend editable title text with font, size, color, position, style and
   opt-in markup controls; drag to move or resize titles in the video preview.
 - [x] Include title overlays in exported video.
@@ -55,12 +56,13 @@ clip commands do not complete the corresponding editor workflows.
 - [x] Encode H.264 from layered video and still-image clips and AAC from the
   edited audio tracks.
 - [x] Add and test export presets for 1080p, 720p, and vertical 9:16.
+- [x] Export the timeline as a looping GIF or as audio-only WAV, with built-in presets.
 - [x] Run export off the UI thread with progress, cancellation, and cleanup
   of incomplete outputs.
 
 ## End-to-end usability
 
-- [ ] Wire import, playback, editing, project open/save, and export into the
+- [x] Wire import, playback, editing, project open/save, and export into the
   window with clear empty, loading, and error states.
 - [x] Add keyboard shortcuts for the main actions without stealing text
   input (they are inactive while a text field has focus).

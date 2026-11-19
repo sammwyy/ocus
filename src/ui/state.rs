@@ -406,6 +406,7 @@ pub(crate) struct UiState {
     storyboard_recent: Rc<RefCell<Vec<StoryboardKey>>>,
     audio_output: Rc<RefCell<Option<playback::Output>>>,
     audio_failed: Rc<Cell<bool>>,
+    pub(super) transcription_cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
 }
 
 impl UiState {
@@ -579,6 +580,7 @@ impl UiState {
             storyboard_recent: Rc::new(RefCell::new(Vec::new())),
             audio_output: Rc::new(RefCell::new(None)),
             audio_failed: Rc::new(Cell::new(false)),
+            transcription_cancel: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -897,6 +899,157 @@ impl UiState {
         } else {
             format!("{status} · {checkpoint}")
         });
+    }
+
+    pub(super) fn has_timeline_audio(&self) -> bool {
+        !audio::AudioPlan::from_project(self.editor.borrow().project())
+            .sources
+            .is_empty()
+    }
+
+    pub(super) fn generate_subtitles(&self) {
+        if let Some(cancel) = self.transcription_cancel.borrow().as_ref() {
+            cancel.store(true, Ordering::Relaxed);
+            self.status.set("Cancelling subtitle generation…".into());
+            return;
+        }
+        if self.busy.peek() || !self.has_timeline_audio() {
+            return;
+        }
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let plan = audio::AudioPlan::from_project(self.editor.borrow().project());
+        let revision = self.revision.peek();
+        let path = match crate::media::transcribe::model_path() {
+            Ok(path) => path,
+            Err(error) => {
+                self.finish_transcription(revision, Err(error));
+                return;
+            }
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        *self.transcription_cancel.borrow_mut() = Some(cancel.clone());
+        self.busy.set(true);
+        self.status.set("Checking speech model…".into());
+        let state = self.clone();
+        let check_path = path.clone();
+        let check_cancel = cancel.clone();
+        app.spawn_background(
+            move || crate::media::transcribe::check_model(&check_path, &check_cancel),
+            move |result| {
+                let Some(download) = state.finish_model_check(revision, result, || {
+                    MessageDialog::new()
+                            .set_title("Generate subtitles")
+                            .set_description("Download speech model (~142 MB)? It runs locally on your CPU. Your audio never leaves this computer.")
+                            .set_buttons(MessageButtons::OkCancelCustom("Download".into(), "Cancel".into()))
+                            .show() == MessageDialogResult::Custom("Download".into())
+                }) else { return };
+                state.start_transcription(revision, plan, path, cancel, download);
+            },
+        );
+    }
+
+    fn finish_model_check(
+        &self,
+        revision: u64,
+        result: Result<bool, String>,
+        consent: impl FnOnce() -> bool,
+    ) -> Option<bool> {
+        if self.revision.peek() != revision
+            || self
+                .transcription_cancel
+                .borrow()
+                .as_ref()
+                .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+        {
+            self.finish_transcription(revision, Err("Cancelled".into()));
+            return None;
+        }
+        match result {
+            Ok(true) => Some(false),
+            Ok(false) if consent() => Some(true),
+            Ok(false) => {
+                self.finish_transcription(revision, Err("Cancelled".into()));
+                None
+            }
+            Err(error) => {
+                self.finish_transcription(revision, Err(error));
+                None
+            }
+        }
+    }
+
+    fn start_transcription(
+        &self,
+        revision: u64,
+        plan: audio::AudioPlan,
+        path: PathBuf,
+        cancel: Arc<AtomicBool>,
+        download: bool,
+    ) {
+        let Some(app) = self.app.borrow().clone() else {
+            self.finish_transcription(revision, Err("Window closed".into()));
+            return;
+        };
+        let state = self.clone();
+        app.spawn_stream(
+            move |emit| {
+                let result = (|| {
+                    if download {
+                        crate::media::transcribe::download_model(&path, &cancel, |message| {
+                            emit(Err(message))
+                        })?;
+                    }
+                    emit(Err("Analyzing speech…".into()));
+                    crate::media::transcribe::transcribe(&plan, &path, cancel)
+                })();
+                emit(Ok(result));
+            },
+            move |event| match event {
+                Err(progress) => state.status.set(progress),
+                Ok(result) => state.finish_transcription(revision, result),
+            },
+        );
+    }
+
+    fn finish_transcription(
+        &self,
+        revision: u64,
+        result: Result<Vec<crate::subtitles::Cue>, String>,
+    ) {
+        let cancelled = self
+            .transcription_cancel
+            .borrow_mut()
+            .take()
+            .is_some_and(|cancel| cancel.load(Ordering::Relaxed));
+        self.busy.set(false);
+        if self.revision.peek() != revision {
+            self.status
+                .set("Subtitle generation cancelled: project changed".into());
+        } else if cancelled {
+            self.status.set("Subtitle generation cancelled".into());
+        } else {
+            match result {
+                Ok(cues) if cues.is_empty() => self.status.set("No speech found".into()),
+                Ok(cues) => match self.import_subtitle_cues(&cues) {
+                    Ok(count) => {
+                        let noun = if count == 1 { "cue" } else { "cues" };
+                        self.status
+                            .set(format!("Generated {count} subtitle {noun}"));
+                    }
+                    Err(error) => self
+                        .status
+                        .set(format!("Cannot generate subtitles: {error}")),
+                },
+                Err(error) if error == "Cancelled" => {
+                    self.status.set("Subtitle generation cancelled".into())
+                }
+                Err(error) => self
+                    .status
+                    .set(format!("Cannot generate subtitles: {error}")),
+            }
+        }
     }
 
     pub(super) fn remove_silences(&self) {
@@ -4105,6 +4258,125 @@ fn import_summary(imported: usize, total: usize, errors: &[(PathBuf, String)]) -
 mod tests {
     use super::*;
     use crate::timeline::Clip;
+
+    fn transcription_cues() -> Vec<crate::subtitles::Cue> {
+        vec![crate::subtitles::Cue {
+            start_us: 0,
+            end_us: 1_000_000,
+            text: "Hello world".into(),
+        }]
+    }
+
+    #[test]
+    fn model_check_only_downloads_after_consent_and_decline_finishes_cancelled() {
+        let state = UiState::new();
+        let revision = state.revision.peek();
+        let cancel = Arc::new(AtomicBool::new(false));
+        *state.transcription_cancel.borrow_mut() = Some(cancel.clone());
+        state.busy.set(true);
+        assert_eq!(
+            state.finish_model_check(revision, Ok(true), || panic!("valid model must not ask")),
+            Some(false)
+        );
+        assert_eq!(
+            state.finish_model_check(revision, Ok(false), || true),
+            Some(true)
+        );
+        assert!(state.busy.peek());
+        assert!(Arc::ptr_eq(
+            state.transcription_cancel.borrow().as_ref().unwrap(),
+            &cancel
+        ));
+        let original = state.editor.borrow().project().tracks().to_vec();
+        assert_eq!(
+            state.finish_model_check(revision, Ok(false), || false),
+            None
+        );
+        assert_eq!(state.status.peek(), "Subtitle generation cancelled");
+        assert!(!state.busy.peek());
+        assert!(state.transcription_cancel.borrow().is_none());
+        assert_eq!(state.editor.borrow().project().tracks(), original);
+    }
+
+    #[test]
+    fn stale_cancelled_or_failed_model_checks_never_ask_or_start_downloads() {
+        let state = UiState::new();
+        let revision = state.revision.peek();
+        let cancel = Arc::new(AtomicBool::new(false));
+        *state.transcription_cancel.borrow_mut() = Some(cancel.clone());
+        state.busy.set(true);
+        state.generate_subtitles();
+        assert!(cancel.load(Ordering::Relaxed));
+        assert_eq!(
+            state.finish_model_check(revision, Ok(false), || panic!("cancelled")),
+            None
+        );
+        assert_eq!(state.status.peek(), "Subtitle generation cancelled");
+        state.revision.update(|revision| *revision += 1);
+        assert_eq!(
+            state.finish_model_check(revision, Ok(false), || panic!("stale")),
+            None
+        );
+        assert_eq!(
+            state.status.peek(),
+            "Subtitle generation cancelled: project changed"
+        );
+        assert_eq!(
+            state.finish_model_check(
+                state.revision.peek(),
+                Err("check failed".into()),
+                || panic!("failed")
+            ),
+            None
+        );
+        assert_eq!(
+            state.status.peek(),
+            "Cannot generate subtitles: check failed"
+        );
+    }
+
+    #[test]
+    fn transcription_status_pluralizes_multiple_cues() {
+        let state = UiState::new();
+        let mut cues = transcription_cues();
+        cues.push(crate::subtitles::Cue {
+            start_us: 1_000_000,
+            end_us: 2_000_000,
+            text: "Again".into(),
+        });
+        state.finish_transcription(state.revision.peek(), Ok(cues));
+        assert_eq!(state.status.peek(), "Generated 2 subtitle cues");
+    }
+
+    #[test]
+    fn transcription_finish_is_undoable_and_rejects_stale_empty_and_failed_results() {
+        let state = super::UiState::new();
+        let original = state.editor.borrow().project().tracks().to_vec();
+        let revision = state.revision.peek();
+        state.finish_transcription(revision, Ok(transcription_cues()));
+        assert_eq!(
+            state.editor.borrow().project().tracks().len(),
+            original.len() + 1
+        );
+        assert_eq!(state.status.peek(), "Generated 1 subtitle cue");
+        state.undo();
+        assert_eq!(state.editor.borrow().project().tracks(), original);
+        state.finish_transcription(revision, Ok(transcription_cues()));
+        assert_eq!(
+            state.status.peek(),
+            "Subtitle generation cancelled: project changed"
+        );
+        assert_eq!(state.editor.borrow().project().tracks(), original);
+        state.finish_transcription(state.revision.peek(), Ok(vec![]));
+        assert_eq!(state.status.peek(), "No speech found");
+        state.finish_transcription(state.revision.peek(), Err("decode failed".into()));
+        assert_eq!(
+            state.status.peek(),
+            "Cannot generate subtitles: decode failed"
+        );
+        state.finish_transcription(state.revision.peek(), Err("Cancelled".into()));
+        assert_eq!(state.status.peek(), "Subtitle generation cancelled");
+    }
 
     #[test]
     fn srt_file_import_is_one_undoable_track_edit() {

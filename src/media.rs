@@ -13,6 +13,7 @@ pub mod hardware;
 pub mod lut;
 pub mod preview;
 pub mod proxy;
+pub mod transcribe;
 
 fn seek_timestamp(input: &ffmpeg::format::context::Input, micros: u128) -> Option<i64> {
     // A seek without a stream index uses AV_TIME_BASE and the format origin.

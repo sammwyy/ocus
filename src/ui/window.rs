@@ -3325,6 +3325,24 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         ),
                         state,
                     )),
+                    inline(with_help(
+                        secondary_button(
+                            None,
+                            if state.transcription_cancel.borrow().is_some() {
+                                "Cancel subtitles"
+                            } else {
+                                "Generate subtitles"
+                            },
+                            state.transcription_cancel.borrow().is_some()
+                                || (!state.busy.get() && state.has_timeline_audio()),
+                            state,
+                            UiState::generate_subtitles,
+                        ),
+                        Help::new(
+                            "Generate subtitles from the timeline audio locally with Whisper, or cancel generation",
+                        ),
+                        state,
+                    )),
                     fade_row(state, &clip, true),
                     fade_row(state, &clip, false),
                     if clip.linked_audio {

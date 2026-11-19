@@ -36,10 +36,13 @@ rfd = "=0.17.2"
 rodio = { version = "=0.22.2", default-features = false, features = ["playback"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11.1"
 swash = "=0.2.10"
 tempfile = "=3.27.0"
 toml = "=0.9.12"
+ureq = { version = "3.5.2", features = ["rustls"] }
 wgpu = { version = "22", default-features = false, features = ["wgsl", "dx12", "metal"] }
+whisper-rs = { version = "=0.16.0", default-features = false }
 
 [build-dependencies]
 winres = "0.1.12"

@@ -124,9 +124,9 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [x] Noise reduction
 
 ### v0.7: Subtitles and keyframes
-- [ ] Import SRT files
-- [ ] Subtitle styling (font, color, outline, background, position)
-- [ ] Burn subtitles into the exported video
+- [x] Import SRT files
+- [x] Subtitle styling (font, color, outline, background, position)
+- [x] Burn subtitles into the exported video
 - [x] Basic keyframes for position, scale, rotation and opacity
 
 ### v0.8: Performance and safety

@@ -7,6 +7,7 @@ use super::edits::ClipRef;
 use super::interaction::Gesture;
 use super::state::Storyboard;
 use super::waveform::WaveformSlice;
+use crate::project::Command;
 use crate::timeline::TrackKind;
 use creamui::core::layout::{Dimension, Style};
 use creamui::core::{Modifiers, Painter, Point, Rect, RgbaImage, TextAlign, Widget};
@@ -1708,13 +1709,37 @@ impl Widget for TimelineView {
                         state.program.position.peek(),
                         tolerance,
                     );
-                    state.trim_draft.set(crate::project::edit::trim_edge(
+                    let draft = crate::project::edit::trim_edge(
                         editor.project(),
                         anchor.0,
                         anchor.1,
                         left,
                         frame.saturating_add_signed(adjustment),
-                    ));
+                    );
+                    state.trim_draft.set(draft.filter(|command| {
+                        let Command::Trim {
+                            start_frame,
+                            source_start_frame,
+                            duration_frames,
+                            ..
+                        } = command
+                        else {
+                            return false;
+                        };
+                        editor
+                            .project()
+                            .tracks()
+                            .iter()
+                            .find(|track| track.id == anchor.0)
+                            .and_then(|track| track.clips.iter().find(|clip| clip.id == anchor.1))
+                            .is_some_and(|clip| {
+                                (
+                                    clip.start_frame,
+                                    clip.source_start_frame,
+                                    clip.duration_frames,
+                                ) != (*start_frame, *source_start_frame, *duration_frames)
+                            })
+                    }));
                 }
                 Gesture::Scrub if end > 0 => {
                     let frame = geometry

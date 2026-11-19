@@ -89,7 +89,9 @@ pub(crate) fn move_clips(
     let mut tracks = project.tracks().to_vec();
     let mut moved = Vec::new();
     for &(track_id, clip_id) in selection {
-        let source = tracks.iter_mut().find(|track| track.id == track_id)?;
+        let source = tracks
+            .iter_mut()
+            .find(|track| track.id == track_id && !track.locked)?;
         let kind = source.kind;
         let index = source.clips.iter().position(|clip| clip.id == clip_id)?;
         let mut clip = source.clips.remove(index);
@@ -106,7 +108,7 @@ pub(crate) fn move_clips(
         selection.push((target, clip.id));
         tracks
             .iter_mut()
-            .find(|track| track.id == target)?
+            .find(|track| track.id == target && !track.locked)?
             .clips
             .push(clip);
     }
@@ -190,8 +192,13 @@ pub(crate) fn compatible_track(project: &Project, media_id: u64, preferred: u64)
     project
         .tracks()
         .iter()
-        .find(|track| track.id == preferred && track.kind == wanted)
-        .or_else(|| project.tracks().iter().find(|track| track.kind == wanted))
+        .find(|track| track.id == preferred && track.kind == wanted && !track.locked)
+        .or_else(|| {
+            project
+                .tracks()
+                .iter()
+                .find(|track| track.kind == wanted && !track.locked)
+        })
         .map(|track| track.id)
 }
 
@@ -219,7 +226,9 @@ pub(crate) fn compatible_track_at(
 /// last clip of the first video track.
 pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Option<(u64, Clip)> {
     let track = project.tracks().iter().find(|track| {
-        track.kind == TrackKind::Video && placement.is_none_or(|(id, _)| id == track.id)
+        !track.locked
+            && track.kind == TrackKind::Video
+            && placement.is_none_or(|(id, _)| id == track.id)
     })?;
     let start_frame = match placement {
         Some((_, frame)) => frame,
@@ -250,6 +259,7 @@ pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Op
             }),
             volume: 1.0,
             muted: false,
+            color: Default::default(),
             transition: None,
             transition_out: None,
             fade_in_frames: 0,
@@ -263,6 +273,9 @@ pub(crate) fn remove_clips(project: &Project, selection: &[ClipRef]) -> Vec<Trac
     let selected: HashSet<_> = selection.iter().copied().collect();
     let mut tracks = project.tracks().to_vec();
     for track in &mut tracks {
+        if track.locked {
+            continue;
+        }
         let id = track.id;
         track
             .clips
@@ -289,9 +302,9 @@ pub(crate) fn paste_clips(project: &Project, clips: &[CopiedClip], at: u64) -> O
     let mut tracks = project.tracks().to_vec();
     let mut pending = Vec::with_capacity(clips.len());
     for copied in clips {
-        let preferred = tracks
-            .iter()
-            .position(|track| track.id == copied.track_id && track.kind == copied.track_kind);
+        let preferred = tracks.iter().position(|track| {
+            !track.locked && track.id == copied.track_id && track.kind == copied.track_kind
+        });
         pending.push((
             preferred,
             copied.track_kind,
@@ -312,7 +325,8 @@ pub(crate) fn paste_clips(project: &Project, clips: &[CopiedClip], at: u64) -> O
             None => {
                 let end = clip.start_frame.checked_add(clip.duration_frames)?;
                 tracks.iter_mut().find(|track| {
-                    track.kind == kind
+                    !track.locked
+                        && track.kind == kind
                         && track.clips.iter().all(|existing| {
                             end <= existing.start_frame || clip_end(existing) <= clip.start_frame
                         })
@@ -366,9 +380,12 @@ pub(crate) fn insert_media(
         None => project
             .tracks()
             .iter()
-            .find(|track| track.kind == wanted)
+            .find(|track| !track.locked && track.kind == wanted)
             .ok_or("No compatible track for this source")?,
     };
+    if track.locked {
+        return Err("Unlock this track before inserting clips".into());
+    }
     let rate = &project.settings().frame_rate;
     let duration = media_frames(media, (rate.numerator, rate.denominator))
         .ok_or("Source has no usable duration; import it again to probe")?;
@@ -384,6 +401,7 @@ pub(crate) fn insert_media(
         content: ClipContent::Media { media_id },
         volume: 1.0,
         muted: false,
+        color: Default::default(),
         transition: None,
         transition_out: None,
         fade_in_frames: 0,
@@ -430,6 +448,9 @@ fn push_track(tracks: &mut Vec<Track>, kind: TrackKind) -> Option<u64> {
         Track {
             id,
             kind,
+            name: String::new(),
+            locked: false,
+            hidden: false,
             clips: Vec::new(),
         },
     );
@@ -444,6 +465,13 @@ pub(crate) fn add_track(project: &Project, kind: TrackKind) -> Option<(Vec<Track
 
 /// Removes a track and its clips; the last track of a kind stays.
 pub(crate) fn remove_track(project: &Project, track_id: u64) -> Result<Vec<Track>, String> {
+    if project
+        .tracks()
+        .iter()
+        .any(|track| track.id == track_id && track.locked)
+    {
+        return Err("Unlock this track before deleting it".into());
+    }
     let kind = project
         .tracks()
         .iter()
@@ -496,7 +524,8 @@ pub(crate) fn detach_audio(project: &Project, selection: &[ClipRef]) -> Option<P
     }
     for new in detached {
         let target = match tracks.iter().find(|track| {
-            track.kind == TrackKind::Audio
+            !track.locked
+                && track.kind == TrackKind::Audio
                 && track.clips.iter().all(|clip| {
                     clip_end(clip) <= new.start_frame || clip_end(&new) <= clip.start_frame
                 })
@@ -598,6 +627,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            color: Default::default(),
             transition: None,
             transition_out: None,
             fade_in_frames: 0,
@@ -615,6 +645,48 @@ mod tests {
             }));
         }
         editor.project().clone()
+    }
+
+    #[test]
+    fn locked_tracks_are_skipped_by_placement_and_refuse_clip_plans() {
+        let project = project_with(&[(0, title(1, 0)), (1, title(2, 0))]);
+        let copied = CopiedClip {
+            track_id: 0,
+            track_kind: TrackKind::Video,
+            clip: title(1, 0),
+        };
+        let mut editor = Editor::new(project);
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "/tmp/picture.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(1_000_000),
+            has_audio: false,
+        })));
+        assert!(editor.apply(Command::SetTrackLocked {
+            track_id: 0,
+            locked: true,
+        }));
+        let project = editor.project();
+        assert_eq!(compatible_track(project, 1, 0), Some(1));
+        assert_eq!(title_clip(project, None).unwrap().0, 1);
+        assert!(title_clip(project, Some((0, 60))).is_none());
+        assert!(insert_media(project, 1, Some((0, 60))).is_err());
+        assert!(remove_track(project, 0).is_err());
+        assert_eq!(remove_clips(project, &[(0, 1)])[0], project.tracks()[0]);
+        assert!(move_clips(project, &[(0, 1)], 0, 1, 60).is_none());
+        assert!(move_clips(project, &[(1, 2)], 1, -1, 60).is_none());
+        let pasted = paste_clips(project, std::slice::from_ref(&copied), 60).unwrap();
+        assert_eq!(pasted.tracks[0], project.tracks()[0]);
+        assert_eq!(pasted.selection[0].0, 1);
+        assert!(editor.apply(Command::SetTrackLocked {
+            track_id: 1,
+            locked: true,
+        }));
+        assert!(compatible_track(editor.project(), 1, 0).is_none());
+        assert!(title_clip(editor.project(), None).is_none());
+        assert!(insert_media(editor.project(), 1, None).is_err());
+        assert!(paste_clips(editor.project(), &[copied], 60).is_none());
     }
 
     #[test]

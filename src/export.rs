@@ -4,7 +4,9 @@ use crate::media::audio::{self, AudioPlan, AudioQueue};
 use crate::media::composite::{Compositor, VisualPlan};
 use crate::media::fitted_dimensions;
 use crate::project::Project;
-use crate::project::export_settings::{AudioCodec, EncodingSpeed, ExportSettings, VideoCodec};
+use crate::project::export_settings::{
+    AudioCodec, Container, EncodingSpeed, ExportSettings, VideoCodec,
+};
 use ffmpeg_next as ffmpeg;
 use std::fs;
 use std::path::Path;
@@ -121,6 +123,63 @@ fn render_to(
     control: Arc<ExportControl>,
 ) -> Result<(), String> {
     ffmpeg::init().map_err(|error| error.to_string())?;
+    let audio_plan = AudioPlan::from_project(project);
+    if settings.container.has_audio() {
+        for source in &audio_plan.sources {
+            control.check()?;
+            let interrupted = control.cancelled.clone();
+            let input = ffmpeg::format::input_with_interrupt(&source.path, move || {
+                interrupted.load(Ordering::Relaxed)
+            })
+            .map_err(|error| error.to_string())?;
+            if input.streams().best(ffmpeg::media::Type::Audio).is_none() {
+                return Err("An audible clip has no audio stream".into());
+            }
+        }
+    }
+    let output = ffmpeg::format::output(path).map_err(|error| error.to_string())?;
+    let include_audio = settings.container.has_audio()
+        && (!audio_plan.sources.is_empty() || !settings.container.has_video());
+    let queue = include_audio.then(|| Arc::new(AudioQueue::new()));
+    let cancelled = control.cancelled.clone();
+    thread::scope(|scope| {
+        let worker = queue.as_ref().map(|queue| {
+            let queue = queue.clone();
+            let cancelled = cancelled.clone();
+            let plan = &audio_plan;
+            scope.spawn(move || audio::feed(plan, 0, queue, cancelled))
+        });
+        let result = if settings.container.has_video() {
+            render_video(project, output, settings, control, &audio_plan, queue)
+        } else {
+            queue
+                .as_deref()
+                .ok_or_else(|| "Audio export queue missing".to_string())
+                .and_then(|queue| render_wav(output, settings, &control, &audio_plan, queue))
+        };
+        if result.is_err() {
+            cancelled.store(true, Ordering::Relaxed);
+        }
+        let audio_result = worker
+            .map(|worker| {
+                worker
+                    .join()
+                    .map_err(|_| "Audio export worker panicked".to_string())
+                    .and_then(|result| result)
+            })
+            .transpose();
+        result.and(audio_result.map(|_| ()))
+    })
+}
+
+fn render_video(
+    project: &Project,
+    mut output: ffmpeg::format::context::Output,
+    settings: &ExportSettings,
+    control: Arc<ExportControl>,
+    audio_plan: &AudioPlan,
+    queue: Option<Arc<AudioQueue>>,
+) -> Result<(), String> {
     let fps = ffmpeg::Rational(
         i32::try_from(settings.frame_rate.numerator)
             .map_err(|_| "Export frame rate is out of range")?,
@@ -128,28 +187,37 @@ fn render_to(
             .map_err(|_| "Export frame rate is out of range")?,
     );
     let time_base = ffmpeg::Rational(fps.denominator(), fps.numerator());
-    let video_id = match settings.video_codec {
-        VideoCodec::H264 => ffmpeg::codec::Id::H264,
-        VideoCodec::Hevc => ffmpeg::codec::Id::HEVC,
-        VideoCodec::Vp9 => ffmpeg::codec::Id::VP9,
+    let gif = settings.container == Container::Gif;
+    let (video_id, pixel) = if gif {
+        (ffmpeg::codec::Id::GIF, ffmpeg::format::Pixel::PAL8)
+    } else {
+        (
+            match settings.video_codec {
+                VideoCodec::H264 => ffmpeg::codec::Id::H264,
+                VideoCodec::Hevc => ffmpeg::codec::Id::HEVC,
+                VideoCodec::Vp9 => ffmpeg::codec::Id::VP9,
+            },
+            ffmpeg::format::Pixel::YUV420P,
+        )
     };
     let codec = ffmpeg::encoder::find(video_id)
         .ok_or_else(|| format!("{video_id:?} encoder not available"))?;
-    let mut output = ffmpeg::format::output(path).map_err(|error| error.to_string())?;
     let mut encoder = ffmpeg::codec::context::Context::new_with_codec(codec)
         .encoder()
         .video()
         .map_err(|error| error.to_string())?;
     encoder.set_width(settings.width);
     encoder.set_height(settings.height);
-    encoder.set_format(ffmpeg::format::Pixel::YUV420P);
+    encoder.set_format(pixel);
     encoder.set_time_base(time_base);
     encoder.set_frame_rate(Some(fps));
-    encoder.set_bit_rate(
-        settings
-            .video_quality
-            .map_or(settings.video_bitrate_kbps as usize * 1_000, |_| 0),
-    );
+    if !gif {
+        encoder.set_bit_rate(
+            settings
+                .video_quality
+                .map_or(settings.video_bitrate_kbps as usize * 1_000, |_| 0),
+        );
+    }
     if output
         .format()
         .flags()
@@ -158,8 +226,9 @@ fn render_to(
         encoder.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
     }
     let mut options = ffmpeg::Dictionary::new();
-    match (settings.video_codec, settings.speed) {
-        (VideoCodec::H264, speed) => options.set(
+    match (gif, settings.video_codec, settings.speed) {
+        (true, _, _) => {}
+        (false, VideoCodec::H264, speed) => options.set(
             "preset",
             match speed {
                 EncodingSpeed::Fast => "veryfast",
@@ -167,7 +236,7 @@ fn render_to(
                 EncodingSpeed::Quality => "slow",
             },
         ),
-        (VideoCodec::Hevc, speed) => options.set(
+        (false, VideoCodec::Hevc, speed) => options.set(
             "preset",
             match speed {
                 EncodingSpeed::Fast => "fast",
@@ -175,7 +244,7 @@ fn render_to(
                 EncodingSpeed::Quality => "slow",
             },
         ),
-        (VideoCodec::Vp9, speed) => {
+        (false, VideoCodec::Vp9, speed) => {
             options.set(
                 "deadline",
                 if speed == EncodingSpeed::Fast {
@@ -194,7 +263,7 @@ fn render_to(
             );
         }
     }
-    if let Some(quality) = settings.video_quality {
+    if let Some(quality) = settings.video_quality.filter(|_| !gif) {
         options.set("crf", &quality.to_string());
     }
     let encoder = encoder
@@ -208,72 +277,12 @@ fn render_to(
         stream.set_parameters(&encoder);
         stream.index()
     };
-    if !can_render(project) {
-        return Err("Nothing to export".into());
-    }
-    let audio_plan = AudioPlan::from_project(project);
     let end = audio_plan.end;
     let fps_pair = audio_plan.fps;
-    for source in &audio_plan.sources {
-        control.check()?;
-        let interrupted = control.cancelled.clone();
-        let input = ffmpeg::format::input_with_interrupt(&source.path, move || {
-            interrupted.load(Ordering::Relaxed)
-        })
-        .map_err(|error| error.to_string())?;
-        if input.streams().best(ffmpeg::media::Type::Audio).is_none() {
-            return Err("An audible clip has no audio stream".into());
-        }
-    }
-    let audio_encoder = if audio_plan.sources.is_empty() {
-        None
-    } else {
-        let audio_id = match settings.audio_codec {
-            AudioCodec::Aac => ffmpeg::codec::Id::AAC,
-            AudioCodec::Opus => ffmpeg::codec::Id::OPUS,
-        };
-        let codec = ffmpeg::encoder::find(audio_id)
-            .ok_or_else(|| format!("{audio_id:?} encoder not available"))?;
-        let formats = codec.audio().map_err(|error| error.to_string())?;
-        let format = ffmpeg::format::Sample::F32(match settings.audio_codec {
-            AudioCodec::Aac => ffmpeg::format::sample::Type::Planar,
-            AudioCodec::Opus => ffmpeg::format::sample::Type::Packed,
-        });
-        if !formats
-            .formats()
-            .is_some_and(|mut formats| formats.any(|f| f == format))
-            || !formats
-                .rates()
-                .is_some_and(|mut rates| rates.any(|r| r == audio::RATE as i32))
-        {
-            return Err(format!(
-                "{audio_id:?} encoder cannot accept 48 kHz float stereo"
-            ));
-        }
-        let mut encoder = ffmpeg::codec::context::Context::new_with_codec(codec)
-            .encoder()
-            .audio()
-            .map_err(|error| error.to_string())?;
-        encoder.set_rate(audio::RATE as i32);
-        encoder.set_channel_layout(ffmpeg::ChannelLayout::STEREO);
-        encoder.set_format(format);
-        encoder.set_time_base(ffmpeg::Rational(1, audio::RATE as i32));
-        encoder.set_bit_rate(settings.audio_bitrate_kbps as usize * 1_000);
-        if output
-            .format()
-            .flags()
-            .contains(ffmpeg::format::Flags::GLOBAL_HEADER)
-        {
-            encoder.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
-        }
-        let encoder = encoder.open().map_err(|error| error.to_string())?;
-        let mut stream = output
-            .add_stream(codec)
-            .map_err(|error| error.to_string())?;
-        stream.set_time_base(ffmpeg::Rational(1, audio::RATE as i32));
-        stream.set_parameters(&encoder);
-        Some((encoder, stream.index()))
-    };
+    let audio = queue
+        .as_ref()
+        .map(|_| AudioEncoder::new(&mut output, settings))
+        .transpose()?;
     output.write_header().map_err(|error| error.to_string())?;
     let output_base = output
         .stream(stream_index)
@@ -285,116 +294,167 @@ fn render_to(
         stream_index,
         output_base,
         control,
-        audio: audio_encoder.map(|(encoder, index)| AudioEncoder {
-            encoder,
-            index,
-            next_sample: 0,
-            encoded_samples: 0,
-            pending: Vec::new(),
-        }),
-        queue: None,
+        audio,
+        queue,
         fps: (
             settings.frame_rate.numerator,
             settings.frame_rate.denominator,
         ),
-        audio_end: (u128::from(end) * u128::from(audio::RATE) * u128::from(fps_pair.1)
-            / u128::from(fps_pair.0)) as u64,
+        audio_end: samples_at(end, fps_pair)?,
     };
-    let queue = (!audio_plan.sources.is_empty()).then(|| Arc::new(AudioQueue::new()));
-    muxer.queue = queue.clone();
-    let cancelled = Arc::new(AtomicBool::new(false));
-    thread::scope(|scope| {
-        let worker = queue.as_ref().map(|queue| {
-            let queue = queue.clone();
-            let cancelled = cancelled.clone();
-            scope.spawn(move || audio::feed(&audio_plan, 0, queue, cancelled))
-        });
-        let result = (|| {
-            let (picture_width, picture_height) = fitted_dimensions(
-                project.settings().width,
-                project.settings().height,
-                settings.width,
-                settings.height,
-            );
-            let mut compositor = Compositor::new(
-                VisualPlan::from_project(project),
-                picture_width,
-                picture_height,
-                fps_pair,
-            );
-            let mut rgba = ffmpeg::frame::Video::new(
-                ffmpeg::format::Pixel::RGBA,
-                settings.width,
-                settings.height,
-            );
-            let mut scaler = ffmpeg::software::scaling::context::Context::get(
-                ffmpeg::format::Pixel::RGBA,
-                settings.width,
-                settings.height,
-                ffmpeg::format::Pixel::YUV420P,
-                settings.width,
-                settings.height,
-                ffmpeg::software::scaling::flag::Flags::BILINEAR,
-            )
-            .map_err(|error| error.to_string())?;
-            let out_end = output_frames(end, fps_pair, muxer.fps)?;
-            for position in 0..out_end {
-                muxer.control.check()?;
-                let source_position =
-                    (u128::from(position) * u128::from(fps_pair.0) * u128::from(muxer.fps.1)
-                        / (u128::from(fps_pair.1) * u128::from(muxer.fps.0)))
-                    .min(u128::from(end - 1)) as u64;
-                let image = compositor.frame(source_position, &muxer.control.cancelled)?;
-                for row in 0..settings.height as usize {
-                    let stride = rgba.stride(0);
-                    let dest = &mut rgba.data_mut(0)
-                        [row * stride..row * stride + settings.width as usize * 4];
-                    for pixel in dest.as_chunks_mut::<4>().0 {
-                        pixel.copy_from_slice(&[0, 0, 0, 255]);
-                    }
-                    let top = (settings.height - picture_height) as usize / 2;
-                    if let Some(image) = &image
-                        && row >= top
-                        && row < top + picture_height as usize
-                    {
-                        let left = (settings.width - picture_width) as usize / 2;
-                        let source = &image.pixels[(row - top) * picture_width as usize * 4
-                            ..(row - top + 1) * picture_width as usize * 4];
-                        dest[left * 4..(left + picture_width as usize) * 4].copy_from_slice(source);
-                    }
-                }
-                let mut frame = ffmpeg::frame::Video::empty();
-                scaler
-                    .run(&rgba, &mut frame)
-                    .map_err(|error| error.to_string())?;
-                muxer.write_frame(&frame, position)?;
+    let mut palette = gif.then(|| gif_palette(settings, time_base)).transpose()?;
+    let (picture_width, picture_height) = fitted_dimensions(
+        project.settings().width,
+        project.settings().height,
+        settings.width,
+        settings.height,
+    );
+    let mut compositor = Compositor::new(
+        VisualPlan::from_project(project),
+        picture_width,
+        picture_height,
+        fps_pair,
+    );
+    let mut rgba =
+        ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGBA, settings.width, settings.height);
+    let mut scaler = ffmpeg::software::scaling::context::Context::get(
+        ffmpeg::format::Pixel::RGBA,
+        settings.width,
+        settings.height,
+        if gif {
+            ffmpeg::format::Pixel::BGRA
+        } else {
+            pixel
+        },
+        settings.width,
+        settings.height,
+        ffmpeg::software::scaling::flag::Flags::BILINEAR,
+    )
+    .map_err(|error| error.to_string())?;
+    let out_end = output_frames(end, fps_pair, muxer.fps)?;
+    for position in 0..out_end {
+        muxer.control.check()?;
+        let source_position =
+            (u128::from(position) * u128::from(fps_pair.0) * u128::from(muxer.fps.1)
+                / (u128::from(fps_pair.1) * u128::from(muxer.fps.0)))
+            .min(u128::from(end - 1)) as u64;
+        let image = compositor.frame(source_position, &muxer.control.cancelled)?;
+        for row in 0..settings.height as usize {
+            let stride = rgba.stride(0);
+            let dest =
+                &mut rgba.data_mut(0)[row * stride..row * stride + settings.width as usize * 4];
+            for pixel in dest.as_chunks_mut::<4>().0 {
+                pixel.copy_from_slice(&[0, 0, 0, 255]);
             }
-            muxer
-                .encoder
-                .send_eof()
-                .map_err(|error| error.to_string())?;
-            muxer.write_packets()?;
-            if let Some(mut audio) = muxer.audio.take() {
-                audio.finish(&mut muxer.output)?;
+            let top = (settings.height - picture_height) as usize / 2;
+            if let Some(image) = &image
+                && row >= top
+                && row < top + picture_height as usize
+            {
+                let left = (settings.width - picture_width) as usize / 2;
+                let source = &image.pixels[(row - top) * picture_width as usize * 4
+                    ..(row - top + 1) * picture_width as usize * 4];
+                dest[left * 4..(left + picture_width as usize) * 4].copy_from_slice(source);
             }
-            muxer
-                .output
-                .write_trailer()
-                .map_err(|error| error.to_string())
-        })();
-        if result.is_err() {
-            cancelled.store(true, Ordering::Relaxed);
         }
-        let audio_result = worker
-            .map(|worker| {
-                worker
-                    .join()
-                    .map_err(|_| "Audio export worker panicked".to_string())
-                    .and_then(|result| result)
-            })
-            .transpose();
-        result.and(audio_result.map(|_| ()))
-    })
+        let mut frame = ffmpeg::frame::Video::empty();
+        scaler
+            .run(&rgba, &mut frame)
+            .map_err(|error| error.to_string())?;
+        if let Some(graph) = &mut palette {
+            frame.set_pts(Some(
+                i64::try_from(position).map_err(|_| "Timeline is too long to export")?,
+            ));
+            graph
+                .get("in")
+                .ok_or("GIF palette input missing")?
+                .source()
+                .add(&frame)
+                .map_err(|error| error.to_string())?;
+            muxer.write_paletted_frames(graph)?;
+        } else {
+            muxer.write_frame(frame, position)?;
+        }
+    }
+    if let Some(graph) = &mut palette {
+        graph
+            .get("in")
+            .ok_or("GIF palette input missing")?
+            .source()
+            .close(i64::try_from(out_end).map_err(|_| "Timeline is too long to export")?)
+            .map_err(|error| error.to_string())?;
+        muxer.write_paletted_frames(graph)?;
+    }
+    muxer
+        .encoder
+        .send_eof()
+        .map_err(|error| error.to_string())?;
+    muxer.write_packets()?;
+    if let Some(mut audio) = muxer.audio.take() {
+        audio.finish(&mut muxer.output)?;
+    }
+    muxer
+        .output
+        .write_trailer()
+        .map_err(|error| error.to_string())
+}
+
+fn gif_palette(
+    settings: &ExportSettings,
+    time_base: ffmpeg::Rational,
+) -> Result<ffmpeg::filter::Graph, String> {
+    let mut graph = ffmpeg::filter::Graph::new();
+    let source = ffmpeg::filter::find("buffer").ok_or("FFmpeg video buffer unavailable")?;
+    let sink = ffmpeg::filter::find("buffersink").ok_or("FFmpeg video sink unavailable")?;
+    let args = format!(
+        "video_size={}x{}:pix_fmt=bgra:time_base={}/{}:pixel_aspect=1/1",
+        settings.width,
+        settings.height,
+        time_base.numerator(),
+        time_base.denominator()
+    );
+    graph
+        .add(&source, "in", &args)
+        .map_err(|error| error.to_string())?;
+    graph
+        .add(&sink, "out", "")
+        .map_err(|error| error.to_string())?;
+    graph.output("in", 0)
+        .and_then(|parser| parser.input("out", 0))
+        .and_then(|parser| parser.parse(
+            "split[v][p];[p]palettegen=stats_mode=single:reserve_transparent=0[palette];[v][palette]paletteuse=new=1:dither=bayer"
+        ))
+        .and_then(|()| graph.validate())
+        .map_err(|error| format!("Could not initialize GIF palette: {error}"))?;
+    Ok(graph)
+}
+
+fn samples_at(frame: u64, fps: (u32, u32)) -> Result<u64, String> {
+    u64::try_from(
+        u128::from(frame) * u128::from(audio::RATE) * u128::from(fps.1) / u128::from(fps.0),
+    )
+    .map_err(|_| "Audio timeline too long".into())
+}
+
+fn render_wav(
+    mut output: ffmpeg::format::context::Output,
+    settings: &ExportSettings,
+    control: &ExportControl,
+    plan: &AudioPlan,
+    queue: &AudioQueue,
+) -> Result<(), String> {
+    let mut audio = AudioEncoder::new(&mut output, settings)?;
+    let mut options = ffmpeg::Dictionary::new();
+    options.set("rf64", "auto");
+    output
+        .write_header_with(options)
+        .map_err(|error| error.to_string())?;
+    for frame in 1..=plan.end {
+        audio.advance(samples_at(frame, plan.fps)?, queue, control, &mut output)?;
+        control.progress.store(frame, Ordering::Relaxed);
+    }
+    audio.finish(&mut output)?;
+    output.write_trailer().map_err(|error| error.to_string())
 }
 
 pub fn output_frames(end: u64, source: (u32, u32), target: (u32, u32)) -> Result<u64, String> {
@@ -419,9 +479,36 @@ struct Muxer {
 }
 
 impl Muxer {
-    fn write_frame(&mut self, frame: &ffmpeg::frame::Video, position: u64) -> Result<(), String> {
+    fn write_paletted_frames(&mut self, graph: &mut ffmpeg::filter::Graph) -> Result<(), String> {
+        let mut out = graph.get("out").ok_or("GIF palette output missing")?;
+        let mut sink = out.sink();
+        loop {
+            let mut frame = ffmpeg::frame::Video::empty();
+            match sink.frame(&mut frame) {
+                Ok(()) => {
+                    let position = frame
+                        .pts()
+                        .and_then(|pts| u64::try_from(pts).ok())
+                        .ok_or("GIF frame timestamp missing")?;
+                    self.write_frame(frame, position)?;
+                }
+                Err(
+                    ffmpeg::Error::Eof
+                    | ffmpeg::Error::Other {
+                        errno: ffmpeg::error::EAGAIN,
+                    },
+                ) => return Ok(()),
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+    }
+
+    fn write_frame(
+        &mut self,
+        mut frame: ffmpeg::frame::Video,
+        position: u64,
+    ) -> Result<(), String> {
         self.control.check()?;
-        let mut frame = frame.clone();
         frame.set_pts(Some(
             i64::try_from(position).map_err(|_| "Timeline is too long to export")?,
         ));
@@ -460,9 +547,76 @@ struct AudioEncoder {
     next_sample: u64,
     encoded_samples: u64,
     pending: Vec<f32>,
+    chunk_samples: usize,
+    pad_final_frame: bool,
 }
 
 impl AudioEncoder {
+    fn new(
+        output: &mut ffmpeg::format::context::Output,
+        settings: &ExportSettings,
+    ) -> Result<Self, String> {
+        use ffmpeg::codec::Id;
+        use ffmpeg::format::sample::Type::{Packed, Planar};
+        let (id, sample_type) = if settings.container == Container::Wav {
+            (Id::PCM_F32LE, Packed)
+        } else {
+            match settings.audio_codec {
+                AudioCodec::Aac => (Id::AAC, Planar),
+                AudioCodec::Opus => (Id::OPUS, Packed),
+            }
+        };
+        let codec =
+            ffmpeg::encoder::find(id).ok_or_else(|| format!("{id:?} encoder not available"))?;
+        let formats = codec.audio().map_err(|error| error.to_string())?;
+        let format = ffmpeg::format::Sample::F32(sample_type);
+        if !formats
+            .formats()
+            .is_some_and(|mut formats| formats.any(|f| f == format))
+            || formats
+                .rates()
+                .is_some_and(|mut rates| !rates.any(|r| r == audio::RATE as i32))
+        {
+            return Err(format!("{id:?} encoder cannot accept 48 kHz float stereo"));
+        }
+        let time_base = ffmpeg::Rational(1, audio::RATE as i32);
+        let mut encoder = ffmpeg::codec::context::Context::new_with_codec(codec)
+            .encoder()
+            .audio()
+            .map_err(|error| error.to_string())?;
+        encoder.set_rate(audio::RATE as i32);
+        encoder.set_channel_layout(ffmpeg::ChannelLayout::STEREO);
+        encoder.set_format(format);
+        encoder.set_time_base(time_base);
+        if id != Id::PCM_F32LE {
+            encoder.set_bit_rate(settings.audio_bitrate_kbps as usize * 1_000);
+        }
+        if output
+            .format()
+            .flags()
+            .contains(ffmpeg::format::Flags::GLOBAL_HEADER)
+        {
+            encoder.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
+        }
+        let encoder = encoder.open().map_err(|error| error.to_string())?;
+        let mut stream = output
+            .add_stream(codec)
+            .map_err(|error| error.to_string())?;
+        stream.set_time_base(time_base);
+        stream.set_parameters(&encoder);
+        let frame_size = encoder.frame_size() as usize;
+        let chunk_samples = if frame_size == 0 { 1024 } else { frame_size };
+        Ok(Self {
+            encoder,
+            index: stream.index(),
+            next_sample: 0,
+            encoded_samples: 0,
+            pending: Vec::with_capacity(chunk_samples * 2),
+            chunk_samples,
+            pad_final_frame: frame_size != 0,
+        })
+    }
+
     fn advance(
         &mut self,
         until: u64,
@@ -485,7 +639,7 @@ impl AudioEncoder {
                 };
                 self.pending.extend([left, right]);
                 self.next_sample += 1;
-                if self.pending.len() == self.encoder.frame_size() as usize * 2 {
+                if self.pending.len() == self.chunk_samples * 2 {
                     self.encode(output)?;
                 }
             } else if queue.is_done() {
@@ -534,8 +688,9 @@ impl AudioEncoder {
 
     fn finish(&mut self, output: &mut ffmpeg::format::context::Output) -> Result<(), String> {
         if !self.pending.is_empty() {
-            let count = self.encoder.frame_size() as usize * 2;
-            self.pending.resize(count, 0.0);
+            if self.pad_final_frame {
+                self.pending.resize(self.chunk_samples * 2, 0.0);
+            }
             self.encode(output)?;
         }
         self.encoder.send_eof().map_err(|error| error.to_string())?;
@@ -634,6 +789,8 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             }
         }));
@@ -690,6 +847,8 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             },
         }));
@@ -760,6 +919,8 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             },
         }));
@@ -876,6 +1037,8 @@ mod tests {
                 volume: 0.5,
                 muted: false,
                 transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             },
         }));
@@ -941,6 +1104,8 @@ mod tests {
             volume: 1.0,
             muted: false,
             transition: None,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             linked_audio: false,
         }];
         layered[1].clips = vec![Clip {
@@ -952,6 +1117,8 @@ mod tests {
             volume: 1.0,
             muted: false,
             transition: None,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             linked_audio: false,
         }];
         layered.push(Track {
@@ -972,6 +1139,8 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             }],
         });
@@ -1078,6 +1247,8 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             },
         }));
@@ -1159,6 +1330,8 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             },
         }));
@@ -1184,6 +1357,42 @@ mod tests {
             }
         }
         assert!(bright);
+        let target_gif = dir.join("title.gif");
+        let mut settings = super::ExportSettings::for_project(
+            160,
+            90,
+            crate::project::FrameRate {
+                numerator: 15,
+                denominator: 1,
+            },
+        );
+        settings.container = crate::project::export_settings::Container::Gif;
+        let control = Arc::new(ExportControl::default());
+        render_with_settings(editor.project(), &target_gif, &settings, control.clone()).unwrap();
+        let mut gif = ffmpeg::format::input(&target_gif).unwrap();
+        assert_eq!(gif.streams().len(), 1);
+        let stream = gif.streams().best(ffmpeg::media::Type::Video).unwrap();
+        assert_eq!(stream.parameters().id(), ffmpeg::codec::Id::GIF);
+        let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+            .unwrap()
+            .decoder()
+            .video()
+            .unwrap();
+        assert_eq!((decoder.width(), decoder.height()), (160, 90));
+        let mut frames = 0;
+        let mut bright = false;
+        for (_, packet) in gif.packets() {
+            decoder.send_packet(&packet).unwrap();
+            let mut frame = ffmpeg::frame::Video::empty();
+            while decoder.receive_frame(&mut frame).is_ok() {
+                frames += 1;
+                bright |= frame.data(0).as_chunks::<4>().0.iter().any(|p| p[0] > 180);
+            }
+        }
+        assert_eq!(frames, 8);
+        assert_eq!(control.frames_done(), 8);
+        assert!(bright);
+        fs::remove_file(target_gif).unwrap();
         fs::remove_file(target).unwrap();
         fs::remove_dir(dir).unwrap();
     }
@@ -1284,6 +1493,8 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             },
         }));
@@ -1309,6 +1520,7 @@ mod tests {
                 AudioCodec::Opus,
                 "opus.webm",
             ),
+            (Container::Wav, VideoCodec::H264, AudioCodec::Aac, "mix.wav"),
         ] {
             settings.container = container;
             settings.video_codec = video_codec;
@@ -1322,6 +1534,13 @@ mod tests {
             )
             .unwrap();
             let samples = decoded_stereo(&target);
+            if container == Container::Wav {
+                let output = ffmpeg::format::input(&target).unwrap();
+                assert_eq!(output.streams().len(), 1);
+                let stream = output.streams().best(ffmpeg::media::Type::Audio).unwrap();
+                assert_eq!(stream.parameters().id(), ffmpeg::codec::Id::PCM_F32LE);
+                assert_eq!(samples.len(), 48_000);
+            }
             assert!(samples.len() >= 47_000, "{name}: {} samples", samples.len());
             for (start, window) in samples[4_800..43_200]
                 .as_chunks::<480>()
@@ -1398,6 +1617,8 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             },
         }));

@@ -6,7 +6,7 @@ clip commands do not complete the corresponding editor workflows.
 
 ## Project and editing foundation
 
-- [ ] Extend existing settings/ID/range/compatibility and probed duration
+- [x] Extend existing settings/ID/range/compatibility and probed duration
   checks with linked AV clips and media path migration/repair.
 - [x] Add project file open/save with atomic writes, external media paths,
   useful errors, and round-trip tests; retain explicit schema-version handling.
@@ -32,8 +32,8 @@ clip commands do not complete the corresponding editor workflows.
   snapping, drag sources from the bin onto a track, and drop files on the
   window or a track; each drop is one undoable command.
 - [x] Trim clips by dragging their edges, with frame and second steps in the inspector.
-- [ ] Generate filmstrips lazily for clips beyond the bounded first 64
-  cached source ranges in large projects.
+- [x] Generate filmstrips for additional visible clips on demand, without
+  retaining more than 64 source ranges when they leave the viewport.
 - [x] Decode video on a worker with a bounded frame buffer; support
   play/pause, frame stepping and frame-accurate timeline ruler seeks.
 - [x] Present video and still-image frames through CreamUI's GPU viewport.
@@ -48,8 +48,7 @@ clip commands do not complete the corresponding editor workflows.
   playback and seeking to it.
 - [x] Add per-clip volume and mute controls that affect both preview and
   export, with tests.
-- [ ] Draw audio waveforms in timeline clips and the source monitor; both
-  currently show only the clip's volume level.
+- [x] Draw audio waveforms in timeline clips and the Source monitor.
 - [x] Extend editable title text with font, size, color, position, style and
   opt-in markup controls; drag to move or resize titles in the video preview.
 - [x] Include title overlays in exported video.
@@ -57,6 +56,7 @@ clip commands do not complete the corresponding editor workflows.
 - [x] Encode H.264 from layered video and still-image clips and AAC from the
   edited audio tracks.
 - [x] Add and test export presets for 1080p, 720p, and vertical 9:16.
+- [x] Export the timeline as a looping GIF or as audio-only WAV, with built-in presets.
 - [x] Run export off the UI thread with progress, cancellation, and cleanup
   of incomplete outputs.
 

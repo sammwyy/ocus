@@ -160,7 +160,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [x] GIF export
 - [x] Audio-only export (WAV)
 - [ ] Bug fixing, UX cleanup and feature freeze
-- [ ] Packaging and installer tests on all platforms
+- [x] Packaging and installer tests on all platforms
 
 **Done when:** the feature set is frozen, known crashes are fixed and the app handles long projects and 4K footage without trouble.
 

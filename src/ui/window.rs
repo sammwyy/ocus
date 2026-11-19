@@ -3694,6 +3694,23 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 .child(Box::new(Flex::row().width(10.0)))
                 .child(divider())
                 .child(Box::new(Flex::row().width(6.0)))
+                .child(if narrow {
+                    icon_button(
+                        Glyph::List,
+                        Help::new("Timeline files (OTIO / EDL)"),
+                        !busy,
+                        state,
+                        UiState::open_timeline_files_menu,
+                    )
+                } else {
+                    tool_button(
+                        Some(Glyph::ChevronDown),
+                        "Timeline files",
+                        !busy,
+                        state,
+                        UiState::open_timeline_files_menu,
+                    )
+                })
                 .child(file_button(Glyph::Document, "New", UiState::new_project))
                 .child(file_button(Glyph::Folder, "Open", UiState::open_dialog))
                 .child(file_button(Glyph::Save, "Save", UiState::save))
@@ -4428,6 +4445,10 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             })
             .child(match state.menu.get() {
                 Some(menu) => context_menu(state, menu, viewport),
+                None => Box::new(Flex::row().size(0.0, 0.0)),
+            })
+            .child(match state.edl_rate_prompt.get() {
+                Some((_, drop)) => edl_rate_modal(state, viewport, drop),
                 None => Box::new(Flex::row().size(0.0, 0.0)),
             })
             .child(if state.export_modal.get() {
@@ -5830,6 +5851,75 @@ fn settings_modal(state: &UiState, viewport: Size) -> BoxedWidget {
                                 )),
                         )),
                 )],
+            }),
+        ],
+    })
+}
+
+fn edl_rate_modal(state: &UiState, viewport: Size, drop: bool) -> BoxedWidget {
+    let rates: &[&[(u32, u32)]] = if drop {
+        &[&[(30_000, 1001), (60_000, 1001)]]
+    } else {
+        &[
+            &[(24_000, 1001), (24, 1), (25, 1)],
+            &[(30_000, 1001), (30, 1), (50, 1)],
+            &[(60_000, 1001), (60, 1)],
+        ]
+    };
+    let width = 290.0;
+    let height = 128.0 + rates.len() as f32 * 36.0;
+    let mut content = Flex::column()
+        .size(width, height)
+        .padding(16.0)
+        .gap(9.0)
+        .background(panel_raised())
+        .border(border(), 1.0)
+        .corner_radius(12.0)
+        .child(heading("Choose the EDL frame rate", text_color(), 16.0))
+        .child(text(
+            "Match the original timeline's frame rate.",
+            muted(),
+            12.0,
+        ));
+    for row in rates {
+        let mut buttons = Flex::row().gap(6.0);
+        for &(num, den) in *row {
+            buttons = buttons.child(secondary_button(
+                None,
+                &frame_rate_label((num, den)),
+                true,
+                state,
+                move |state| {
+                    state.select_edl_rate(num, den);
+                },
+            ));
+        }
+        content = content.child(Box::new(buttons));
+    }
+    content = content
+        .child(spacer())
+        .child(Box::new(Flex::row().child(spacer()).child(
+            secondary_button(None, "Cancel", true, state, UiState::cancel_edl_rate_prompt),
+        )));
+    let cancel = state.clone();
+    Box::new(Layer {
+        style: Layer::at(0.0, 0.0, viewport.width, viewport.height),
+        on_click: Some(Rc::new(move || cancel.cancel_edl_rate_prompt())),
+        children: vec![
+            Box::new(
+                Flex::row()
+                    .size(viewport.width, viewport.height)
+                    .background(Color::rgba(0, 0, 0, 180)),
+            ),
+            Box::new(Layer {
+                style: Layer::at(
+                    (viewport.width - width) / 2.0,
+                    (viewport.height - height) / 2.0,
+                    width,
+                    height,
+                ),
+                on_click: Some(Rc::new(|| {})),
+                children: vec![Box::new(content)],
             }),
         ],
     })

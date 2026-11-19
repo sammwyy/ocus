@@ -9,6 +9,7 @@ use super::state::PlaybackMonitor;
 use super::timeline_view::{Geometry, Ghost, lane_weight};
 use crate::media::MediaKind;
 use crate::project::Command;
+use crate::project::interchange::Format;
 use crate::timeline::{ClipContent, Playback, TrackKind};
 use creamui::core::{Key, Modifiers, Point};
 use creamui::platform::Key as PlatformKey;
@@ -499,6 +500,12 @@ impl UiState {
         if self.settings_modal.peek() {
             if action == Action::Escape {
                 self.close_settings();
+            }
+            return;
+        }
+        if self.edl_rate_prompt.peek().is_some() {
+            if action == Action::Escape {
+                self.cancel_edl_rate_prompt();
             }
             return;
         }
@@ -1154,6 +1161,8 @@ impl UiState {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum MenuCommand {
+    ImportTimeline,
+    ExportTimeline(Format),
     ReverseClip(ClipRef),
     FreezeFrame(ClipRef),
     Action(Action),
@@ -1257,6 +1266,8 @@ impl UiState {
     pub fn run_menu(&self, command: MenuCommand) {
         self.close_menu();
         match command {
+            MenuCommand::ImportTimeline => self.import_timeline_dialog(),
+            MenuCommand::ExportTimeline(format) => self.export_timeline_dialog(format),
             MenuCommand::ReverseClip(target) => self.reverse_clip(target),
             MenuCommand::FreezeFrame(target) => self.freeze_frame(target),
             MenuCommand::Action(action) => self.run(action),
@@ -1321,6 +1332,40 @@ impl UiState {
                 }
             }
         }
+    }
+
+    pub(super) fn open_timeline_files_menu(&self) {
+        if self.busy.peek() {
+            return;
+        }
+        let can_export = self.sequence_end() > 0;
+        self.open_menu(
+            Point { x: 98.0, y: 46.0 },
+            "Timeline files",
+            vec![
+                MenuEntry::new(
+                    "Import OTIO or EDL…",
+                    Glyph::Import,
+                    "",
+                    MenuCommand::ImportTimeline,
+                ),
+                MenuEntry::separator(),
+                MenuEntry::new(
+                    "Export OpenTimelineIO…",
+                    Glyph::Export,
+                    "",
+                    MenuCommand::ExportTimeline(Format::Otio),
+                )
+                .enabled(can_export),
+                MenuEntry::new(
+                    "Export CMX3600 EDL…",
+                    Glyph::Export,
+                    "",
+                    MenuCommand::ExportTimeline(Format::Edl),
+                )
+                .enabled(can_export),
+            ],
+        );
     }
 
     pub fn add_track(&self, kind: TrackKind) {
@@ -1888,6 +1933,29 @@ mod tests {
         state.insert_media(1);
         state.select_media(1);
         (state, source)
+    }
+
+    #[test]
+    fn timeline_files_menu_can_import_empty_projects_and_export_populated_ones() {
+        let empty = UiState::new();
+        let (populated, _source) = playback_state();
+        for (state, can_export) in [(&empty, false), (&populated, true)] {
+            state.open_timeline_files_menu();
+            let menu = state.menu.peek().unwrap();
+            let actions: Vec<_> = menu
+                .entries
+                .iter()
+                .filter_map(|row| row.command.map(|command| (command, row.enabled)))
+                .collect();
+            assert_eq!(
+                actions,
+                [
+                    (MenuCommand::ImportTimeline, true),
+                    (MenuCommand::ExportTimeline(Format::Otio), can_export),
+                    (MenuCommand::ExportTimeline(Format::Edl), can_export),
+                ]
+            );
+        }
     }
 
     #[test]

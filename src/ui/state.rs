@@ -275,6 +275,8 @@ pub(crate) struct UiState {
     pub preview_available: Signal<bool>,
     pub project_path: Signal<Option<PathBuf>>,
     pub title_text: TextController,
+    pub rename_track: Signal<Option<u64>>,
+    pub track_name: TextController,
     pub title_duration: TextController,
     title_duration_synced: Rc<RefCell<String>>,
     pub title_font: TextController,
@@ -434,6 +436,8 @@ impl UiState {
             preview_available: Signal::new(false),
             project_path: Signal::new(None),
             title_text: TextController::default(),
+            rename_track: Signal::new(None),
+            track_name: TextController::default(),
             title_duration: TextController::default(),
             title_duration_synced: Rc::new(RefCell::new(String::new())),
             title_font: TextController::default(),
@@ -782,6 +786,7 @@ impl UiState {
             .project()
             .tracks()
             .iter()
+            .filter(|track| !track.locked)
             .flat_map(|track| track.clips.iter().map(|clip| (track.id, clip.id)))
             .collect();
         let selection = self.selected.peek();
@@ -907,6 +912,32 @@ impl UiState {
                 .set("Edit rejected: check range, track and clip".into());
         }
         changed
+    }
+
+    pub fn begin_track_rename(&self, track_id: u64) {
+        let name = self
+            .editor
+            .borrow()
+            .project()
+            .tracks()
+            .iter()
+            .find(|track| track.id == track_id)
+            .map(|track| track.name.clone());
+        if let Some(name) = name {
+            self.track_name.set_value(name);
+            self.rename_track.set(Some(track_id));
+        }
+    }
+
+    pub fn apply_track_rename(&self) {
+        if let Some(track_id) = self.rename_track.peek() {
+            let name = self.track_name.value().trim().to_owned();
+            if !crate::timeline::Track::valid_name(&name) {
+                return;
+            }
+            self.edit(Command::RenameTrack { track_id, name });
+            self.rename_track.set(None);
+        }
     }
 
     fn refresh_missing_media(&self) {
@@ -1255,6 +1286,13 @@ impl UiState {
 
     /// Replaces the clip selection; the last entry becomes the primary clip.
     pub fn select_clips(&self, mut selection: Vec<ClipRef>) {
+        selection.retain(|(track_id, clip_id)| {
+            self.editor.borrow().project().tracks().iter().any(|track| {
+                track.id == *track_id
+                    && !track.locked
+                    && track.clips.iter().any(|clip| clip.id == *clip_id)
+            })
+        });
         let mut seen = HashSet::new();
         selection.reverse();
         selection.retain(|clip| seen.insert(*clip));
@@ -1405,6 +1443,9 @@ impl UiState {
         let mut sources = Vec::new();
         let audio = AudioPlan::without_media(project, &missing);
         for track in project.tracks() {
+            if track.hidden {
+                continue;
+            }
             for clip in &track.clips {
                 let ClipContent::Media { media_id } = clip.content else {
                     continue;

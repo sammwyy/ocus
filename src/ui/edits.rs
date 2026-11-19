@@ -246,6 +246,7 @@ pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Op
         track.id,
         Clip {
             playback: crate::timeline::Playback::Forward,
+            effect: None,
             lut: None,
             chroma_key: None,
             id,
@@ -405,6 +406,7 @@ pub(crate) fn insert_media(
     };
     let clip = Clip {
         playback: crate::timeline::Playback::Forward,
+        effect: None,
         lut: None,
         chroma_key: None,
         id: next_clip_id(project).ok_or("Clip ID limit reached")?,
@@ -534,6 +536,7 @@ pub(crate) fn detach_audio(project: &Project, selection: &[ClipRef]) -> Option<P
         clip.linked_audio = false;
         detached.push(Clip {
             id,
+            effect: None,
             lut: None,
             stabilization: None,
             chroma_key: None,
@@ -642,6 +645,7 @@ mod tests {
     fn title(id: u64, start_frame: u64) -> Clip {
         Clip {
             playback: crate::timeline::Playback::Forward,
+            effect: None,
             lut: None,
             chroma_key: None,
             id,

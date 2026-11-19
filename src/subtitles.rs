@@ -176,6 +176,7 @@ pub fn track(project: &Project, cues: &[Cue]) -> Result<Track, String> {
             playback: crate::timeline::Playback::Forward,
             transform: Default::default(),
             noise_reduction: false,
+            effect: None,
             lut: None,
             chroma_key: None,
             transition: None,

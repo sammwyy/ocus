@@ -247,6 +247,16 @@ limited to 216,000 source frames to bound saved data and worker memory.
 
 ## Where new work belongs
 
+### WGSL effects
+
+Video and image clips can store one optional `Effect` through undoable
+`SetClipEffect`. `media/effects.rs` owns the lazy headless wgpu device, bounded
+pipeline cache and shader validation. Preview and export workers apply effects
+after color and LUTs, before transforms, in normal and transition layers. The
+Inspector selects built-ins or a referenced WGSL file and displays failures;
+unavailable effects leave the frame unchanged. Built-ins use the same shader
+contract as user files. See [the effect contract](docs/effects.md).
+
 | Work | Place it when implemented | Boundary |
 | --- | --- | --- |
 | File open/save and format migrations | `project/` | Keep writes atomic and source files untouched |

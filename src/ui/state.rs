@@ -147,6 +147,10 @@ pub(super) fn clip_storyboard_key(
             clip.color.saturation,
         ]
         .map(f32::to_bits),
+        effect: clip
+            .effect
+            .as_ref()
+            .and_then(|value| serde_json::to_string(value).ok()),
         lut: clip.lut.clone(),
         chroma_key: clip.chroma_key,
         playback: clip.playback,
@@ -339,6 +343,8 @@ pub(crate) struct UiState {
     pub chroma_preview: Signal<Option<(ClipRef, crate::timeline::ChromaKey)>>,
     pub chroma_gesture: Rc<RefCell<Option<ChromaGesture>>>,
     pub title_gesture: Rc<RefCell<Option<TitleGesture>>>,
+    pub effect_drag: Signal<Option<(ClipRef, f32)>>,
+    pub effect_select: creamui::widgets::SelectController,
     pub media_query: TextController,
     pub media_filter: Signal<MediaFilter>,
     pub media_view: Signal<MediaView>,
@@ -510,6 +516,8 @@ impl UiState {
             chroma_preview: Signal::new(None),
             chroma_gesture: Rc::new(RefCell::new(None)),
             title_gesture: Rc::new(RefCell::new(None)),
+            effect_drag: Signal::new(None),
+            effect_select: creamui::widgets::SelectController::new(0),
             media_query: TextController::default(),
             media_filter: Signal::new(MediaFilter::All),
             media_view: Signal::new(MediaView::Grid),
@@ -854,6 +862,7 @@ impl UiState {
     }
 
     fn refresh_after_edit(&self, status: &str) {
+        self.effect_drag.set(None);
         {
             let editor = self.editor.borrow();
             self.clipboard
@@ -1237,6 +1246,7 @@ impl UiState {
         let source = crate::media::preview::FrameSource {
             chroma_key: None,
             stabilization: None,
+            effect: None,
             playback: crate::timeline::Playback::Forward,
             lut: None,
             color: Default::default(),
@@ -1759,6 +1769,7 @@ impl UiState {
 
     /// Replaces the clip selection; the last entry becomes the primary clip.
     pub fn select_clips(&self, mut selection: Vec<ClipRef>) {
+        self.effect_drag.set(None);
         selection.retain(|(track_id, clip_id)| {
             self.editor.borrow().project().tracks().iter().any(|track| {
                 track.id == *track_id
@@ -1933,6 +1944,7 @@ impl UiState {
                     sources.push(FrameSource {
                         speed: clip.speed,
                         playback: clip.playback,
+                        effect: clip.effect.clone(),
                         lut: clip.lut.clone(),
                         chroma_key: clip.chroma_key,
                         color: clip.color,
@@ -1960,6 +1972,9 @@ impl UiState {
         );
         let resolution = (project.settings().width, project.settings().height);
         let mut visual = VisualPlan::without_media(project, &missing);
+        if let Some(((.., clip_id), amount)) = self.effect_drag.peek() {
+            visual.set_effect_amount(clip_id, amount);
+        }
         if let Some(((.., clip_id), title)) = self.title_preview.peek() {
             visual.replace_title(clip_id, title);
         }
@@ -2012,6 +2027,7 @@ impl UiState {
                 .map(|range| FrameSource {
                     speed: 1.0,
                     playback: range.playback,
+                    effect: None,
                     lut: None,
                     chroma_key: None,
                     color: Default::default(),
@@ -2484,6 +2500,7 @@ impl UiState {
                 (clip.color.neutral()
                     && clip.transform.is_identity()
                     && clip.lut.is_none()
+                    && clip.effect.is_none()
                     && (media.kind == MediaKind::Image || clip.source_frame_at(0) == Some(0)))
                 .then(|| self.thumbnails.borrow().get(&media.path).cloned())
                 .flatten()
@@ -2634,6 +2651,54 @@ impl UiState {
         self.dirty.set(false);
         self.revision.update(|revision| *revision += 1);
         self.status.set("New project · Not saved".into());
+    }
+
+    pub fn choose_effect(&self, track_id: u64, clip_id: u64) {
+        if self.busy.peek() {
+            return;
+        }
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let Some(path) = FileDialog::new()
+            .set_title("Choose a WGSL effect")
+            .add_filter("WGSL shader", &["wgsl"])
+            .pick_file()
+        else {
+            return;
+        };
+        self.busy.set(true);
+        self.status.set("Checking effect shader…".into());
+        let revision = self.revision.peek();
+        let state = self.clone();
+        app.spawn_background(
+            move || {
+                let shader = crate::timeline::EffectShader::File(path);
+                crate::media::effects::validate(&shader).map(|_| shader)
+            },
+            move |result| {
+                state.busy.set(false);
+                match result {
+                    Ok(shader) if state.revision.peek() == revision => {
+                        state.edit(Command::SetClipEffect {
+                            track_id,
+                            clip_id,
+                            effect: Some(crate::timeline::Effect {
+                                shader,
+                                amount: 1.0,
+                            }),
+                        });
+                    }
+                    Ok(_) => state
+                        .status
+                        .set("Effect selection cancelled: project changed".into()),
+                    Err(error) => {
+                        state.show_file_error("Could not load effect shader", error.clone());
+                        state.status.set(error);
+                    }
+                }
+            },
+        );
     }
 
     pub fn choose_lut(&self, track_id: u64, clip_id: u64) {
@@ -5165,6 +5230,7 @@ mod tests {
                         transform_bits: StoryboardKey::transform_bits(
                             crate::timeline::Transform::default(),
                         ),
+                        effect: None,
                         lut: None,
                         chroma_key: None,
                         color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
@@ -5308,6 +5374,7 @@ mod tests {
                 track_id: 0,
                 clip: Box::new(Clip {
                     playback: crate::timeline::Playback::Forward,
+                    effect: None,
                     lut: None,
                     chroma_key: None,
                     id: index,
@@ -6193,6 +6260,7 @@ mod tests {
             track_id: 2,
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 id: 0,

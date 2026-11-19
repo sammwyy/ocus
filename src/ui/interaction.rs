@@ -2117,6 +2117,7 @@ mod tests {
                     transition_out: None,
                     id: track_id + 1,
                     speed: 1.0,
+                    effect: None,
                     lut: None,
                     chroma_key: None,
                     color: Default::default(),
@@ -2176,6 +2177,7 @@ mod tests {
             track_id: 0,
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -2473,6 +2475,7 @@ mod tests {
                 track_id,
                 clip: Box::new(Clip {
                     playback: crate::timeline::Playback::Forward,
+                    effect: None,
                     lut: None,
                     chroma_key: None,
                     id: clip_id,
@@ -2540,6 +2543,7 @@ mod tests {
         })));
         let detached = Clip {
             playback: crate::timeline::Playback::Forward,
+            effect: None,
             lut: None,
             chroma_key: None,
             id: 1,
@@ -2818,6 +2822,7 @@ mod tests {
                 track_id,
                 clip: Box::new(Clip {
                     playback: crate::timeline::Playback::Forward,
+                    effect: None,
                     lut: None,
                     chroma_key: None,
                     id,

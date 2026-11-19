@@ -148,6 +148,7 @@ fn source<'a>(
         || !clip.keyframes.is_empty()
         || !clip.color.neutral()
         || clip.lut.is_some()
+        || clip.effect.is_some()
     {
         notes.insert(
             "Clip effects, transforms, color adjustments and audio settings were not exported."
@@ -295,6 +296,7 @@ impl Sequence {
                     transform: Default::default(),
                     stabilization: None,
                     keyframes: Vec::new(),
+                    effect: None,
                     lut: None,
                     chroma_key: None,
                     transition: None,

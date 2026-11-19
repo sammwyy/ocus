@@ -72,6 +72,16 @@ impl VisualClip {
 }
 
 impl VisualPlan {
+    pub(crate) fn set_effect_amount(&mut self, clip_id: u64, amount: f32) {
+        for clip in self.tracks.iter_mut().flatten() {
+            if let VisualClip::Media(source) = clip
+                && source.clip_id == clip_id
+                && let Some(effect) = &mut source.effect
+            {
+                effect.amount = amount;
+            }
+        }
+    }
     pub fn from_project(project: &Project) -> Self {
         Self::without_media(project, &HashSet::new())
     }
@@ -103,6 +113,7 @@ impl VisualPlan {
                             Some(VisualClip::Media(FrameSource {
                                 speed: clip.speed,
                                 playback: clip.playback,
+                                effect: clip.effect.clone(),
                                 lut: clip.lut.clone(),
                                 chroma_key: clip.chroma_key,
                                 color: clip.color,
@@ -296,6 +307,12 @@ impl Compositor {
                         let image = apply_lut(&mut self.luts, source, image)?;
                         let image =
                             super::stabilize::apply(image, source.stabilization_at(position));
+                        let image = super::effects::apply(
+                            source.effect.as_ref(),
+                            image,
+                            position.saturating_sub(source.start) as f32 * self.fps.1 as f32
+                                / self.fps.0 as f32,
+                        );
                         let transform = source.transform_at(position);
                         let opaque = transform.is_identity()
                             && image.width == self.width
@@ -394,6 +411,12 @@ impl Compositor {
                 );
                 let image = apply_lut(&mut self.luts, source, image)?;
                 let image = super::stabilize::apply(image, source.stabilization_at(position));
+                let image = super::effects::apply(
+                    source.effect.as_ref(),
+                    image,
+                    position.saturating_sub(source.start) as f32 * self.fps.1 as f32
+                        / self.fps.0 as f32,
+                );
                 let transform = source.transform_at(position);
                 if !transform.is_identity() {
                     draw_transformed(pixels, self.width, self.height, &image, transform);
@@ -1155,6 +1178,7 @@ mod tests {
                 stabilization: None,
                 speed: 1.0,
                 playback: Default::default(),
+                effect: None,
                 lut: None,
                 chroma_key: key,
                 clip_id: id,
@@ -1243,6 +1267,7 @@ mod tests {
             source_start: 0,
             duration: 3,
             color: Default::default(),
+            effect: None,
             lut: None,
             chroma_key: None,
             transform: Transform {
@@ -1335,6 +1360,7 @@ mod tests {
                 playback: Playback::Forward,
                 color,
                 speed: 1.0,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 clip_id: 1,
@@ -1441,6 +1467,7 @@ mod tests {
             tracks: vec![vec![VisualClip::Media(FrameSource {
                 playback: crate::timeline::Playback::Forward,
                 color,
+                effect: None,
                 lut: Some(lut_path),
                 chroma_key: None,
                 speed: 1.0,
@@ -1488,6 +1515,167 @@ mod tests {
     }
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn wgsl_effect_follows_chroma_color_and_lut_in_normal_in_and_out_transition_frames() {
+        use crate::timeline::{Effect, EffectShader};
+        let shader = EffectShader::Builtin("invert".into());
+        if let Err(error) = super::super::effects::gpu_available() {
+            eprintln!("Skipping GPU compositor effect pixels: {error}");
+            return;
+        }
+        super::super::effects::validate(&shader).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("color.tga");
+        let mut tga = vec![0; 18];
+        tga[2] = 2;
+        tga[12..14].copy_from_slice(&2u16.to_le_bytes());
+        tga[14..16].copy_from_slice(&2u16.to_le_bytes());
+        tga[16] = 32;
+        tga[17] = 40;
+        tga.extend([200, 150, 100, 255].repeat(4));
+        fs::write(&path, tga).unwrap();
+        let lut_path = dir.path().join("curve.cube");
+        fs::write(&lut_path, "LUT_1D_SIZE 3\n0 0 0\n0.25 0.25 0.25\n1 1 1\n").unwrap();
+        let source = FrameSource {
+            stabilization: None,
+            effect: Some(Effect {
+                shader,
+                amount: 1.0,
+            }),
+            chroma_key: Some(crate::timeline::ChromaKey {
+                color: [0, 0, 255],
+                similarity: 0.05,
+                smoothness: 0.8,
+                spill: 0.4,
+            }),
+            lut: Some(lut_path.clone()),
+            color: ColorAdjust {
+                brightness: 0.2,
+                ..Default::default()
+            },
+            playback: crate::timeline::Playback::Forward,
+            clip_id: 1,
+            path,
+            kind: MediaKind::Image,
+            start: 0,
+            source_start: 0,
+            duration: 10,
+            speed: 1.0,
+            keyframes: Vec::new(),
+            transform: Transform {
+                opacity: 0.8,
+                ..Default::default()
+            },
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let image = VideoLayers::new((30, 1), (2, 2))
+            .layer_at(&source, 0, &cancelled)
+            .unwrap();
+        let raw = image.clone();
+        let image = apply_chroma_key(image, source.chroma_key);
+        assert!(image.pixels[3] > 0 && image.pixels[3] < 255);
+        let lut = Lut::load(&lut_path).unwrap().compile();
+        let invert = |image: Arc<FrameImage>| {
+            let mut image = (*image).clone();
+            for pixel in image.pixels.as_chunks_mut::<4>().0 {
+                for channel in &mut pixel[..3] {
+                    *channel = 255 - *channel;
+                }
+            }
+            Arc::new(image)
+        };
+        let expected = invert(lut.apply(adjust_color(image.clone(), source.color)));
+        assert_ne!(
+            expected.pixels,
+            invert(apply_chroma_key(
+                lut.apply(adjust_color(raw, source.color)),
+                source.chroma_key,
+            ))
+            .pixels
+        );
+        assert_ne!(
+            expected.pixels,
+            lut.apply(adjust_color(invert(image.clone()), source.color))
+                .pixels
+        );
+        assert_ne!(
+            expected.pixels,
+            invert(adjust_color(lut.apply(image), source.color)).pixels
+        );
+        let plan = VisualPlan {
+            resolution: (2, 2),
+            tracks: vec![vec![VisualClip::Media(source.clone())]],
+            transitions: HashMap::new(),
+            transitions_out: HashMap::new(),
+        };
+        let mut compositor = Compositor::new(plan, 2, 2, (30, 1));
+        let mut base = [0, 0, 0, 255].repeat(4);
+        draw_transformed(&mut base, 2, 2, &expected, source.transform);
+        assert_eq!(
+            compositor.frame(2, &cancelled).unwrap().unwrap().pixels,
+            base
+        );
+        for outgoing in [false, true] {
+            for kind in [
+                TransitionKind::Fade,
+                TransitionKind::Dissolve,
+                TransitionKind::Slide,
+            ] {
+                compositor.plan.transitions.clear();
+                compositor.plan.transitions_out.clear();
+                let transitions = if outgoing {
+                    &mut compositor.plan.transitions_out
+                } else {
+                    &mut compositor.plan.transitions
+                };
+                transitions.insert(
+                    1,
+                    Transition {
+                        kind,
+                        duration_frames: 3,
+                        direction: Default::default(),
+                    },
+                );
+                let mut baked_source = source.clone();
+                baked_source.effect = None;
+                baked_source.lut = None;
+                baked_source.chroma_key = None;
+                baked_source.color = Default::default();
+                let baked_path = dir.path().join("baked.tga");
+                let mut baked = vec![0; 18];
+                baked[2] = 2;
+                baked[12..14].copy_from_slice(&2u16.to_le_bytes());
+                baked[14..16].copy_from_slice(&2u16.to_le_bytes());
+                baked[16] = 32;
+                baked[17] = 40;
+                for pixel in expected.pixels.as_chunks::<4>().0 {
+                    baked.extend([pixel[2], pixel[1], pixel[0], pixel[3]]);
+                }
+                fs::write(&baked_path, baked).unwrap();
+                baked_source.path = baked_path;
+                let baked_plan = VisualPlan {
+                    tracks: vec![vec![VisualClip::Media(baked_source)]],
+                    ..compositor.plan.clone()
+                };
+                let mut baked_compositor = Compositor::new(baked_plan, 2, 2, (30, 1));
+                let position = if outgoing { 8 } else { 1 };
+                assert_eq!(
+                    compositor
+                        .frame(position, &cancelled)
+                        .unwrap()
+                        .unwrap()
+                        .pixels,
+                    baked_compositor
+                        .frame(position, &cancelled)
+                        .unwrap()
+                        .unwrap()
+                        .pixels,
+                    "{kind:?} out={outgoing}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn easing_motion_compositor_frames() {
@@ -1591,6 +1779,7 @@ mod tests {
             speed: 1.0,
             duration: 11,
             color: Default::default(),
+            effect: None,
             lut: None,
             chroma_key: None,
             transform: Transform::default(),
@@ -1952,6 +2141,7 @@ mod tests {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 clip_id,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 path,
@@ -2073,6 +2263,7 @@ mod tests {
             keyframes: Vec::new(),
             speed: 1.0,
             playback: crate::timeline::Playback::Forward,
+            effect: None,
             lut: Some(lut_path.clone()),
             chroma_key: None,
             clip_id: 1,
@@ -2162,6 +2353,7 @@ mod tests {
         fs::write(&lut_path, "LUT_1D_SIZE 2\n1 1 1\n0 0 0\n").unwrap();
         let source = FrameSource {
             playback: crate::timeline::Playback::Forward,
+            effect: None,
             lut: None,
             chroma_key: None,
             speed: 1.0,
@@ -2267,6 +2459,7 @@ mod tests {
                 playback: Playback::Forward,
                 color: Default::default(),
                 speed: 1.0,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 clip_id: id,
@@ -2569,6 +2762,7 @@ mod tests {
                 VisualClip::Media(FrameSource {
                     speed: 1.0,
                     playback: crate::timeline::Playback::Forward,
+                    effect: None,
                     lut: None,
                     chroma_key: None,
                     clip_id: 1,
@@ -2585,6 +2779,7 @@ mod tests {
                 VisualClip::Media(FrameSource {
                     speed: 1.0,
                     playback: crate::timeline::Playback::Forward,
+                    effect: None,
                     lut: None,
                     chroma_key: None,
                     clip_id: 2,
@@ -2914,6 +3109,7 @@ mod tests {
                 speed: 1.0,
                 playback: Playback::Forward,
                 clip_id,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 path,
@@ -2996,6 +3192,7 @@ mod tests {
             VisualClip::Media(FrameSource {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 clip_id: id,
@@ -3209,6 +3406,7 @@ mod tests {
             tracks: vec![vec![VisualClip::Media(FrameSource {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 color: Default::default(),
@@ -3266,6 +3464,7 @@ mod tests {
                 tracks: vec![vec![VisualClip::Media(FrameSource {
                     speed: 1.0,
                     playback: crate::timeline::Playback::Forward,
+                    effect: None,
                     lut: None,
                     chroma_key: None,
                     color: Default::default(),
@@ -3370,6 +3569,7 @@ mod tests {
             VisualClip::Media(FrameSource {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 color: Default::default(),
@@ -3592,6 +3792,7 @@ mod tests {
             VisualClip::Media(FrameSource {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 color: Default::default(),

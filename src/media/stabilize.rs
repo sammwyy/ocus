@@ -378,6 +378,7 @@ mod tests {
         FrameSource {
             chroma_key: None,
             stabilization: None,
+            effect: None,
             playback: Playback::Forward,
             lut: None,
             color: Default::default(),

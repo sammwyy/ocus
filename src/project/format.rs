@@ -238,6 +238,7 @@ mod tests {
         }]);
         fixture["tracks"][0]["clips"] = serde_json::json!([Clip {
             playback: crate::timeline::Playback::Forward,
+            effect: None,
             lut: None,
             chroma_key: None,
             id: 8,
@@ -261,6 +262,7 @@ mod tests {
         }]);
         fixture["tracks"][1]["clips"] = serde_json::json!([Clip {
             playback: crate::timeline::Playback::Forward,
+            effect: None,
             lut: None,
             chroma_key: None,
             id: 9,
@@ -376,6 +378,7 @@ mod tests {
             serde_json::from_str(&to_json(&Project::new("Legacy title")).unwrap()).unwrap();
         let mut clip = serde_json::to_value(Clip {
             playback: crate::timeline::Playback::Forward,
+            effect: None,
             lut: None,
             chroma_key: None,
             id: 1,
@@ -471,6 +474,7 @@ mod tests {
         }]);
         let clip = Clip {
             playback: crate::timeline::Playback::Forward,
+            effect: None,
             lut: None,
             chroma_key: None,
             id: 9,

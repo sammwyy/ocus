@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub mod audio;
 pub mod cache;
 pub mod composite;
+pub mod effects;
 pub mod hardware;
 pub mod lut;
 pub mod preview;

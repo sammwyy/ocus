@@ -7,7 +7,11 @@ duration. `SetPlayback` and `freeze_at` are validated, undoable project edits.
 Leaving freeze keeps the held source frame as the source range start and
 clamps the duration to the remaining source. Preview, filmstrips and export
 render reverse and freeze playback; reverse audio follows the picture and
-freeze audio is silent. Playback controls are not implemented yet.
+freeze audio is silent. Select a media clip to choose Normal, Reverse, or
+Freeze in the Inspector. Shift+R toggles reverse; Shift+F adds a frame hold
+at the playhead, splitting the selected video clip when needed. Both actions
+are also in the clip context menu and support undo/redo. Timeline badges
+identify reversed and frozen clips.
 
 Projects open even when source files have moved. Missing files are marked in the
 media bin; choose **Relink…** to search a folder by exact filename, or right-click

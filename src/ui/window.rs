@@ -2,8 +2,8 @@ use super::controls::{
     AUDIO, DragOverlay, ExportMeter, Glyph, Help, IMAGE, Layer, PLAYHEAD, STAGE, Scrubber, TITLE,
     Thumb, VIDEO, ZoomSlider, accent, accent_button, background, border, chip, faint, fit, glyph,
     heading, icon_button, kind_color, list_row, media_item, menu_row, muted, panel, panel_raised,
-    play_button, secondary_button, segment, short_duration, sized_icon_button, surface,
-    surface_hover, text, text_color, timecode, tool_button,
+    play_button, playback_choice, secondary_button, segment, short_duration, sized_icon_button,
+    surface, surface_hover, text, text_color, timecode, tool_button,
 };
 use super::edits::ClipRef;
 use super::interaction::{Action, DragPayload, MenuState};
@@ -20,7 +20,7 @@ use crate::media::{Media, MediaKind};
 use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, VideoCodec};
 use crate::project::{Command, Project};
 use crate::settings::ThemeMode;
-use crate::timeline::{Clip, ClipContent, Title, Track, TrackKind};
+use crate::timeline::{Clip, ClipContent, Playback, Title, Track, TrackKind};
 use creamui::core::layout::{Dimension, Style};
 use creamui::core::{Painter, Point, Rect, TextAlign, Widget};
 use creamui::fonts::{FontWeight, HorizontalAlign, LayoutSettings, cached_layout, resolve};
@@ -93,6 +93,44 @@ fn edit_selection(state: &UiState, edit: impl FnOnce(&Clip, u64, u64) -> Command
 
 fn set_title_text(state: &UiState) {
     change_title(state, |title| title.text = state.title_text.peek());
+}
+
+fn playback_controls(state: &UiState, target: ClipRef, playback: Playback) -> BoxedWidget {
+    let mut choices = Flex::row()
+        .gap(2.0)
+        .padding(3.0)
+        .background(surface())
+        .corner_radius(7.0);
+    for (label, value, hint, shortcut) in [
+        ("Normal", Playback::Forward, "Play the clip forwards", None),
+        (
+            "Reverse",
+            Playback::Reverse,
+            "Play the clip backwards",
+            Some("Shift R"),
+        ),
+        (
+            "Freeze",
+            Playback::Freeze,
+            "Hold the first frame; audio is silent",
+            None,
+        ),
+    ] {
+        let reason = state.playback_reason(target, value);
+        let mut help = Help::new(reason.unwrap_or(hint));
+        if let Some(shortcut) = shortcut {
+            help = help.shortcut(shortcut);
+        }
+        choices = choices.child(playback_choice(
+            label,
+            help,
+            reason.is_none() && !state.busy.get(),
+            playback == value,
+            state,
+            move |state| state.set_playback(target, value),
+        ));
+    }
+    section("Playback", vec![Box::new(choices)])
 }
 
 fn adjust_timing(state: &UiState, source: bool, seconds: bool, increase: bool) {
@@ -1646,6 +1684,9 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 .child(dot(color, 8.0))
                 .child(heading(fit(&name, inner - 20.0, 13.0), text_color(), 13.0)),
         ));
+        if track_kind == TrackKind::Video && matches!(clip.content, ClipContent::Media { .. }) {
+            rows.push(playback_controls(state, (track_id, clip.id), clip.playback));
+        }
         let mut timing = vec![
             property("Track", label_of(track_id)),
             property("Start", timecode(clip.start_frame, fps)),
@@ -1871,6 +1912,9 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     text("Volume and mute affect playback and export.", faint(), 10.0),
                 ],
             ));
+        }
+        if track_kind == TrackKind::Audio && matches!(clip.content, ClipContent::Media { .. }) {
+            rows.push(playback_controls(state, (track_id, clip.id), clip.playback));
         }
         let destinations = compatible_destinations(project.tracks(), track_id, &clip);
         let mut move_buttons = Flex::row()
@@ -2197,6 +2241,7 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                     };
                     let video = track.kind == TrackKind::Video;
                     LaneClip {
+                        playback: clip.playback,
                         clip_id: clip.id,
                         start: clip.start_frame,
                         duration: clip.duration_frames,
@@ -3989,6 +4034,7 @@ fn context_menu(state: &UiState, menu: MenuState, viewport: Size) -> BoxedWidget
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::timeline_view::RULER_HEIGHT;
     use creamui::core::{Painter, Point, Rect, Renderer, RgbaImage, TextAlign, Widget};
     use std::sync::Arc;
 
@@ -4110,6 +4156,95 @@ mod tests {
             Renderer::new().render(build(state, viewport), viewport, &mut painter);
         });
         painter
+    }
+
+    #[test]
+    fn inspector_playback_choices_fit_small_and_large_widths() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "scene.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(10_000_000),
+            has_audio: true,
+        })));
+        state.insert_media(1);
+        let target = state.primary_clip().unwrap();
+        for playback in [Playback::Forward, Playback::Reverse, Playback::Freeze] {
+            state.set_playback(target, playback);
+            for width in [210.0, 360.0] {
+                let size = Size {
+                    width,
+                    height: 1000.0,
+                };
+                let mut painter = TestPainter::default();
+                creamui::reactive::with_context_scope(|| {
+                    creamui::reactive::provide_context(creamui::ThemeProvider::new(
+                        creamui::Theme::dark(),
+                    ));
+                    let editor = state.editor.borrow();
+                    Renderer::new().render(
+                        inspector(&state, editor.project(), width, false),
+                        size,
+                        &mut painter,
+                    );
+                });
+                for label in ["PLAYBACK", "Normal", "Reverse", "Freeze"] {
+                    let (_, rect) = painter
+                        .bounds
+                        .iter()
+                        .find(|(text, _)| text == label)
+                        .unwrap();
+                    assert!(
+                        rect.x >= 0.0 && rect.x + rect.width <= width,
+                        "{label}: {rect:?}"
+                    );
+                    assert!(
+                        rect.y >= 0.0 && rect.y + rect.height <= size.height,
+                        "{label}: {rect:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn timeline_playback_badges_fit_clip_headers_or_hide_when_too_narrow() {
+        let state = UiState::new();
+        state.timeline_rect.set(TIMELINE);
+        assert!(state.add_title());
+        let mut timeline = view(&state);
+        timeline.lanes[0].clips[0].name = "Clip".into();
+        for duration in [1, 12, 150] {
+            timeline.lanes[0].clips[0].duration = duration;
+            timeline.lanes[0].clips[0].playback = Playback::Forward;
+            let mut forward = TestPainter::default();
+            timeline.paint(&mut forward, TIMELINE);
+            for playback in [Playback::Reverse, Playback::Freeze] {
+                timeline.lanes[0].clips[0].playback = playback;
+                let mut painter = TestPainter::default();
+                timeline.paint(&mut painter, TIMELINE);
+                let added: Vec<_> = painter
+                    .fills
+                    .iter()
+                    .filter(|fill| !forward.fills.contains(fill))
+                    .collect();
+                if duration == 1 {
+                    assert!(added.is_empty());
+                } else {
+                    assert!(!added.is_empty());
+                    let x = at(0.0);
+                    let end = at(duration as f32);
+                    for (rect, _) in added {
+                        assert!(rect.x >= x && rect.x + rect.width <= end, "{rect:?}");
+                        assert!(
+                            rect.y >= RULER_HEIGHT && rect.y + rect.height <= RULER_HEIGHT + 20.0,
+                            "{rect:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -5275,6 +5410,7 @@ mod tests {
                 label: "V1".into(),
                 removable: false,
                 clips: vec![LaneClip {
+                    playback: Playback::Forward,
                     clip_id: 7,
                     start: 30,
                     duration: 150,

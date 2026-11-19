@@ -130,6 +130,8 @@ pub(super) fn short_duration(seconds: f64) -> String {
 pub(crate) enum Glyph {
     Play,
     Pause,
+    Reverse,
+    Freeze,
     StepBack,
     StepForward,
     ToStart,
@@ -312,6 +314,17 @@ pub(super) fn draw_glyph(painter: &mut dyn Painter, glyph: Glyph, rect: Rect, co
         Glyph::Pause => {
             pen.bar(6.0, 5.0, 4.0, 14.0);
             pen.bar(14.0, 5.0, 4.0, 14.0);
+        }
+        Glyph::Reverse => {
+            pen.line(&[(20.0, 7.0), (4.0, 7.0), (8.0, 3.0)]);
+            pen.line(&[(4.0, 7.0), (8.0, 11.0)]);
+            pen.line(&[(4.0, 17.0), (20.0, 17.0), (16.0, 13.0)]);
+            pen.line(&[(20.0, 17.0), (16.0, 21.0)]);
+        }
+        Glyph::Freeze => {
+            pen.outline(3.0, 3.0, 18.0, 18.0);
+            pen.bar(8.0, 7.0, 2.5, 10.0);
+            pen.bar(13.5, 7.0, 2.5, 10.0);
         }
         Glyph::StepBack => {
             pen.bar(5.0, 6.0, 2.4, 12.0);
@@ -854,6 +867,46 @@ pub(super) fn chip(
         state,
         operation,
     )
+}
+
+pub(super) fn playback_choice(
+    label: &str,
+    help: Help,
+    enabled: bool,
+    active: bool,
+    state: &UiState,
+    operation: impl Fn(&UiState) + 'static,
+) -> BoxedWidget {
+    let button_state = state.clone();
+    let mut style = Style::default()
+        .height(28.0)
+        .grow(1.0)
+        .basis(0.0)
+        .flex_row()
+        .align(Align::Center)
+        .justify(Justify::Center);
+    style.min_size.width = Dimension::Length(0.0);
+    let button = Box::new(
+        RawButton::new(style, move || operation(&button_state))
+            .disabled(!enabled)
+            .with_children(vec![text(
+                label,
+                if !enabled {
+                    faint()
+                } else if active {
+                    accent()
+                } else {
+                    muted()
+                },
+                11.0,
+            )])
+            .background(if active { surface_hover() } else { CLEAR })
+            .border(if active { border() } else { CLEAR }, 1.0)
+            .corner_radius(5.0)
+            .hover_style(StateStyle::new().background(surface_hover()))
+            .focus_style(StateStyle::new().outline(accent(), 2.0)),
+    );
+    with_help(button, help, state)
 }
 
 /// A media bin item: click selects it, dragging carries it to the timeline.

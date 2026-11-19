@@ -1,7 +1,7 @@
 use super::MediaKind;
 use super::audio::Clock;
-use super::composite::{Compositor, VisualPlan};
-use crate::timeline::{ColorAdjust, Transform};
+use super::composite::{Compositor, VisualPlan, adjust_color, apply_lut, draw_transformed};
+use crate::timeline::{ColorAdjust, Playback, Transform};
 use ffmpeg_next as ffmpeg;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct FrameSource {
+    pub playback: crate::timeline::Playback,
     pub lut: Option<PathBuf>,
     pub color: ColorAdjust,
     pub clip_id: u64,
@@ -20,6 +21,16 @@ pub struct FrameSource {
     pub source_start: u64,
     pub duration: u64,
     pub transform: Transform,
+}
+
+impl FrameSource {
+    fn source_frame_at(&self, position: u64) -> Option<u64> {
+        self.playback.source_frame_at(
+            self.source_start,
+            self.duration,
+            position.checked_sub(self.start)?,
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -32,11 +43,57 @@ pub struct FrameImage {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct StoryboardKey {
+    pub transform_bits: [u32; 9],
+    pub color_bits: [u32; 3],
+    pub lut: Option<PathBuf>,
+    pub playback: crate::timeline::Playback,
     pub path: PathBuf,
     pub kind: MediaKind,
     pub source_start: u64,
     pub duration: u64,
     pub fps: (u32, u32),
+}
+
+impl StoryboardKey {
+    pub fn transform_bits(transform: Transform) -> [u32; 9] {
+        [
+            transform.scale,
+            transform.x,
+            transform.y,
+            transform.rotation,
+            transform.crop_left,
+            transform.crop_top,
+            transform.crop_right,
+            transform.crop_bottom,
+            transform.opacity,
+        ]
+        .map(f32::to_bits)
+    }
+
+    fn transform(&self) -> Transform {
+        let [
+            scale,
+            x,
+            y,
+            rotation,
+            crop_left,
+            crop_top,
+            crop_right,
+            crop_bottom,
+            opacity,
+        ] = self.transform_bits.map(f32::from_bits);
+        Transform {
+            scale,
+            x,
+            y,
+            rotation,
+            crop_left,
+            crop_top,
+            crop_right,
+            crop_bottom,
+            opacity,
+        }
+    }
 }
 
 pub fn storyboard(
@@ -53,35 +110,64 @@ pub fn storyboard(
     } else {
         vec![0, key.duration / 2, key.duration - 1]
     };
+    let [brightness, contrast, saturation] = key.color_bits.map(f32::from_bits);
     let source = FrameSource {
-        lut: None,
-        color: Default::default(),
+        playback: key.playback,
+        lut: key.lut.clone(),
+        color: ColorAdjust {
+            brightness,
+            contrast,
+            saturation,
+        },
         clip_id: 0,
         path: key.path.clone(),
         kind: key.kind,
         start: 0,
         source_start: key.source_start,
         duration: key.duration,
-        transform: Transform::default(),
+        transform: key.transform(),
     };
     let mut frames = Vec::new();
+    let mut luts = HashMap::new();
+    let mut layers = VideoLayers::new(key.fps, (160, 90));
+    layers.use_proxies = use_proxies;
     for offset in offsets {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
-        let target = key
-            .source_start
-            .checked_add(offset)
-            .ok_or("Storyboard frame range overflows")?;
-        let mut reader = FrameReader::open_selected(
-            &source,
-            target,
-            key.fps,
-            (160, 90),
-            cancelled.clone(),
-            use_proxies,
-        )?;
-        let mut image = Arc::unwrap_or_clone(reader.frame_at(target, &cancelled)?);
+        let image = if key.playback == Playback::Forward {
+            let target = source
+                .source_frame_at(offset)
+                .ok_or("Storyboard frame range overflows")?;
+            let mut reader = FrameReader::open_selected(
+                &source,
+                target,
+                key.fps,
+                (160, 90),
+                cancelled.clone(),
+                use_proxies,
+            )?;
+            reader.frame_at(target, &cancelled)?
+        } else {
+            layers.layer_at(&source, offset, &cancelled)?
+        };
+        let image = apply_lut(&mut luts, &source, adjust_color(image, source.color))?;
+        let mut image = Arc::unwrap_or_clone(image);
+        if !source.transform.is_identity() {
+            let mut pixels = vec![0; image.pixels.len()];
+            for pixel in pixels.as_chunks_mut::<4>().0 {
+                pixel[3] = 255;
+            }
+            draw_transformed(
+                &mut pixels,
+                image.width,
+                image.height,
+                &image,
+                source.transform,
+            );
+            image.pixels = pixels;
+            image.picture = (0, 0, image.width, image.height);
+        }
         for pixel in image.pixels.as_chunks_mut::<4>().0 {
             for channel in 0..3 {
                 pixel[channel] =
@@ -160,7 +246,9 @@ impl VideoLayers {
         position: u64,
         cancelled: &Arc<AtomicBool>,
     ) -> Result<Arc<FrameImage>, String> {
-        let target = source.source_start + position - source.start;
+        let target = source
+            .source_frame_at(position)
+            .ok_or("Invalid preview source position")?;
         if !self.readers.contains_key(&source.clip_id) {
             self.readers.insert(
                 source.clip_id,
@@ -174,10 +262,12 @@ impl VideoLayers {
                 )?,
             );
         }
-        self.readers
-            .get_mut(&source.clip_id)
-            .unwrap()
-            .frame_at(target, cancelled)
+        let reader = self.readers.get_mut(&source.clip_id).unwrap();
+        if source.playback == Playback::Reverse {
+            reader.reverse_frame_at(target, source.source_start, cancelled)
+        } else {
+            reader.frame_at(target, cancelled)
+        }
     }
 
     pub(crate) fn retain(&mut self, active: &[u64]) {
@@ -300,6 +390,7 @@ struct FrameReader {
     stream_index: usize,
     time_base: ffmpeg::Rational,
     origin_pts: i64,
+    proxy: bool,
     fps: (u32, u32),
     output: (u32, u32),
     fallback: u64,
@@ -308,6 +399,10 @@ struct FrameReader {
     eof: bool,
     still: bool,
     fitted: Option<Arc<FrameImage>>,
+    reverse_start: u64,
+    reverse_frames: Vec<Arc<FrameImage>>,
+    #[cfg(test)]
+    decoded_frames: usize,
 }
 
 impl FrameReader {
@@ -407,15 +502,68 @@ impl FrameReader {
             stream_index,
             time_base,
             origin_pts,
+            proxy,
             fps,
             output,
             fallback: 0,
             current: None,
             future: None,
             eof: false,
-            still: source.kind == MediaKind::Image,
+            still: source.kind == MediaKind::Image || source.playback == Playback::Freeze,
             fitted: None,
+            reverse_start: 0,
+            reverse_frames: Vec::new(),
+            #[cfg(test)]
+            decoded_frames: 0,
         })
+    }
+
+    fn reverse_frame_at(
+        &mut self,
+        target: u64,
+        minimum: u64,
+        cancelled: &AtomicBool,
+    ) -> Result<Arc<FrameImage>, String> {
+        if let Some(index) = target.checked_sub(self.reverse_start)
+            && let Some(image) = self.reverse_frames.get(index as usize)
+        {
+            return Ok(image.clone());
+        }
+        const MAX_FRAMES: u64 = 32;
+        const MAX_BYTES: u64 = 64 * 1024 * 1024;
+        let bytes = u64::from(self.output.0) * u64::from(self.output.1) * 4;
+        let count = (MAX_BYTES / bytes.max(1)).clamp(1, MAX_FRAMES);
+        let start = target.saturating_sub(count - 1).max(minimum);
+        self.reverse_frames.clear();
+        let micros =
+            u128::from(start) * u128::from(self.fps.1) * 1_000_000 / u128::from(self.fps.0);
+        let timestamp = if self.proxy {
+            i64::try_from(micros).ok()
+        } else {
+            super::seek_timestamp(&self.input, micros)
+        }
+        .ok_or("Reverse seek overflows")?;
+        self.input
+            .seek(timestamp, ..timestamp)
+            .map_err(|error| error.to_string())?;
+        self.decoder.flush();
+        self.current = None;
+        self.future = None;
+        self.fitted = None;
+        self.eof = false;
+        self.fallback = start;
+        self.reverse_start = start;
+        for frame in start..=target {
+            if cancelled.load(Ordering::Relaxed) {
+                return Err("Preview cancelled".into());
+            }
+            let image = self.frame_at(frame, cancelled)?;
+            self.reverse_frames.push(image);
+        }
+        self.reverse_frames
+            .last()
+            .cloned()
+            .ok_or("Empty reverse block".into())
     }
 
     fn frame_at(&mut self, target: u64, cancelled: &AtomicBool) -> Result<Arc<FrameImage>, String> {
@@ -487,6 +635,10 @@ impl FrameReader {
             }
             let mut decoded = ffmpeg::frame::Video::empty();
             if self.decoder.receive_frame(&mut decoded).is_ok() {
+                #[cfg(test)]
+                {
+                    self.decoded_frames += 1;
+                }
                 if decoded.timestamp().is_some_and(|pts| pts < self.origin_pts) {
                     continue;
                 }
@@ -538,6 +690,7 @@ mod tests {
 
     fn proxy_source(path: PathBuf, duration: u64) -> FrameSource {
         FrameSource {
+            playback: crate::timeline::Playback::Forward,
             lut: None,
             color: ColorAdjust::default(),
             clip_id: 1,
@@ -647,6 +800,56 @@ mod tests {
                         .unwrap()
                         .pixels[0]
                 );
+            }
+            for playback in [Playback::Reverse, Playback::Freeze] {
+                let mut source = source.clone();
+                source.playback = playback;
+                if playback == Playback::Freeze {
+                    source.source_start = source.duration / 2;
+                    source.duration = 8;
+                }
+                let first = source.source_frame_at(0).unwrap();
+                let mut original = FrameReader::open_selected(
+                    &source,
+                    first,
+                    (30, 1),
+                    (160, 90),
+                    cancelled.clone(),
+                    false,
+                )
+                .unwrap();
+                let mut preview = FrameReader::open_selected(
+                    &source,
+                    first,
+                    (30, 1),
+                    (160, 90),
+                    cancelled.clone(),
+                    true,
+                )
+                .unwrap();
+                assert!(preview.proxy);
+                for offset in 0..source.duration {
+                    let target = source.source_frame_at(offset).unwrap();
+                    let (original, preview) = if playback == Playback::Reverse {
+                        (
+                            original
+                                .reverse_frame_at(target, source.source_start, &cancelled)
+                                .unwrap(),
+                            preview
+                                .reverse_frame_at(target, source.source_start, &cancelled)
+                                .unwrap(),
+                        )
+                    } else {
+                        (
+                            original.frame_at(target, &cancelled).unwrap(),
+                            preview.frame_at(target, &cancelled).unwrap(),
+                        )
+                    };
+                    assert!(
+                        original.pixels[0].abs_diff(preview.pixels[0]) <= 3,
+                        "{playback:?}, late={late}, offset={offset}"
+                    );
+                }
             }
             // A deliberately different cache entry makes source selection observable.
             assert!(
@@ -769,6 +972,183 @@ mod tests {
     }
 
     #[test]
+    fn reverse_and_freeze_match_forward_frames_and_seek() {
+        ffmpeg::init().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frames.mkv");
+        assert!(
+            Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "nullsrc=s=64x36:r=30,geq=lum=16+mod(N\\,30)*7:cb=128:cr=128",
+                    "-frames:v",
+                    "80",
+                    "-c:v",
+                    "ffv1"
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        for late in [false, true] {
+            let path = if late {
+                let output = dir.path().join("late.mkv");
+                assert!(
+                    Command::new("ffmpeg")
+                        .args(["-v", "error", "-i"])
+                        .arg(&path)
+                        .args(["-c", "copy", "-output_ts_offset", "30"])
+                        .arg(&output)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+                output
+            } else {
+                path.clone()
+            };
+            let mut source = FrameSource {
+                transform: crate::timeline::Transform::default(),
+                lut: None,
+                color: Default::default(),
+                playback: Playback::Forward,
+                clip_id: 1,
+                path,
+                kind: MediaKind::Video,
+                start: 10,
+                source_start: 5,
+                duration: 70,
+            };
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let mut forward = VideoLayers::new((30, 1), (64, 36));
+            let frames: Vec<_> = (10..80)
+                .map(|k| forward.layer_at(&source, k, &cancelled).unwrap())
+                .collect();
+            source.playback = Playback::Reverse;
+            let mut reverse = VideoLayers::new((30, 1), (64, 36));
+            for k in 0..70 {
+                assert_eq!(
+                    reverse
+                        .layer_at(&source, 10 + k, &cancelled)
+                        .unwrap()
+                        .pixels,
+                    frames[69 - k as usize].pixels
+                );
+            }
+            let reader = reverse.readers.get(&1).unwrap();
+            assert!(reader.reverse_frames.len() <= 32);
+            assert!(
+                reader.decoded_frames < 150,
+                "decoded {} frames",
+                reader.decoded_frames
+            );
+            let mut seek = VideoLayers::new((30, 1), (64, 36));
+            for k in [35, 36, 69, 0, 33] {
+                assert_eq!(
+                    seek.layer_at(&source, 10 + k, &cancelled).unwrap().pixels,
+                    frames[69 - k as usize].pixels
+                );
+            }
+            source.playback = Playback::Freeze;
+            let mut freeze = VideoLayers::new((30, 1), (64, 36));
+            let held = freeze.layer_at(&source, 10, &cancelled).unwrap();
+            let decoded = freeze.readers[&1].decoded_frames;
+            assert_eq!(held.pixels, frames[0].pixels);
+            for k in 10..80 {
+                assert!(Arc::ptr_eq(
+                    &held,
+                    &freeze.layer_at(&source, k, &cancelled).unwrap()
+                ));
+            }
+            assert_eq!(freeze.readers[&1].decoded_frames, decoded);
+            assert!(freeze.layer_at(&source, 80, &cancelled).is_err());
+            let key = StoryboardKey {
+                transform_bits: StoryboardKey::transform_bits(crate::timeline::Transform::default()),
+                lut: None,
+                color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
+                playback: Playback::Freeze,
+                path: source.path.clone(),
+                kind: source.kind,
+                source_start: 5,
+                duration: 70,
+                fps: (30, 1),
+            };
+            let stills = storyboard(&key, cancelled.clone(), false).unwrap();
+            assert!(stills.iter().all(|image| image.pixels == stills[0].pixels));
+            let mut key = key;
+            key.playback = Playback::Forward;
+            let strips = storyboard(&key, cancelled.clone(), false).unwrap();
+            key.playback = Playback::Reverse;
+            let reversed = storyboard(&key, cancelled, false).unwrap();
+            assert_eq!(reversed[0].pixels, strips[2].pixels);
+            assert_eq!(reversed[2].pixels, strips[0].pixels);
+        }
+    }
+
+    #[test]
+    #[ignore = "release-mode reverse playback timing"]
+    fn reverse_1080p_timing() {
+        ffmpeg::init().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("1080p.mp4");
+        assert!(
+            Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=s=1920x1080:r=30:d=3",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast",
+                    "-g",
+                    "30",
+                    "-threads",
+                    "1"
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut source = FrameSource {
+            transform: crate::timeline::Transform::default(),
+            lut: None,
+            color: Default::default(),
+            playback: Playback::Forward,
+            clip_id: 1,
+            path,
+            kind: MediaKind::Video,
+            start: 0,
+            source_start: 0,
+            duration: 90,
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        for _ in 0..3 {
+            for playback in [Playback::Forward, Playback::Reverse] {
+                source.playback = playback;
+                let mut layers = VideoLayers::new((30, 1), (1920, 1080));
+                let started = Instant::now();
+                for frame in 0..90 {
+                    std::hint::black_box(layers.layer_at(&source, frame, &cancelled).unwrap());
+                }
+                println!(
+                    "1080p 90 frames {playback:?}: {:.3} s",
+                    started.elapsed().as_secs_f64()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn decoded_colors_match_ffmpeg() {
         ffmpeg::init().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -825,6 +1205,7 @@ mod tests {
                 .unwrap();
             assert!(reference.status.success());
             let source = FrameSource {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 color: Default::default(),
                 clip_id: 1,
@@ -864,6 +1245,7 @@ mod tests {
         let root = PathBuf::from(std::env::var("OCUS_SEEK_FIXTURES").unwrap());
         for name in ["late", "zero"] {
             let source = FrameSource {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 color: Default::default(),
                 clip_id: 1,
@@ -914,6 +1296,7 @@ mod tests {
         data.extend((0..8 * 6 * 3).map(|value| value as u8));
         fs::write(&path, data).unwrap();
         let source = FrameSource {
+            playback: crate::timeline::Playback::Forward,
             lut: None,
             color: Default::default(),
             clip_id: 1,
@@ -959,6 +1342,7 @@ mod tests {
             );
             let frames = u64::from(fps.0 / fps.1);
             let source = FrameSource {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 color: Default::default(),
                 clip_id: 1,
@@ -1021,6 +1405,7 @@ mod tests {
                 .success()
         );
         let source = FrameSource {
+            playback: crate::timeline::Playback::Forward,
             lut: None,
             color: Default::default(),
             clip_id: 1,
@@ -1094,6 +1479,7 @@ mod tests {
                 (180, 320)
             };
             let source = FrameSource {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 color: Default::default(),
                 clip_id: 1,
@@ -1153,6 +1539,7 @@ mod tests {
             data.extend(vec![255; width * height * 3]);
             fs::write(&path, data).unwrap();
             let source = FrameSource {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 color: Default::default(),
                 clip_id: 1,
@@ -1242,6 +1629,7 @@ mod tests {
         ffmpeg::init().unwrap();
         let cancelled = Arc::new(AtomicBool::new(false));
         let source = FrameSource {
+            playback: crate::timeline::Playback::Forward,
             lut: None,
             color: Default::default(),
             clip_id: 1,
@@ -1278,6 +1666,7 @@ mod tests {
         }
         fs::write(&path, source).unwrap();
         let clips = [FrameSource {
+            playback: crate::timeline::Playback::Forward,
             lut: None,
             color: Default::default(),
             clip_id: 1,
@@ -1357,18 +1746,25 @@ mod tests {
                 .last()
                 .is_some_and(|frame| frame.0 == 5 && frame.1 > 140)
         );
-        let storyboard_frames = storyboard(
-            &StoryboardKey {
-                path: path.clone(),
-                kind: MediaKind::Video,
-                source_start: 2,
-                duration: 3,
-                fps: (30, 1),
-            },
-            Arc::new(AtomicBool::new(false)),
-            false,
-        )
-        .unwrap();
+        let storyboard_frames =
+            storyboard(
+                &StoryboardKey {
+                    transform_bits: StoryboardKey::transform_bits(
+                        crate::timeline::Transform::default(),
+                    ),
+                    lut: None,
+                    color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
+                    playback: crate::timeline::Playback::Forward,
+                    path: path.clone(),
+                    kind: MediaKind::Video,
+                    source_start: 2,
+                    duration: 3,
+                    fps: (30, 1),
+                },
+                Arc::new(AtomicBool::new(false)),
+                false,
+            )
+            .unwrap();
         assert_eq!(storyboard_frames.len(), 3);
         let center = (45 * 160 + 80) * 4;
         assert!(storyboard_frames[0].pixels[center] < 120);
@@ -1376,6 +1772,7 @@ mod tests {
         let cut = PreviewPlan {
             use_proxies: false,
             sources: vec![FrameSource {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 color: Default::default(),
                 clip_id: 2,

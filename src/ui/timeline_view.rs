@@ -40,6 +40,7 @@ impl ClipLook {
 }
 
 pub(super) struct LaneClip {
+    pub transition_frames: u64,
     pub clip_id: u64,
     pub start: u64,
     pub duration: u64,
@@ -788,6 +789,37 @@ impl TimelineView {
                 );
             }
             _ => {}
+        }
+        if clip.transition_frames > 0 && content.height > 0.0 {
+            let end = geometry.x(clip
+                .start
+                .saturating_add(clip.transition_frames.min(clip.duration)));
+            let width = (end - full.x).max(1.0);
+            for x in (left.floor() as i32)..(end.min(right).ceil() as i32) {
+                let progress = ((x as f32 - full.x) / width).clamp(0.0, 1.0);
+                painter.fill_rect(
+                    Rect {
+                        x: x as f32,
+                        y: content.y + progress * content.height,
+                        width: 1.0,
+                        height: (1.0 - progress) * content.height,
+                    },
+                    Color::rgba(255, 255, 255, 40),
+                    0.0,
+                );
+            }
+            painter.stroke_line(
+                Point {
+                    x: full.x,
+                    y: content.y,
+                },
+                Point {
+                    x: end,
+                    y: content.y + content.height,
+                },
+                Color::rgba(255, 255, 255, 190),
+                1.0,
+            );
         }
         painter.fill_rect(
             Rect {

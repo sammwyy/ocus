@@ -1,0 +1,41 @@
+name: Performance benchmarks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      XDG_CACHE_HOME: ${{ github.workspace }}/target/benchmark-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config ffmpeg libavformat-dev libavcodec-dev libavfilter-dev libavutil-dev libswscale-dev libswresample-dev libclang-dev libasound2-dev libudev-dev libdbus-1-dev libwayland-dev libxkbcommon-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Run release benchmarks
+        run: cargo bench --locked --bench performance
+      - name: Publish results
+        if: always()
+        run: |
+          if [ -f target/benchmarks/results.md ]; then
+            cat target/benchmarks/results.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Benchmarks failed before results were produced; see the run log.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-results
+          path: target/benchmarks/
+          if-no-files-found: warn

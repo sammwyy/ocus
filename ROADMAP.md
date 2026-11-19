@@ -63,6 +63,25 @@ Rough targets to track from the first release onward. They will be measured on m
 - Scrubbing and playback of 1080p footage at the project frame rate
 - No UI freezes during import, thumbnail generation or export
 
+Headless CI regression budgets (`cargo bench --locked --bench performance`):
+
+| Workload | CI budget | Target covered |
+|---|---:|---|
+| Cold 1080p thumbnail + three storyboard frames | < 2000 ms | Import/thumbnail responsiveness |
+| Same source from warm disk cache | < 100 ms | Scrubbing responsiveness |
+| Atomic save / open with source probing, 100 clips | < 500 ms each | Project responsiveness / startup component |
+| Timeline command + undo, 100-clip project | < 10 ms per pair | Interactive edits |
+| Software decode + CPU composition, 1080p 30-frame sequence | < 100 ms/frame | Playback throughput regression guard |
+
+Each value is the median of five runs; fixture generation is excluded. Cold
+means an empty Ocus cache entry, not a flushed OS page cache. Decode/composition
+includes decoder setup per sequence. Budgets allow shared-runner variance (the
+playback guard allows 3x the 30 fps frame budget); they are regression gates,
+not proof of real-time playback. The generated two-second MPEG-4 fixture and
+single visible video layer deliberately avoid hardware acceleration. Desktop
+cold start, idle memory, actual 30 fps playback/scrubbing, UI thread stalls and
+export responsiveness still require release checks on mid-range desktop hardware.
+
 ---
 
 ## v0.1: MVP
@@ -174,7 +193,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [ ] Stable installers for Windows, macOS and Linux
 - [ ] Internationalization (i18n) with community translations
 - [ ] User documentation and a getting started guide
-- [ ] Performance benchmarks in CI
+- [x] Performance benchmarks in CI
 - [ ] Stable, documented project file format
 
 **Done when:** the project file format is stable, the targets in the performance section are met, and installers are available for all three platforms.

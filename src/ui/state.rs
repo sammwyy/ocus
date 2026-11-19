@@ -155,7 +155,7 @@ pub(super) fn clip_storyboard_key(
     })
 }
 
-type InspectedSource = Result<(PathBuf, MediaProbe, Option<Thumbnail>), String>;
+type InspectedSource = Result<ImportedSource, String>;
 
 enum ImportEvent {
     Progress(usize, PathBuf),
@@ -321,6 +321,7 @@ pub(crate) struct UiState {
     pub title_font: TextController,
     pub title_size: TextController,
     pub title_color: TextController,
+    pub title_background: TextController,
     pub title_picker: ColorPickerController,
     pub title_preview: Signal<Option<(ClipRef, Title)>>,
     pub title_gesture: Rc<RefCell<Option<TitleGesture>>>,
@@ -485,6 +486,7 @@ impl UiState {
             title_font: TextController::default(),
             title_size: TextController::default(),
             title_color: TextController::default(),
+            title_background: TextController::default(),
             title_picker: ColorPickerController::new(),
             title_preview: Signal::new(None),
             title_gesture: Rc::new(RefCell::new(None)),
@@ -1308,6 +1310,11 @@ impl UiState {
         self.title_color.set_value(format!(
             "#{:02X}{:02X}{:02X}{:02X}",
             title.color[0], title.color[1], title.color[2], title.color[3]
+        ));
+        let background = title.background.unwrap_or([0, 0, 0, 179]);
+        self.title_background.set_value(format!(
+            "#{:02X}{:02X}{:02X}{:02X}",
+            background[0], background[1], background[2], background[3]
         ));
     }
 
@@ -2533,6 +2540,35 @@ impl UiState {
         }
     }
 
+    pub fn subtitle_dialog(&self) {
+        if self.busy.peek() {
+            return;
+        }
+        if let Some(paths) = FileDialog::new()
+            .set_title("Import subtitles")
+            .add_filter("SubRip subtitles", &["srt"])
+            .pick_files()
+        {
+            self.import_paths(paths, None);
+        }
+    }
+
+    fn import_subtitle_cues(&self, cues: &[crate::subtitles::Cue]) -> Result<usize, String> {
+        let track = crate::subtitles::track(self.editor.borrow().project(), cues)?;
+        let count = track.clips.len();
+        let mut tracks = self.editor.borrow().project().tracks().to_vec();
+        let index = tracks
+            .iter()
+            .rposition(|track| track.kind == TrackKind::Video)
+            .map_or(0, |index| index + 1);
+        tracks.insert(index, track);
+        if self.edit(Command::ReplaceTracks(tracks)) {
+            Ok(count)
+        } else {
+            Err("Subtitles rejected by project validation".into())
+        }
+    }
+
     pub fn export_dialog(&self) {
         if !self.can_queue_export() || !export::can_render(self.editor.borrow().project()) {
             return;
@@ -2699,6 +2735,16 @@ impl UiState {
             return;
         };
         settings.speed = speed;
+        self.set_export_draft(settings);
+        self.export_preset.set("Custom".into());
+    }
+
+    pub fn toggle_burn_subtitles(&self) {
+        let Ok(mut settings) = self.export_form() else {
+            self.status.set("Fix the export fields first".into());
+            return;
+        };
+        settings.burn_subtitles = !settings.burn_subtitles;
         self.set_export_draft(settings);
         self.export_preset.set("Custom".into());
     }
@@ -3195,7 +3241,7 @@ impl UiState {
             move |emit| {
                 let mut results = Vec::new();
                 for (index, path) in paths.into_iter().enumerate() {
-                    let result = inspect_source(&path);
+                    let result = inspect_import(&path);
                     emit(ImportEvent::Progress(index + 1, path.clone()));
                     results.push((path, result));
                 }
@@ -3214,9 +3260,25 @@ impl UiState {
                 let mut imported = 0;
                 let mut ready = Vec::new();
                 let mut errors = Vec::new();
+                let mut subtitle_summary = None;
                 for (source_path, result) in results {
                     match result {
-                        Ok((path, info, thumb)) => {
+                        Ok(ImportedSource::Subtitles(cues)) => {
+                            match state.import_subtitle_cues(&cues) {
+                                Ok(count) => {
+                                    imported += 1;
+                                    subtitle_summary = Some(format!(
+                                        "Imported {count} subtitles from {}",
+                                        source_path
+                                            .file_name()
+                                            .unwrap_or_default()
+                                            .to_string_lossy()
+                                    ));
+                                }
+                                Err(error) => errors.push((source_path, error)),
+                            }
+                        }
+                        Ok(ImportedSource::Media(path, info, thumb)) => {
                             let existing = state
                                 .editor
                                 .borrow()
@@ -3288,7 +3350,11 @@ impl UiState {
                 }
                 let summary = import_summary(imported, total, &errors);
                 if errors.is_empty() {
-                    state.status.set(summary);
+                    state.status.set(if total == 1 {
+                        subtitle_summary.unwrap_or(summary)
+                    } else {
+                        summary
+                    });
                 } else {
                     state.status.set(format!(
                         "{imported} of {total} files imported · {} failed",
@@ -3591,6 +3657,25 @@ fn project_file(path: PathBuf) -> Result<PathBuf, String> {
     }
 }
 
+enum ImportedSource {
+    Media(PathBuf, MediaProbe, Option<Thumbnail>),
+    Subtitles(Vec<crate::subtitles::Cue>),
+}
+
+fn inspect_import(path: &Path) -> Result<ImportedSource, String> {
+    if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("srt"))
+    {
+        std::fs::read_to_string(path)
+            .map_err(|error| error.to_string())
+            .and_then(|source| crate::subtitles::parse(&source))
+            .map(ImportedSource::Subtitles)
+    } else {
+        inspect_source(path).map(|(path, info, thumb)| ImportedSource::Media(path, info, thumb))
+    }
+}
+
 fn inspect_source(path: &Path) -> Result<(PathBuf, MediaProbe, Option<Thumbnail>), String> {
     let info = probe(path)?;
     let path = path
@@ -3625,6 +3710,53 @@ fn import_summary(imported: usize, total: usize, errors: &[(PathBuf, String)]) -
 mod tests {
     use super::*;
     use crate::timeline::Clip;
+
+    #[test]
+    fn srt_file_import_is_one_undoable_track_edit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("captions.SRT");
+        std::fs::write(
+            &path,
+            "1\n00:00:00,000 --> 00:00:01,000\nHello\n\n2\n00:00:01,000 --> 00:00:02,000\nWorld",
+        )
+        .unwrap();
+        let state = super::UiState::new();
+        let super::ImportedSource::Subtitles(cues) = super::inspect_import(&path).unwrap() else {
+            panic!("SRT was probed as media")
+        };
+        assert_eq!(state.import_subtitle_cues(&cues).unwrap(), 2);
+        let imported = state.editor.borrow().project().tracks().to_vec();
+        assert_eq!(imported.len(), 5);
+        assert!(imported[2].subtitles);
+        assert_eq!(imported[2].clips.len(), 2);
+        assert!(
+            imported[2]
+                .clips
+                .iter()
+                .all(|clip| matches!(clip.content, crate::timeline::ClipContent::Title(_)))
+        );
+        state.undo();
+        assert_eq!(state.editor.borrow().project().tracks().len(), 4);
+        state.redo();
+        assert_eq!(state.editor.borrow().project().tracks(), imported);
+        state.import_subtitle_cues(&cues).unwrap();
+        assert_eq!(
+            state
+                .editor
+                .borrow()
+                .project()
+                .tracks()
+                .iter()
+                .filter(|track| track.subtitles)
+                .count(),
+            2
+        );
+        state.editor.borrow().project().validate().unwrap();
+        std::fs::write(&path, "not subtitles").unwrap();
+        assert!(super::inspect_import(&path).is_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(super::inspect_import(&path).is_err());
+    }
 
     #[test]
     fn proxy_preference_is_applied_to_preview_plans_without_changing_project() {

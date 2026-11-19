@@ -162,6 +162,10 @@ pub enum Command {
         clip_id: u64,
         title: Title,
     },
+    SetSubtitleStyle {
+        track_id: u64,
+        style: Title,
+    },
     RippleDelete {
         track_id: u64,
         clip_id: u64,
@@ -966,27 +970,30 @@ impl Editor {
                 {
                     return None;
                 }
-                let kind = self
+                let track = self
                     .project
                     .tracks
                     .iter()
-                    .find(|track| track.id == track_id)?
-                    .kind;
+                    .find(|track| track.id == track_id)?;
+                let kind = track.kind;
                 let compatible = match &clip.content {
                     ClipContent::Title(title) => {
                         kind == TrackKind::Video
                             && title.valid()
                             && clip.playback == Playback::Forward
                     }
-                    ClipContent::Media { media_id } => self
-                        .project
-                        .media
-                        .iter()
-                        .find(|media| media.id == *media_id)
-                        .is_some_and(|media| {
-                            (media.duration_us.is_some() || media.kind == MediaKind::Image)
-                                && self.project.media_clip_fits(media, kind, &clip)
-                        }),
+                    ClipContent::Media { media_id } => {
+                        !track.subtitles
+                            && self
+                                .project
+                                .media
+                                .iter()
+                                .find(|media| media.id == *media_id)
+                                .is_some_and(|media| {
+                                    (media.duration_us.is_some() || media.kind == MediaKind::Image)
+                                        && self.project.media_clip_fits(media, kind, &clip)
+                                })
+                    }
                 };
                 if !compatible
                     || (clip.lut.is_some()
@@ -1185,10 +1192,14 @@ impl Editor {
             } => {
                 let mut tracks = self.project.tracks.clone();
                 let source = tracks.iter_mut().find(|t| t.id == track_id)?;
+                let subtitles = source.subtitles;
                 let index = source.clips.iter().position(|c| c.id == clip_id)?;
                 let mut clip = source.clips.remove(index);
                 clip.start_frame = to_frame;
                 let target = tracks.iter_mut().find(|t| t.id == target_track_id)?;
+                if target.subtitles != subtitles {
+                    return None;
+                }
                 let index = target.clips.partition_point(|c| c.start_frame < to_frame);
                 target.clips.insert(index, clip);
                 self.execute(Command::ReplaceTracks(tracks))
@@ -1325,6 +1336,26 @@ impl Editor {
                 clip.volume = volume;
                 clip.muted = muted;
                 Some(inverse)
+            }
+            Command::SetSubtitleStyle { track_id, style } => {
+                if !style.valid() {
+                    return None;
+                }
+                let mut tracks = self.project.tracks.clone();
+                let track = tracks
+                    .iter_mut()
+                    .find(|track| track.id == track_id && track.subtitles)?;
+                for clip in &mut track.clips {
+                    if let ClipContent::Title(title) = &mut clip.content {
+                        *title = Title {
+                            text: title.text.clone(),
+                            parse_html: title.parse_html,
+                            parse_markdown: title.parse_markdown,
+                            ..style.clone()
+                        };
+                    }
+                }
+                self.execute(Command::ReplaceTracks(tracks))
             }
             Command::SetClipNoiseReduction {
                 track_id,
@@ -1513,6 +1544,132 @@ impl Editor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn subtitle_clips_only_support_forward_playback() {
+        let project = super::Project::new("Captions");
+        let cues = crate::subtitles::parse("1\n00:00:00,000 --> 00:00:01,000\nFirst").unwrap();
+        let track = crate::subtitles::track(&project, &cues).unwrap();
+        let track_id = track.id;
+        let clip_id = track.clips[0].id;
+        assert_eq!(track.clips[0].playback, super::Playback::Forward);
+        let mut tracks = project.tracks().to_vec();
+        tracks.push(track);
+        let mut editor = super::Editor::new(project);
+        assert!(editor.apply(super::Command::ReplaceTracks(tracks)));
+        let before = editor.project().clone();
+        for playback in [super::Playback::Reverse, super::Playback::Freeze] {
+            assert!(!editor.apply(super::Command::SetPlayback {
+                track_id,
+                clip_id,
+                playback
+            }));
+            let mut invalid = before.clone();
+            let clip = &mut invalid
+                .tracks
+                .iter_mut()
+                .find(|track| track.id == track_id)
+                .unwrap()
+                .clips[0];
+            clip.playback = playback;
+            let mut inserted = clip.clone();
+            inserted.id += 1;
+            inserted.start_frame = 60;
+            assert!(invalid.validate().is_err());
+            assert!(!editor.apply(super::Command::InsertClip {
+                track_id,
+                clip: inserted
+            }));
+            assert!(!editor.apply(super::Command::ReplaceTracks(invalid.tracks)));
+            assert_eq!(editor.project(), &before);
+        }
+        assert!(super::freeze_at(editor.project(), track_id, clip_id, 0).is_none());
+        assert!(editor.undo());
+        assert!(editor.redo());
+        assert_eq!(editor.project(), &before);
+    }
+
+    #[test]
+    fn subtitle_style_changes_a_whole_track_in_one_undo_step() {
+        let project = super::Project::new("Captions");
+        let cues = crate::subtitles::parse("1\n00:00:00,000 --> 00:00:01,000\n<i>First</i>\n\n2\n00:00:01,000 --> 00:00:02,000\nSecond").unwrap();
+        let first = crate::subtitles::track(&project, &cues).unwrap();
+        let id = first.id;
+        let mut tracks = project.tracks().to_vec();
+        tracks.push(first);
+        let mut editor = super::Editor::new(project);
+        assert!(editor.apply(super::Command::ReplaceTracks(tracks)));
+        let second = crate::subtitles::track(editor.project(), &cues).unwrap();
+        let empty_id = second.id + 1;
+        let mut tracks = editor.project().tracks().to_vec();
+        tracks.push(second);
+        tracks.push(crate::timeline::Track {
+            name: String::new(),
+            locked: false,
+            hidden: false,
+            id: empty_id,
+            kind: crate::timeline::TrackKind::Video,
+            subtitles: true,
+            clips: Vec::new(),
+        });
+        assert!(editor.apply(super::Command::ReplaceTracks(tracks)));
+        let before = editor.project().clone();
+        let style = crate::timeline::Title {
+            font_family: "Serif".into(),
+            font_size: 55.0,
+            color: [255, 210, 0, 255],
+            background: Some([0, 0, 0, 179]),
+            outline: true,
+            y: 0.1,
+            ..Default::default()
+        };
+        assert!(editor.apply(super::Command::SetSubtitleStyle {
+            track_id: id,
+            style: style.clone()
+        }));
+        let after = editor.project().clone();
+        for (old_track, new_track) in before.tracks().iter().zip(after.tracks()) {
+            if old_track.id != id {
+                assert_eq!(old_track, new_track);
+                continue;
+            }
+            for (old, new) in old_track.clips.iter().zip(&new_track.clips) {
+                let crate::timeline::ClipContent::Title(old_title) = &old.content else {
+                    unreachable!()
+                };
+                let crate::timeline::ClipContent::Title(new_title) = &new.content else {
+                    unreachable!()
+                };
+                assert_eq!(new_title.text, old_title.text);
+                assert_eq!(new_title.parse_html, old_title.parse_html);
+                assert_eq!(new_title.font_size, 55.0);
+                assert_eq!(new_title.background, style.background);
+                assert_eq!(new_title.y, 0.1);
+                let mut expected = old.clone();
+                expected.content = new.content.clone();
+                assert_eq!(&expected, new);
+            }
+        }
+        assert!(editor.undo());
+        assert_eq!(editor.project(), &before);
+        assert!(editor.redo());
+        assert_eq!(editor.project(), &after);
+        assert!(!editor.apply(super::Command::SetSubtitleStyle {
+            track_id: empty_id,
+            style: style.clone()
+        }));
+        assert!(!editor.apply(super::Command::SetSubtitleStyle {
+            track_id: 0,
+            style: style.clone()
+        }));
+        assert!(!editor.apply(super::Command::SetSubtitleStyle {
+            track_id: id,
+            style: crate::timeline::Title {
+                font_size: -1.0,
+                ..style
+            }
+        }));
+    }
+
     #[test]
     fn track_metadata_and_order_are_validated_and_undoable() {
         let original = super::Project::new("Tracks");

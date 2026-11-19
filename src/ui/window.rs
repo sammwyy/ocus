@@ -241,6 +241,7 @@ fn set_transition_kind(state: &UiState, kind: Option<TransitionKind>) {
         return;
     };
     let transition = kind.map(|kind| Transition {
+        direction: Default::default(),
         kind,
         duration_frames: clip
             .transition
@@ -4431,6 +4432,7 @@ mod tests {
             volume: 1.0,
             muted: false,
             transition: None,
+            transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
             linked_audio: false,
@@ -6053,6 +6055,7 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 transition: None,
+                transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
                 linked_audio: false

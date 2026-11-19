@@ -24,6 +24,8 @@ pub enum TrackKind {
 pub struct Clip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<Transition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition_out: Option<Transition>,
     pub id: u64,
     pub start_frame: u64,
     pub source_start_frame: u64,
@@ -45,6 +47,24 @@ pub struct Clip {
 pub struct Transition {
     pub kind: TransitionKind,
     pub duration_frames: u64,
+    #[serde(default, skip_serializing_if = "SlideDirection::is_default")]
+    pub direction: SlideDirection,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlideDirection {
+    Left,
+    #[default]
+    Right,
+    Up,
+    Down,
+}
+
+impl SlideDirection {
+    fn is_default(&self) -> bool {
+        *self == Self::Right
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

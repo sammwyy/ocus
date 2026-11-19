@@ -28,21 +28,11 @@ pub(crate) struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            theme: ThemeMode::default(),
-            accent: None,
-            last_export_directory: None,
-            hardware_acceleration: true,
-        }
-    }
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
             use_proxies: true,
             theme: ThemeMode::default(),
             accent: None,
             last_export_directory: None,
+            hardware_acceleration: true,
         }
     }
 }

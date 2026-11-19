@@ -49,8 +49,14 @@ fn generate_in(root: &Path, source: &Path, cancelled: &AtomicBool) -> Result<boo
         .streams()
         .best(ffmpeg::media::Type::Video)
         .ok_or("No video")?;
-    let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
-        .and_then(|context| context.decoder().video())
+    let mut context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+        .map_err(|error| error.to_string())?;
+    let codec = ffmpeg::decoder::find(context.id()).ok_or("Video decoder unavailable")?;
+    let threads = std::thread::available_parallelism().map_or(2, usize::from);
+    context.set_threading(threading(codec, threads.saturating_sub(2).clamp(1, 8)));
+    let mut decoder = context
+        .decoder()
+        .video()
         .map_err(|error| error.to_string())?;
     let stream_index = stream.index();
     let time_base = stream.time_base();
@@ -112,14 +118,120 @@ fn check_cancelled(cancelled: &AtomicBool) -> Result<(), String> {
     }
 }
 
+fn threading(codec: ffmpeg::Codec, count: usize) -> ffmpeg::codec::threading::Config {
+    use ffmpeg::codec::{
+        Capabilities,
+        threading::{Config, Type},
+    };
+    let capabilities = codec.capabilities();
+    Config {
+        kind: if capabilities.contains(Capabilities::FRAME_THREADS) {
+            Type::Frame
+        } else if capabilities.contains(Capabilities::SLICE_THREADS) {
+            Type::Slice
+        } else {
+            Type::None
+        },
+        count,
+        ..Config::default()
+    }
+}
+
+fn yuv_scaler(
+    decoder: &ffmpeg::decoder::Video,
+    width: u32,
+    height: u32,
+) -> Result<ffmpeg::software::scaling::Context, String> {
+    use ffmpeg::{
+        color::{Range, Space},
+        ffi,
+    };
+    let mut scaler = ffmpeg::software::scaling::Context::get(
+        decoder.format(),
+        decoder.width(),
+        decoder.height(),
+        ffmpeg::format::Pixel::YUVJ420P,
+        width,
+        height,
+        ffmpeg::software::scaling::Flags::BILINEAR,
+    )
+    .map_err(|error| error.to_string())?;
+    let matrix = match decoder.color_space() {
+        Space::BT709 => ffi::SWS_CS_ITU709,
+        Space::FCC => ffi::SWS_CS_FCC,
+        Space::SMPTE240M => ffi::SWS_CS_SMPTE240M,
+        Space::BT2020NCL => ffi::SWS_CS_BT2020,
+        _ => ffi::SWS_CS_DEFAULT,
+    };
+    unsafe {
+        let context = scaler.as_mut_ptr();
+        let (mut input_table, mut output_table) = (std::ptr::null_mut(), std::ptr::null_mut());
+        let (mut input_range, mut output_range) = (0, 0);
+        let (mut brightness, mut contrast, mut saturation) = (0, 0, 0);
+        if ffi::sws_getColorspaceDetails(
+            context,
+            &mut input_table,
+            &mut input_range,
+            &mut output_table,
+            &mut output_range,
+            &mut brightness,
+            &mut contrast,
+            &mut saturation,
+        ) < 0
+        {
+            return Err("Cannot read proxy scaler colorspace".into());
+        }
+        let input_range = match decoder.color_range() {
+            Range::JPEG => 1,
+            Range::MPEG => 0,
+            Range::Unspecified => input_range,
+        };
+        if ffi::sws_setColorspaceDetails(
+            context,
+            ffi::sws_getCoefficients(matrix),
+            input_range,
+            ffi::sws_getCoefficients(ffi::SWS_CS_ITU601),
+            1,
+            brightness,
+            contrast,
+            saturation,
+        ) < 0
+        {
+            return Err("Cannot configure proxy scaler colorspace".into());
+        }
+    }
+    Ok(scaler)
+}
+
+fn rotate_yuv(source: &ffmpeg::frame::Video, rotation: super::Rotation) -> ffmpeg::frame::Video {
+    let (width, height) = rotation.dimensions(source.width(), source.height());
+    let mut target = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUVJ420P, width, height);
+    for plane in 0..3 {
+        let width = source.plane_width(plane) as usize;
+        let height = source.plane_height(plane) as usize;
+        let stride = target.stride(plane);
+        for y in 0..height {
+            for x in 0..width {
+                let (dx, dy) = match rotation.0 {
+                    1 => (y, width - 1 - x),
+                    2 => (width - 1 - x, height - 1 - y),
+                    3 => (height - 1 - y, x),
+                    _ => (x, y),
+                };
+                target.data_mut(plane)[dy * stride + dx] =
+                    source.data(plane)[y * source.stride(plane) + x];
+            }
+        }
+    }
+    target
+}
+
 struct ProxyWriter {
     encoder: ffmpeg::encoder::video::Encoder,
     output: ffmpeg::format::context::Output,
     output_base: ffmpeg::Rational,
-    to_rgba: ffmpeg::software::scaling::Context,
-    to_yuv: ffmpeg::software::scaling::Context,
+    scaler: ffmpeg::software::scaling::Context,
     rotation: super::Rotation,
-    rgba: ffmpeg::frame::Video,
     frames: u64,
     durations: VecDeque<i64>,
 }
@@ -139,17 +251,7 @@ impl ProxyWriter {
         let display = rotation.dimensions(square.0, square.1);
         let (width, height) = super::fitted_dimensions(display.0, display.1, 1280, 720);
         let coded = rotation.dimensions(width, height);
-        let to_rgba = super::rgba_scaler(decoder, coded.0, coded.1)?;
-        let to_yuv = ffmpeg::software::scaling::Context::get(
-            ffmpeg::format::Pixel::RGBA,
-            width,
-            height,
-            ffmpeg::format::Pixel::YUVJ420P,
-            width,
-            height,
-            ffmpeg::software::scaling::Flags::BILINEAR,
-        )
-        .map_err(|error| error.to_string())?;
+        let scaler = yuv_scaler(decoder, coded.0, coded.1)?;
         let mut output =
             ffmpeg::format::output_as(path, "nut").map_err(|error| error.to_string())?;
         let codec = ffmpeg::encoder::find(ffmpeg::codec::Id::MJPEG)
@@ -170,7 +272,7 @@ impl ProxyWriter {
         encoder.set_color_range(ffmpeg::color::Range::JPEG);
         encoder.set_qmin(3);
         encoder.set_qmax(3);
-        encoder.set_threading(ffmpeg::codec::threading::Config::count(2));
+        encoder.set_threading(threading(codec, 2));
         if output
             .format()
             .flags()
@@ -196,10 +298,8 @@ impl ProxyWriter {
             encoder,
             output,
             output_base,
-            to_rgba,
-            to_yuv,
+            scaler,
             rotation,
-            rgba: ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGBA, width, height),
             frames: 0,
             durations: VecDeque::new(),
         })
@@ -232,23 +332,13 @@ impl ProxyWriter {
             if pts < 0 {
                 continue;
             }
-            let mut scaled = ffmpeg::frame::Video::empty();
-            self.to_rgba
-                .run(&decoded, &mut scaled)
-                .map_err(|error| error.to_string())?;
-            let image = self.rotation.orient(&scaled);
-            let stride = self.rgba.stride(0);
-            for (y, row) in image
-                .pixels
-                .chunks_exact(image.width as usize * 4)
-                .enumerate()
-            {
-                self.rgba.data_mut(0)[y * stride..y * stride + row.len()].copy_from_slice(row);
-            }
             let mut frame = ffmpeg::frame::Video::empty();
-            self.to_yuv
-                .run(&self.rgba, &mut frame)
+            self.scaler
+                .run(&decoded, &mut frame)
                 .map_err(|error| error.to_string())?;
+            if self.rotation.0 != 0 {
+                frame = rotate_yuv(&frame, self.rotation);
+            }
             frame.set_pts(Some(pts));
             frame.set_color_space(ffmpeg::color::Space::SMPTE170M);
             frame.set_color_range(ffmpeg::color::Range::JPEG);
@@ -309,6 +399,64 @@ mod tests {
     use ffmpeg::Rescale;
     use std::process::Command;
     use std::time::Duration;
+
+    #[test]
+    fn planar_rotation_preserves_luma_and_both_chroma_planes() {
+        ffmpeg::init().unwrap();
+        let mut source = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUVJ420P, 8, 4);
+        for plane in 0..3 {
+            let width = source.plane_width(plane) as usize;
+            let height = source.plane_height(plane) as usize;
+            let stride = source.stride(plane);
+            for y in 0..height {
+                for x in 0..width {
+                    source.data_mut(plane)[y * stride + x] = (plane * 60 + y * width + x) as u8;
+                }
+            }
+        }
+        let chroma = [
+            [0, 1, 2, 3, 4, 5, 6, 7],
+            [3, 7, 2, 6, 1, 5, 0, 4],
+            [7, 6, 5, 4, 3, 2, 1, 0],
+            [4, 0, 5, 1, 6, 2, 7, 3],
+        ];
+        let corners = [
+            [0, 7, 24, 31],
+            [7, 31, 0, 24],
+            [31, 24, 7, 0],
+            [24, 0, 31, 7],
+        ];
+        for turns in 0..4 {
+            let target = rotate_yuv(&source, super::super::Rotation(turns as u32));
+            let width = target.width() as usize;
+            let height = target.height() as usize;
+            let stride = target.stride(0);
+            assert_eq!(
+                [
+                    target.data(0)[0],
+                    target.data(0)[width - 1],
+                    target.data(0)[(height - 1) * stride],
+                    target.data(0)[(height - 1) * stride + width - 1]
+                ],
+                corners[turns]
+            );
+            for plane in 1..3 {
+                let pixels: Vec<_> = (0..target.plane_height(plane) as usize)
+                    .flat_map(|y| {
+                        let start = y * target.stride(plane);
+                        target.data(plane)[start..start + target.plane_width(plane) as usize]
+                            .iter()
+                            .copied()
+                    })
+                    .collect();
+                let expected: Vec<_> = chroma[turns]
+                    .iter()
+                    .map(|value| value + plane as u8 * 60)
+                    .collect();
+                assert_eq!(pixels, expected);
+            }
+        }
+    }
 
     fn fixture(path: &Path, duration: &str, size: &str) {
         assert!(

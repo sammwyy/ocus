@@ -55,6 +55,7 @@ clip commands do not complete the corresponding editor workflows.
 - [x] Encode H.264 from layered video and still-image clips and AAC from the
   edited audio tracks.
 - [x] Add and test export presets for 1080p, 720p, and vertical 9:16.
+- [x] Export the timeline as a looping GIF or as audio-only WAV, with built-in presets.
 - [x] Run export off the UI thread with progress, cancellation, and cleanup
   of incomplete outputs.
 

@@ -1,11 +1,12 @@
-use crate::project::Project;
+use crate::media::fitted_dimensions;
 use crate::project::export_settings::{AudioCodec, Container, ExportSettings, VideoCodec};
+use crate::project::{FrameRate, Project};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 const MAX_PRESET_BYTES: u64 = 64 * 1024;
-const BUILTIN_NAMES: [&str; 8] = [
+const BUILTIN_NAMES: [&str; 10] = [
     "Project original",
     "Full HD 1080p",
     "HD 720p",
@@ -14,6 +15,8 @@ const BUILTIN_NAMES: [&str; 8] = [
     "UHD 4K",
     "WebM 1080p",
     "HEVC 1080p",
+    "Animated GIF",
+    "Audio only (WAV)",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,7 +114,39 @@ pub fn builtins(project: &Project) -> Vec<NamedPreset> {
             settings,
         }
     })
+    .chain([
+        NamedPreset {
+            name: BUILTIN_NAMES[8].into(),
+            settings: gif_settings(project),
+        },
+        NamedPreset {
+            name: BUILTIN_NAMES[9].into(),
+            settings: ExportSettings {
+                container: Container::Wav,
+                ..base.clone()
+            },
+        },
+    ])
     .collect()
+}
+
+pub fn gif_settings(project: &Project) -> ExportSettings {
+    let video = project.settings();
+    let (width, height) = if video.width.max(video.height) > 640 {
+        fitted_dimensions(video.width, video.height, 640, 640)
+    } else {
+        (video.width, video.height)
+    };
+    let mut settings = ExportSettings::for_project(
+        (width / 2 * 2).max(2),
+        (height / 2 * 2).max(2),
+        FrameRate {
+            numerator: 15,
+            denominator: 1,
+        },
+    );
+    settings.container = Container::Gif;
+    settings
 }
 
 pub fn path() -> Option<PathBuf> {
@@ -216,6 +251,19 @@ mod tests {
                 .any(|p| p.settings.container == Container::WebM)
         );
         assert!(presets.iter().all(|p| p.settings.validate().is_ok()));
+        let gif = &presets
+            .iter()
+            .find(|p| p.name == "Animated GIF")
+            .unwrap()
+            .settings;
+        assert_eq!(gif.container, Container::Gif);
+        assert_eq!((gif.width, gif.height), (640, 360));
+        assert_eq!(gif.frame_rate.numerator, 15);
+        assert!(
+            presets
+                .iter()
+                .any(|p| p.settings.container == Container::Wav)
+        );
     }
 
     #[test]

@@ -112,7 +112,8 @@ directory (XDG config on Linux, AppData on Windows).
 
 **Export** (disabled while the timeline is empty) opens a settings dialog with
 built-in presets for the original project, 1080p, 720p, vertical 9:16, square,
-4K, WebM and HEVC. You can set even output dimensions (up to 8192 × 8192),
+4K, WebM, HEVC, Animated GIF and Audio only (WAV). For video you can set
+even output dimensions (up to 8192 × 8192),
 frame rate (including rational rates such as 30000/1001), video and audio
 bitrates or constant-quality CRF, encoder speed, container (MP4, MKV or WebM)
 and compatible video/audio codecs
@@ -135,6 +136,12 @@ with **Browse…** (or used by a successful export) is
 remembered in editor preferences across projects and sessions. The destination
 is also shown beside the export actions on every settings tab; **Change…** opens
 the full path and folder picker.
+
+**Animated GIF** exports the visual timeline and titles as a silent loop.
+It defaults to 15 fps and fits the project within 640 × 640;
+you can adjust the size and frame rate in the Video tab. **Audio only (WAV)**
+exports the complete 48 kHz stereo timeline mix as uncompressed 32-bit float,
+including linked clip sound, gaps, volume and mute, without rendering video.
 
 The default MP4 export encodes H.264
 video composited from every video track (V1 is the base; V2 and lower rows are
@@ -180,7 +187,7 @@ from crates.io. No local CreamUI checkout is needed.
 - `src/media.rs`, `src/media/preview.rs`, `src/media/composite.rs` and
   `src/media/audio.rs`: sources, decoding, and shared preview/export composition.
 - `src/playback.rs`: default audio device and playback sessions.
-- `src/export.rs`: H.264/AAC MP4 encoding and cancellation.
+- `src/export.rs`: timeline video, GIF and audio export with cancellation.
 - `src/ui/`: compact CreamUI workspace and background file workflow.
 - `src/main.rs`: executable entry point.
 

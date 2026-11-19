@@ -3089,20 +3089,29 @@ fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidg
         ("MP4", Container::Mp4),
         ("MKV", Container::Matroska),
         ("WebM", Container::WebM),
+        ("GIF", Container::Gif),
+        ("WAV", Container::Wav),
     ]
-    .into_iter()
-    .map(|(name, container)| {
-        export_choice(
-            name,
-            draft.container == container,
-            if narrow {
-                field_width
-            } else {
-                (field_width - 12.0) / 3.0
-            },
-            state,
-            move |state| state.change_export_codecs(Some(container), None, None),
-        )
+    .chunks(if narrow { 1 } else { 3 })
+    .map(|row| {
+        Box::new(append(
+            Flex::row().gap(6.0),
+            row.iter()
+                .map(|&(name, container)| {
+                    export_choice(
+                        name,
+                        draft.container == container,
+                        if narrow {
+                            field_width
+                        } else {
+                            (field_width - 12.0) / 3.0
+                        },
+                        state,
+                        move |state| state.change_export_codecs(Some(container), None, None),
+                    )
+                })
+                .collect(),
+        )) as BoxedWidget
     })
     .collect();
     let videos = [
@@ -3187,149 +3196,180 @@ fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidg
                     Box::new(
                         Flex::column()
                             .gap(8.0)
-                            .child(heading("Container", muted(), 11.0))
-                            .child(Box::new(append(
-                                if narrow { Flex::column() } else { Flex::row() }.gap(6.0),
-                                formats,
-                            )))
-                            .child(heading("Video codec", muted(), 11.0))
-                            .child(Box::new(append(
-                                if narrow { Flex::column() } else { Flex::row() }.gap(6.0),
-                                videos,
-                            ))),
-                    ),
-                    card_width,
-                ))
-                .child(form_section(
-                    "Output dimensions and frame rate",
-                    Box::new(
-                        Flex::column()
-                            .gap(9.0)
-                            .child(export_field(
-                                "Width (pixels)",
-                                &state.export_width,
-                                label_width,
-                                input_width,
-                            ))
-                            .child(export_field(
-                                "Height (pixels)",
-                                &state.export_height,
-                                label_width,
-                                input_width,
-                            ))
-                            .child(if narrow {
-                                Box::new(
+                            .child(Box::new(append(Flex::column().gap(6.0), formats)))
+                            .child(match draft.container {
+                                Container::Gif => {
+                                    text("Looping animation · no audio", muted(), 11.0)
+                                }
+                                Container::Wav => text("48 kHz stereo · no video", muted(), 11.0),
+                                _ => Box::new(
                                     Flex::column()
-                                        .gap(6.0)
-                                        .child(text("FPS (num / den)", muted(), 11.0))
-                                        .child(Box::new(
-                                            Flex::row()
-                                                .gap(8.0)
-                                                .align(Align::Center)
-                                                .child(input(&state.export_fps_num, 80.0))
-                                                .child(text("/", muted(), 12.0))
-                                                .child(input(&state.export_fps_den, 80.0)),
-                                        )),
-                                ) as BoxedWidget
-                            } else {
-                                Box::new(
-                                    Flex::row()
                                         .gap(8.0)
-                                        .align(Align::Center)
-                                        .child(Box::new(
-                                            Flex::row().width(label_width).child(text(
-                                                "FPS (num / den)",
-                                                muted(),
-                                                11.0,
-                                            )),
-                                        ))
-                                        .child(input(&state.export_fps_num, 70.0))
-                                        .child(text("/", muted(), 12.0))
-                                        .child(input(&state.export_fps_den, 70.0)),
-                                )
+                                        .child(heading("Video codec", muted(), 11.0))
+                                        .child(Box::new(append(
+                                            if narrow { Flex::column() } else { Flex::row() }
+                                                .gap(6.0),
+                                            videos,
+                                        ))),
+                                ),
                             }),
                     ),
                     card_width,
                 ))
-                .child(form_section(
-                    "Quality and speed",
-                    Box::new(
-                        Flex::column()
-                            .gap(9.0)
-                            .child(Box::new(append(
-                                if narrow { Flex::column() } else { Flex::row() }.gap(6.0),
-                                vec![
-                                    export_choice(
-                                        "Target bitrate",
-                                        draft.video_quality.is_none(),
-                                        if narrow {
-                                            field_width
-                                        } else {
-                                            (field_width - 6.0) / 2.0
-                                        },
-                                        state,
-                                        |s| s.set_export_quality_mode(false),
-                                    ),
-                                    export_choice(
-                                        "Constant quality",
-                                        draft.video_quality.is_some(),
-                                        if narrow {
-                                            field_width
-                                        } else {
-                                            (field_width - 6.0) / 2.0
-                                        },
-                                        state,
-                                        |s| s.set_export_quality_mode(true),
-                                    ),
-                                ],
-                            )))
-                            .child(if draft.video_quality.is_some() {
-                                export_field(
-                                    "Quality (CRF)",
-                                    &state.export_quality,
+                .child(if draft.container.has_video() {
+                    form_section(
+                        "Output dimensions and frame rate",
+                        Box::new(
+                            Flex::column()
+                                .gap(9.0)
+                                .child(export_field(
+                                    "Width (pixels)",
+                                    &state.export_width,
                                     label_width,
                                     input_width,
-                                )
-                            } else {
-                                export_field(
-                                    "Video (kbps)",
-                                    &state.export_video_bitrate,
+                                ))
+                                .child(export_field(
+                                    "Height (pixels)",
+                                    &state.export_height,
                                     label_width,
                                     input_width,
-                                )
-                            })
-                            .child(if draft.video_quality.is_some() {
-                                text("CRF: 0–51 (H.264/HEVC), 0–63 (VP9)", faint(), 10.0)
-                            } else {
-                                Box::new(Flex::row().size(0.0, 0.0))
-                            })
-                            .child(heading("Encoder speed", muted(), 11.0))
-                            .child(Box::new(append(
-                                if narrow { Flex::column() } else { Flex::row() }.gap(6.0),
-                                [
-                                    ("Fast", EncodingSpeed::Fast),
-                                    ("Balanced", EncodingSpeed::Balanced),
-                                    ("Quality", EncodingSpeed::Quality),
-                                ]
-                                .into_iter()
-                                .map(|(name, speed)| {
-                                    export_choice(
-                                        name,
-                                        draft.speed == speed,
-                                        if narrow {
-                                            field_width
-                                        } else {
-                                            (field_width - 12.0) / 3.0
-                                        },
-                                        state,
-                                        move |s| s.set_export_speed(speed),
+                                ))
+                                .child(if narrow {
+                                    Box::new(
+                                        Flex::column()
+                                            .gap(6.0)
+                                            .child(text("FPS (num / den)", muted(), 11.0))
+                                            .child(Box::new(
+                                                Flex::row()
+                                                    .gap(8.0)
+                                                    .align(Align::Center)
+                                                    .child(input(&state.export_fps_num, 80.0))
+                                                    .child(text("/", muted(), 12.0))
+                                                    .child(input(&state.export_fps_den, 80.0)),
+                                            )),
+                                    ) as BoxedWidget
+                                } else {
+                                    Box::new(
+                                        Flex::row()
+                                            .gap(8.0)
+                                            .align(Align::Center)
+                                            .child(Box::new(
+                                                Flex::row().width(label_width).child(text(
+                                                    "FPS (num / den)",
+                                                    muted(),
+                                                    11.0,
+                                                )),
+                                            ))
+                                            .child(input(&state.export_fps_num, 70.0))
+                                            .child(text("/", muted(), 12.0))
+                                            .child(input(&state.export_fps_den, 70.0)),
+                                    )
+                                }),
+                        ),
+                        card_width,
+                    )
+                } else {
+                    Box::new(Flex::row().size(0.0, 0.0))
+                })
+                .child(if draft.container.uses_video_codec() {
+                    form_section(
+                        "Quality and speed",
+                        Box::new(
+                            Flex::column()
+                                .gap(9.0)
+                                .child(Box::new(append(
+                                    if narrow { Flex::column() } else { Flex::row() }.gap(6.0),
+                                    vec![
+                                        export_choice(
+                                            "Target bitrate",
+                                            draft.video_quality.is_none(),
+                                            if narrow {
+                                                field_width
+                                            } else {
+                                                (field_width - 6.0) / 2.0
+                                            },
+                                            state,
+                                            |s| s.set_export_quality_mode(false),
+                                        ),
+                                        export_choice(
+                                            "Constant quality",
+                                            draft.video_quality.is_some(),
+                                            if narrow {
+                                                field_width
+                                            } else {
+                                                (field_width - 6.0) / 2.0
+                                            },
+                                            state,
+                                            |s| s.set_export_quality_mode(true),
+                                        ),
+                                    ],
+                                )))
+                                .child(if draft.video_quality.is_some() {
+                                    export_field(
+                                        "Quality (CRF)",
+                                        &state.export_quality,
+                                        label_width,
+                                        input_width,
+                                    )
+                                } else {
+                                    export_field(
+                                        "Video (kbps)",
+                                        &state.export_video_bitrate,
+                                        label_width,
+                                        input_width,
                                     )
                                 })
-                                .collect(),
-                            ))),
-                    ),
-                    card_width,
-                )),
+                                .child(if draft.video_quality.is_some() {
+                                    text("CRF: 0–51 (H.264/HEVC), 0–63 (VP9)", faint(), 10.0)
+                                } else {
+                                    Box::new(Flex::row().size(0.0, 0.0))
+                                })
+                                .child(heading("Encoder speed", muted(), 11.0))
+                                .child(Box::new(append(
+                                    if narrow { Flex::column() } else { Flex::row() }.gap(6.0),
+                                    [
+                                        ("Fast", EncodingSpeed::Fast),
+                                        ("Balanced", EncodingSpeed::Balanced),
+                                        ("Quality", EncodingSpeed::Quality),
+                                    ]
+                                    .into_iter()
+                                    .map(|(name, speed)| {
+                                        export_choice(
+                                            name,
+                                            draft.speed == speed,
+                                            if narrow {
+                                                field_width
+                                            } else {
+                                                (field_width - 12.0) / 3.0
+                                            },
+                                            state,
+                                            move |s| s.set_export_speed(speed),
+                                        )
+                                    })
+                                    .collect(),
+                                ))),
+                        ),
+                        card_width,
+                    )
+                } else if draft.container == Container::Gif {
+                    text("GIF limits: 1280 × 1280 pixels, 50 fps.", muted(), 11.0)
+                } else {
+                    Box::new(Flex::row().size(0.0, 0.0))
+                }),
+        ),
+        ExportPage::Audio if draft.container == Container::Gif => form_section(
+            "No audio",
+            text("Animated GIFs do not contain sound.", muted(), 11.0),
+            card_width,
+        ),
+        ExportPage::Audio if draft.container == Container::Wav => form_section(
+            "Uncompressed audio",
+            text(
+                "WAV exports the timeline mix as 48 kHz stereo.",
+                muted(),
+                11.0,
+            ),
+            card_width,
         ),
         ExportPage::Audio => Box::new(
             Flex::column()
@@ -3494,7 +3534,7 @@ fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidg
                                 .child(Box::new(
                                     Flex::row()
                                         .align(Align::Center)
-                                        .child(heading("Export video", text_color(), 18.0))
+                                        .child(heading("Export timeline", text_color(), 18.0))
                                         .child(spacer())
                                         .child(icon_button(
                                             Glyph::Close,
@@ -5593,7 +5633,7 @@ mod tests {
         assert!(state.export_modal.peek());
         let painter = render(&state, 680.0, 480.0);
         for label in [
-            "Export video",
+            "Export timeline",
             "Full HD 1080p",
             "HD 720p",
             "Portrait 9:16",
@@ -5660,6 +5700,32 @@ mod tests {
         assert_eq!(state.export_form().unwrap().video_quality, None);
         state.export_width.set_value("oops");
         assert!(state.export_form().is_err());
+        state.change_export_codecs(Some(Container::Gif), None, None);
+        assert_eq!(state.export_form().unwrap().container, Container::Gif);
+        assert!(state.export_path.peek().ends_with(".gif"));
+        assert!(state.export_form().unwrap().width <= 640);
+        state.export_audio_bitrate.set_value("unused");
+        assert!(state.export_form().is_ok());
+        state.export_page.set(ExportPage::Audio);
+        let painter = render(&state, 680.0, 480.0);
+        assert!(painter.labels.iter().any(|label| label == "No audio"));
+        assert!(!painter.labels.iter().any(|label| label == "Audio (kbps)"));
+        state.select_export_preset("Audio only (WAV)");
+        assert!(state.export_path.peek().ends_with(".wav"));
+        state.export_width.set_value("unused");
+        state.export_audio_bitrate.set_value("unused");
+        assert_eq!(state.export_form().unwrap().container, Container::Wav);
+        let painter = render(&state, 680.0, 480.0);
+        assert!(
+            painter
+                .labels
+                .iter()
+                .any(|label| label == "Uncompressed audio")
+        );
+        state.export_page.set(ExportPage::Video);
+        let painter = render(&state, 680.0, 480.0);
+        assert!(painter.labels.iter().any(|label| label == "WAV"));
+        assert!(!painter.labels.iter().any(|label| label == "Width (pixels)"));
         state.run(Action::Escape);
         assert!(!state.export_modal.peek());
 

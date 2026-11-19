@@ -1,4 +1,5 @@
 mod app;
+mod atomic_file;
 pub mod export;
 pub mod media;
 mod playback;

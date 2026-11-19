@@ -1,10 +1,7 @@
 use super::{Project, format};
-use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::fs;
+use std::io::{self, Read};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
 pub(super) const MAX_PROJECT_BYTES: u64 = 16 * 1024 * 1024;
 
 pub fn load(path: &Path) -> io::Result<Project> {
@@ -47,46 +44,13 @@ pub(super) fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
     let name = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing project filename"))?;
-    let mut temp = None;
-    for _ in 0..8 {
-        let candidate = parent.join(format!(
-            ".{}.{}.{}.tmp",
-            name.to_string_lossy(),
-            std::process::id(),
-            NEXT_FILE.fetch_add(1, Ordering::Relaxed)
-        ));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
-            Ok(file) => {
-                temp = Some((candidate, file));
-                break;
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-    }
-    let (temporary, mut file) = temp.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "Could not allocate temporary project file",
-        )
-    })?;
-    let result = (|| {
-        file.write_all(data)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary, path)?;
-        #[cfg(unix)]
-        fs::File::open(parent)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temporary);
-    }
-    result
+    crate::atomic_file::write(
+        path,
+        parent,
+        name,
+        data,
+        "Could not allocate temporary project file",
+    )
 }
 
 #[cfg(test)]
@@ -95,6 +59,42 @@ mod tests {
     use crate::project::export_settings::{ExportSettings, LastExport};
     use crate::project::{Command, Editor};
     use crate::timeline::{Clip, ClipContent, Title};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn save_preserves_atomic_write_behavior() {
+        let dir = std::env::temp_dir().join(format!(
+            "ocus-project-atomic-{}-{}",
+            std::process::id(),
+            NEXT_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("film.ocus");
+        save(&path, &Project::new("Original")).unwrap();
+        let replacement = Project::new("Replacement");
+        save(&path, &replacement).unwrap();
+        assert_eq!(load(&path).unwrap(), replacement);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        let original = fs::read(&path).unwrap();
+        let target = dir.join("directory.ocus");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("keep"), b"untouched").unwrap();
+        assert!(save(&target, &replacement).is_err());
+        assert_eq!(fs::read(target.join("keep")).unwrap(), b"untouched");
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+        let missing = dir.join("missing");
+        assert_eq!(
+            save(&missing.join("film.ocus"), &replacement)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert!(!missing.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn atomic_save_round_trips_and_rejects_bad_documents_without_overwriting() {

@@ -803,6 +803,7 @@ mod tests {
             track_id: 0,
             clip: Clip {
                 color: Default::default(),
+                transition_out: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,

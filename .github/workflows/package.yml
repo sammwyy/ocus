@@ -1,0 +1,73 @@
+name: Package installers
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            formats: deb,appimage
+          - os: macos-14
+            formats: app,dmg
+          - os: windows-2022
+            formats: nsis
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libavformat-dev libavcodec-dev libavfilter-dev libavutil-dev libswscale-dev libswresample-dev libclang-dev libasound2-dev libudev-dev libdbus-1-dev libxkbcommon-dev libfuse2 patchelf desktop-file-utils
+      - name: macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install ffmpeg pkgconf llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+      - name: Windows dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install ffmpeg:x64-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+          "VCPKGRS_DYNAMIC=1" >> $env:GITHUB_ENV
+          "FFMPEG_DIR=$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> $env:GITHUB_ENV
+          "LIBCLANG_PATH=C:/Program Files/LLVM/bin" >> $env:GITHUB_ENV
+          "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" >> $env:GITHUB_PATH
+      - name: Install packaging tool
+        run: cargo install cargo-packager --version 0.11.8 --locked
+      - name: Build installers
+        run: cargo packager --release --formats ${{ matrix.formats }}
+      - name: Headless packaging integration tests
+        run: cargo test --locked --test packaging
+      - name: Linux installed smoke test
+        if: runner.os == 'Linux'
+        run: sh scripts/smoke-linux.sh
+      - name: macOS installed smoke test
+        if: runner.os == 'macOS'
+        run: sh scripts/smoke-macos.sh
+      - name: Windows installed smoke test
+        if: runner.os == 'Windows'
+        run: ./scripts/smoke-windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ocus-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            target/release/*.deb
+            target/release/*.AppImage
+            target/release/*.dmg
+            target/release/*setup.exe

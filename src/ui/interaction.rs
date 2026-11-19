@@ -449,7 +449,10 @@ impl UiState {
         let state = self.clone();
         window.on_files_dropped_at(move |paths, point| state.drop_files(paths, point));
         let state = self.clone();
-        window.on_pointer_moved(move |point| state.pointer.set(point));
+        window.on_pointer_moved(move |point| {
+            state.pointer.set(point);
+            state.preview_chroma_drag(point);
+        });
         let state = self.clone();
         window.on_keyboard_input(move |event, held| {
             let mut modifiers = Modifiers {
@@ -540,7 +543,9 @@ impl UiState {
                     || matches!(*self.gesture.borrow(), Gesture::Trim { .. })
                 {
                     self.cancel_drag();
-                } else if self.title_gesture.borrow().is_some() {
+                } else if self.title_gesture.borrow().is_some()
+                    || self.chroma_preview.peek().is_some()
+                {
                     self.clear_title_gesture();
                 } else {
                     self.select_clip(None);
@@ -671,7 +676,10 @@ impl UiState {
             return false;
         };
         let (id, start) = (clip.id, clip.start_frame);
-        if self.edit(Command::InsertClip { track_id, clip }) {
+        if self.edit(Command::InsertClip {
+            track_id,
+            clip: Box::new(clip),
+        }) {
             self.select_clip(Some((track_id, id)));
             self.focus_frame(start);
             true
@@ -2104,12 +2112,13 @@ mod tests {
         for track_id in [0, 2, 3] {
             assert!(state.edit(Command::InsertClip {
                 track_id,
-                clip: Clip {
+                clip: Box::new(Clip {
                     playback: Playback::Forward,
                     transition_out: None,
                     id: track_id + 1,
                     speed: 1.0,
                     lut: None,
+                    chroma_key: None,
                     color: Default::default(),
                     transition: None,
                     start_frame: 0,
@@ -2124,7 +2133,7 @@ mod tests {
                     linked_audio: false,
                     keyframes: Vec::new(),
                     transform: Transform::default(),
-                },
+                }),
             }));
         }
         assert!(state.edit(Command::SetTrackLocked {
@@ -2164,9 +2173,10 @@ mod tests {
         })));
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
-            clip: Clip {
+            clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
+                chroma_key: None,
                 id: 1,
                 start_frame: 45,
                 source_start_frame: 0,
@@ -2184,7 +2194,7 @@ mod tests {
                 linked_audio: true,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
-            },
+            }),
         }));
 
         state.run_menu(MenuCommand::InsertMediaAt(1, 45));
@@ -2459,9 +2469,10 @@ mod tests {
         for (track_id, clip_id) in [(0, 1), (1, 2)] {
             assert!(state.edit(Command::InsertClip {
                 track_id,
-                clip: Clip {
+                clip: Box::new(Clip {
                     playback: crate::timeline::Playback::Forward,
                     lut: None,
+                    chroma_key: None,
                     id: clip_id,
                     start_frame: 0,
                     source_start_frame: 0,
@@ -2479,7 +2490,7 @@ mod tests {
                     linked_audio: false,
                     keyframes: Vec::new(),
                     transform: Transform::default(),
-                },
+                }),
             }));
         }
         assert!(state.add_title());
@@ -2527,6 +2538,7 @@ mod tests {
         let detached = Clip {
             playback: crate::timeline::Playback::Forward,
             lut: None,
+            chroma_key: None,
             id: 1,
             start_frame: 0,
             source_start_frame: 15,
@@ -2547,7 +2559,7 @@ mod tests {
         };
         assert!(state.edit(Command::InsertClip {
             track_id: 3,
-            clip: detached.clone(),
+            clip: Box::new(detached.clone()),
         }));
         state.select_clip(Some((3, 1)));
         state.run(Action::Copy);
@@ -2800,9 +2812,10 @@ mod tests {
         for (track_id, id, start_frame, duration_frames) in [(0, 1, 20, 20), (1, 2, 0, 60)] {
             assert!(state.edit(Command::InsertClip {
                 track_id,
-                clip: Clip {
+                clip: Box::new(Clip {
                     playback: crate::timeline::Playback::Forward,
                     lut: None,
+                    chroma_key: None,
                     id,
                     start_frame,
                     source_start_frame: 0,
@@ -2820,7 +2833,7 @@ mod tests {
                     linked_audio: false,
                     keyframes: Vec::new(),
                     transform: Transform::default(),
-                },
+                }),
             }));
         }
         state.select_clip(Some((0, 1)));

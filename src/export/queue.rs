@@ -269,7 +269,7 @@ mod tests {
         let mut editor = Editor::new(format::from_json(&project.to_string()).unwrap());
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
-            clip: Clip {
+            clip: Box::new(Clip {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 id: 1,
@@ -281,6 +281,7 @@ mod tests {
                 muted: false,
                 color: Default::default(),
                 lut: None,
+                chroma_key: None,
                 transition: None,
                 transition_out: None,
                 fade_in_frames: 0,
@@ -289,7 +290,7 @@ mod tests {
                 linked_audio: false,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
-            },
+            }),
         }));
         let settings = super::super::presets::builtins(editor.project())
             .into_iter()

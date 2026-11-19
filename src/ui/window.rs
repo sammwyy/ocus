@@ -8,8 +8,8 @@ use super::controls::{
 use super::edits::ClipRef;
 use super::interaction::{Action, DragPayload, MenuState};
 use super::state::{
-    ExportPage, MediaView, PlaybackMonitor, PreviewState, SequenceContent, SettingsPage,
-    SourceRange, TitleGesture, ZOOM_SECONDS, media_frames,
+    ChromaGesture, ExportPage, MediaView, PlaybackMonitor, PreviewState, SequenceContent,
+    SettingsPage, SourceRange, TitleGesture, ZOOM_SECONDS, media_frames,
 };
 use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
 use super::waveform::WaveformSlice;
@@ -1101,6 +1101,193 @@ fn transform_rows(state: &UiState, transform: Transform, inner: f32) -> Vec<Boxe
     )));
     rows
 }
+#[derive(Clone)]
+struct ChromaSlider {
+    state: UiState,
+    target: ClipRef,
+    property: usize,
+    key: crate::timeline::ChromaKey,
+}
+
+impl ChromaSlider {
+    fn draft(&self) -> crate::timeline::ChromaKey {
+        self.state
+            .chroma_preview
+            .get()
+            .filter(|(target, _)| *target == self.target)
+            .map_or(self.key, |(_, key)| key)
+    }
+
+    fn level(&self) -> usize {
+        let key = self.draft();
+        let value = match self.property {
+            0 => key.similarity,
+            1 => key.smoothness,
+            _ => key.spill,
+        };
+        (value * 100.0).round() as usize
+    }
+}
+
+impl Widget for ChromaSlider {
+    fn style(&self) -> creamui::Style {
+        ZoomSlider {
+            level: 0,
+            levels: 101,
+            set: Rc::new(|_| {}),
+        }
+        .style()
+    }
+
+    fn paint(&self, painter: &mut dyn Painter, rect: Rect) {
+        ZoomSlider {
+            level: self.level(),
+            levels: 101,
+            set: Rc::new(|_| {}),
+        }
+        .paint(painter, rect);
+    }
+
+    fn on_drag_start(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
+        let state = self.state.clone();
+        let target = self.target;
+        let property = self.property;
+        let key = self.key;
+        Some(Rc::new(move |_, rect| {
+            if state.busy.peek() || state.primary_clip() != Some(target) {
+                return;
+            }
+            state.pause();
+            *state.chroma_gesture.borrow_mut() = Some(ChromaGesture {
+                target,
+                property,
+                rect,
+                key,
+            });
+        }))
+    }
+
+    fn on_drag(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
+        let state = self.state.clone();
+        Some(Rc::new(move |pointer, rect| {
+            state.preview_chroma_drag(Point {
+                x: pointer.x + rect.x,
+                y: pointer.y + rect.y,
+            });
+        }))
+    }
+
+    fn on_drag_end(&self) -> Option<Rc<dyn Fn()>> {
+        let state = self.state.clone();
+        let target = self.target;
+        Some(Rc::new(move || {
+            let gesture = state.chroma_gesture.borrow_mut().take();
+            let draft = state.chroma_preview.peek();
+            state.chroma_preview.set(None);
+            if let Some((clip, key)) = draft
+                && gesture.is_some_and(|gesture| gesture.target == target)
+                && clip == target
+                && state.primary_clip() == Some(target)
+                && selected_clip(&state).is_some_and(|(_, clip)| clip.chroma_key != Some(key))
+            {
+                state.edit(Command::SetClipChromaKey {
+                    track_id: target.0,
+                    clip_id: target.1,
+                    key: Some(key),
+                });
+            } else if draft.is_some() {
+                state.request_preview();
+            }
+        }))
+    }
+}
+
+fn chroma_section(
+    state: &UiState,
+    track_id: u64,
+    clip: &Clip,
+    inner: f32,
+    busy: bool,
+) -> BoxedWidget {
+    let clip_id = clip.id;
+    let key = state
+        .chroma_preview
+        .get()
+        .filter(|(target, _)| *target == (track_id, clip_id))
+        .map(|(_, key)| key)
+        .or(clip.chroma_key);
+    let mut rows = vec![inline(secondary_button(
+        None,
+        if key.is_some() { "Turn off" } else { "Turn on" },
+        !busy,
+        state,
+        move |state| {
+            state.edit(Command::SetClipChromaKey {
+                track_id,
+                clip_id,
+                key: if key.is_some() {
+                    None
+                } else {
+                    Some(Default::default())
+                },
+            });
+        },
+    ))];
+    if let Some(key) = key {
+        for (label, color) in [("Green", [0, 255, 0]), ("Blue", [0, 0, 255])] {
+            rows.push(inline(secondary_button(
+                None,
+                label,
+                !busy && key.color != color,
+                state,
+                move |state| {
+                    state.edit(Command::SetClipChromaKey {
+                        track_id,
+                        clip_id,
+                        key: Some(crate::timeline::ChromaKey { color, ..key }),
+                    });
+                },
+            )));
+        }
+        let picker_state = state.clone();
+        rows.push(Box::new(
+            ColorPicker::controlled(
+                Color::rgb(key.color[0], key.color[1], key.color[2]),
+                &state.title_picker,
+                move |color: Color| {
+                    picker_state.edit(Command::SetClipChromaKey {
+                        track_id,
+                        clip_id,
+                        key: Some(crate::timeline::ChromaKey {
+                            color: [color.r, color.g, color.b],
+                            ..key
+                        }),
+                    });
+                },
+            )
+            .width(inner),
+        ));
+        for (index, label, value) in [
+            (0, "Similarity", key.similarity),
+            (1, "Smoothness (soft edge)", key.smoothness),
+            (2, "Spill (remove color tint)", key.spill),
+        ] {
+            rows.push(text(
+                format!("{label} · {:.0}%", value * 100.0),
+                muted(),
+                11.0,
+            ));
+            rows.push(Box::new(ChromaSlider {
+                state: state.clone(),
+                target: (track_id, clip_id),
+                property: index,
+                key,
+            }));
+        }
+    }
+    section("Chroma key", rows)
+}
+
 fn set_clip_color(state: &UiState, change: impl FnOnce(&mut ColorAdjust)) {
     if let Some((track_id, clip)) = selected_clip(state) {
         let mut color = clip.color;
@@ -2817,6 +3004,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         )),
                     ],
                 ));
+                rows.push(chroma_section(state, track_id, &clip, inner, busy));
             }
         }
         if let ClipContent::Title(title) = &clip.content {
@@ -4010,6 +4198,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                             transform: crate::timeline::Transform::default(),
                             noise_reduction: false,
                             lut: None,
+                            chroma_key: None,
                             transition_out: None,
                             color: Default::default(),
                             id: 0,
@@ -6203,6 +6392,7 @@ mod tests {
         Clip {
             playback: crate::timeline::Playback::Forward,
             lut: None,
+            chroma_key: None,
             id: 10,
             start_frame,
             source_start_frame: 0,
@@ -6634,7 +6824,10 @@ mod tests {
         let mut clip = destination_clip(0, 30);
         clip.content = ClipContent::Media { media_id: 1 };
         let id = clip.id;
-        assert!(state.edit(Command::InsertClip { track_id: 0, clip }));
+        assert!(state.edit(Command::InsertClip {
+            track_id: 0,
+            clip: Box::new(clip)
+        }));
         state.select_clip(Some((0, id)));
         let painter = render(&state, 1280.0, 2600.0);
         for label in [
@@ -6870,6 +7063,7 @@ mod tests {
         let key = StoryboardKey {
             transform_bits: StoryboardKey::transform_bits(crate::timeline::Transform::default()),
             lut: None,
+            chroma_key: None,
             color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
             playback: Playback::Forward,
             path,
@@ -8407,11 +8601,12 @@ mod tests {
         })));
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
-            clip: Clip {
+            clip: Box::new(Clip {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 noise_reduction: false,
                 lut: None,
+                chroma_key: None,
                 transition_out: None,
                 id: 1,
                 start_frame: 0,
@@ -8427,7 +8622,7 @@ mod tests {
                 color: Default::default(),
                 keyframes: Vec::new(),
                 transform: Default::default()
-            }
+            })
         }));
         state.select_clip(Some((0, 1)));
         toggle_keyframe(&state);
@@ -8665,12 +8860,13 @@ mod tests {
             })));
             assert!(state.edit(Command::InsertClip {
                 track_id,
-                clip: Clip {
+                clip: Box::new(Clip {
                     speed: 1.0,
                     playback: crate::timeline::Playback::Forward,
                     id: id + 100,
                     noise_reduction: false,
                     lut: None,
+                    chroma_key: None,
                     transition_out: None,
                     start_frame: 400,
                     source_start_frame: 0,
@@ -8685,7 +8881,7 @@ mod tests {
                     color: Default::default(),
                     keyframes: Vec::new(),
                     transform: Default::default()
-                }
+                })
             }));
             state.select_clip(Some((track_id, id + 100)));
             assert_eq!(
@@ -8743,7 +8939,7 @@ mod tests {
             })));
             assert!(state.edit(Command::InsertClip {
                 track_id,
-                clip: Clip {
+                clip: Box::new(Clip {
                     keyframes: Vec::new(),
                     id,
                     content: ClipContent::Media { media_id: id },
@@ -8753,7 +8949,7 @@ mod tests {
                         Transform::default()
                     },
                     ..destination_clip(0, 30)
-                },
+                }),
             }));
         }
         state.select_clip(Some((1, 2)));
@@ -9092,6 +9288,259 @@ mod tests {
     }
 
     #[test]
+    fn chroma_slider_commits_final_value_after_scene_rebuilds() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/green.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(1_000_000),
+            has_audio: false,
+        })));
+        state.insert_media(1);
+        let (track_id, clip) = selected_clip(&state).unwrap();
+        let clip_id = clip.id;
+        assert!(state.edit(Command::SetClipChromaKey {
+            track_id,
+            clip_id,
+            key: Some(Default::default()),
+        }));
+        let build_section = |property: usize| {
+            let mut painter = TestPainter::default();
+            let clip = selected_clip(&state).unwrap().1;
+            let scene = creamui::reactive::with_context_scope(|| {
+                creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
+                    creamui::Theme::dark(),
+                ));
+                Renderer::new().render(
+                    Box::new(
+                        Flex::column()
+                            .child(Box::new(
+                                RawButton::new(Style::default().size(96.0, 24.0), || {})
+                                    .with_drag(|_, _| {})
+                                    .disabled(state.chroma_preview.peek().is_some()),
+                            ))
+                            .child(chroma_section(&state, track_id, &clip, 280.0, false)),
+                    ),
+                    Size {
+                        width: 280.0,
+                        height: 1000.0,
+                    },
+                    &mut painter,
+                )
+            });
+            let label = painter
+                .bounds
+                .iter()
+                .find(|(label, _)| {
+                    label.starts_with(["Similarity", "Smoothness", "Spill"][property])
+                })
+                .unwrap()
+                .1;
+            let index = (0..)
+                .find(|&index| {
+                    let Some((rect, _)) = scene.draggable_at(index) else {
+                        panic!("missing slider");
+                    };
+                    rect.y >= label.y + label.height && rect.height == 24.0
+                })
+                .unwrap();
+            (scene, index, painter)
+        };
+        for (property, press, final_value) in [(0, 8, 92), (0, 20, 60), (1, 92, 36), (2, 50, 80)] {
+            let before = selected_clip(&state).unwrap().1.chroma_key.unwrap();
+            let (scene, index, _) = build_section(property);
+            let end = scene.drag_end_at(index).unwrap();
+            let (rect, drag) = scene.draggable_at(index).unwrap();
+            let pointer = |value: usize| Point {
+                x: 6.0 + (rect.width - 12.0) * value as f32 / 100.0,
+                y: 12.0,
+            };
+            let (start_rect, start) = scene
+                .drag_start_at(Point {
+                    x: rect.x + 8.0,
+                    y: rect.y + 12.0,
+                })
+                .unwrap();
+            start(Point { x: 8.0, y: 12.0 }, start_rect);
+            drag(pointer(press), rect);
+            let (rebuilt, rebuilt_index, _) = build_section(property);
+            assert_eq!(rebuilt_index + 1, index);
+            let point = pointer(final_value);
+            let absolute = Point {
+                x: point.x + rect.x,
+                y: point.y + rect.y,
+            };
+            state.preview_chroma_drag(absolute);
+            if let Some((routed_rect, drag)) = rebuilt.draggable_at(index) {
+                drag(
+                    Point {
+                        x: absolute.x - routed_rect.x,
+                        y: absolute.y - routed_rect.y,
+                    },
+                    routed_rect,
+                );
+            } else {
+                assert_eq!(property, 2);
+            }
+            let (_, _, painted) = build_section(property);
+            let mut expected = before;
+            match property {
+                0 => expected.similarity = final_value as f32 / 100.0,
+                1 => expected.smoothness = final_value as f32 / 100.0,
+                _ => expected.spill = final_value as f32 / 100.0,
+            }
+            assert_eq!(state.chroma_preview.peek().unwrap().1, expected);
+            assert!(painted.labels.iter().any(|label| label
+                == &format!(
+                    "{} · {final_value}%",
+                    [
+                        "Similarity",
+                        "Smoothness (soft edge)",
+                        "Spill (remove color tint)"
+                    ][property]
+                )));
+            let knob = painted
+                .fills
+                .iter()
+                .find(|(fill, _)| {
+                    fill.width == 11.0
+                        && fill.height == 11.0
+                        && fill.y >= rect.y
+                        && fill.y < rect.y + rect.height
+                })
+                .unwrap()
+                .0;
+            assert_eq!(
+                knob.x,
+                (rect.x + 6.0 + (rect.width - 12.0) * final_value as f32 / 100.0 - 5.5).round()
+            );
+            assert_eq!(selected_clip(&state).unwrap().1.chroma_key.unwrap(), before);
+            end();
+            assert_eq!(
+                selected_clip(&state).unwrap().1.chroma_key.unwrap(),
+                expected
+            );
+            state.run(Action::Undo);
+            assert_eq!(selected_clip(&state).unwrap().1.chroma_key.unwrap(), before);
+            state.run(Action::Redo);
+            assert_eq!(
+                selected_clip(&state).unwrap().1.chroma_key.unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn chroma_inspector_media_controls_and_slider_commit_once() {
+        let state = UiState::new();
+        state.run(Action::AddTitle);
+        assert!(
+            !render(&state, 1280.0, 1100.0)
+                .labels
+                .iter()
+                .any(|label| label == "CHROMA KEY")
+        );
+        for (id, kind) in [
+            (1, MediaKind::Video),
+            (2, MediaKind::Image),
+            (3, MediaKind::Audio),
+        ] {
+            assert!(state.edit(Command::ImportMedia(Media {
+                id,
+                path: format!("/media-{id}").into(),
+                kind,
+                duration_us: Some(1_000_000),
+                has_audio: false,
+            })));
+            state.insert_media(id);
+            let labels = render(&state, 1280.0, 2600.0).labels;
+            assert_eq!(
+                labels.iter().any(|label| label == "CHROMA KEY"),
+                kind != MediaKind::Audio
+            );
+            if kind == MediaKind::Audio {
+                continue;
+            }
+            let (track_id, clip) = selected_clip(&state).unwrap();
+            let clip_id = clip.id;
+            assert!(state.edit(Command::SetClipChromaKey {
+                track_id,
+                clip_id,
+                key: Some(Default::default())
+            }));
+            let labels = render(&state, 1280.0, 2600.0).labels;
+            assert!(labels.iter().any(|label| label == "Green"));
+            assert!(labels.iter().any(|label| label == "Blue"));
+            let slider = ChromaSlider {
+                state: state.clone(),
+                target: (track_id, clip_id),
+                property: 0,
+                key: Default::default(),
+            };
+            let rect = Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 96.0,
+                height: 24.0,
+            };
+            slider.on_drag_start().unwrap()(Point { x: 30.0, y: 12.0 }, rect);
+            slider.on_drag().unwrap()(Point { x: 30.0, y: 12.0 }, rect);
+            slider.on_drag().unwrap()(Point { x: 48.0, y: 12.0 }, rect);
+            assert_eq!(
+                selected_clip(&state)
+                    .unwrap()
+                    .1
+                    .chroma_key
+                    .unwrap()
+                    .similarity,
+                0.1
+            );
+            slider.on_drag_end().unwrap()();
+            assert_eq!(
+                selected_clip(&state)
+                    .unwrap()
+                    .1
+                    .chroma_key
+                    .unwrap()
+                    .similarity,
+                0.5
+            );
+            state.run(Action::Undo);
+            assert_eq!(
+                selected_clip(&state)
+                    .unwrap()
+                    .1
+                    .chroma_key
+                    .unwrap()
+                    .similarity,
+                0.1
+            );
+            slider.on_drag_start().unwrap()(Point { x: 30.0, y: 12.0 }, rect);
+            state.busy.set(true);
+            state.preview_chroma_drag(Point { x: 80.0, y: 12.0 });
+            assert!(state.chroma_preview.peek().is_none());
+            state.busy.set(false);
+            state.preview_chroma_drag(Point { x: 80.0, y: 12.0 });
+            assert!(state.chroma_preview.peek().is_some());
+            state.run(Action::Escape);
+            assert!(state.chroma_gesture.borrow().is_none());
+            state.preview_chroma_drag(Point { x: 60.0, y: 12.0 });
+            slider.on_drag_end().unwrap()();
+            assert!(state.chroma_preview.peek().is_none());
+            assert_eq!(
+                selected_clip(&state)
+                    .unwrap()
+                    .1
+                    .chroma_key
+                    .unwrap()
+                    .similarity,
+                0.1
+            );
+        }
+    }
+
+    #[test]
     fn lut_inspector_shows_media_filename_but_not_titles_or_audio() {
         let state = UiState::new();
         state.run(Action::AddTitle);
@@ -9148,9 +9597,10 @@ mod tests {
         })));
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
-            clip: Clip {
+            clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
+                chroma_key: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -9168,7 +9618,7 @@ mod tests {
                 linked_audio: false,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
-            }
+            })
         }));
         state.select_clip(Some((0, 1)));
         adjust_timing(&state, true, true, true);

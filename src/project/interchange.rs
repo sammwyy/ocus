@@ -295,6 +295,7 @@ impl Sequence {
                     transform: Default::default(),
                     keyframes: Vec::new(),
                     lut: None,
+                    chroma_key: None,
                     transition: None,
                     transition_out: None,
                 };

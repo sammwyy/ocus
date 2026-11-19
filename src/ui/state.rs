@@ -148,6 +148,7 @@ pub(super) fn clip_storyboard_key(
         ]
         .map(f32::to_bits),
         lut: clip.lut.clone(),
+        chroma_key: clip.chroma_key,
         playback: clip.playback,
         path: media.path.clone(),
         kind: media.kind,
@@ -292,6 +293,14 @@ pub(crate) struct TitleGesture {
     pub resize: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ChromaGesture {
+    pub target: ClipRef,
+    pub property: usize,
+    pub rect: creamui::core::Rect,
+    pub key: crate::timeline::ChromaKey,
+}
+
 pub(super) struct TooltipState {
     pub controller: TooltipController,
     _effect: creamui::reactive::Effect,
@@ -327,6 +336,8 @@ pub(crate) struct UiState {
     pub title_background: TextController,
     pub title_picker: ColorPickerController,
     pub title_preview: Signal<Option<(ClipRef, Title)>>,
+    pub chroma_preview: Signal<Option<(ClipRef, crate::timeline::ChromaKey)>>,
+    pub chroma_gesture: Rc<RefCell<Option<ChromaGesture>>>,
     pub title_gesture: Rc<RefCell<Option<TitleGesture>>>,
     pub media_query: TextController,
     pub media_filter: Signal<MediaFilter>,
@@ -493,6 +504,8 @@ impl UiState {
             title_background: TextController::default(),
             title_picker: ColorPickerController::new(),
             title_preview: Signal::new(None),
+            chroma_preview: Signal::new(None),
+            chroma_gesture: Rc::new(RefCell::new(None)),
             title_gesture: Rc::new(RefCell::new(None)),
             media_query: TextController::default(),
             media_filter: Signal::new(MediaFilter::All),
@@ -1461,8 +1474,39 @@ impl UiState {
         }
     }
 
+    pub(super) fn preview_chroma_drag(&self, pointer: Point) {
+        let Some(gesture) = *self.chroma_gesture.borrow() else {
+            return;
+        };
+        if self.busy.peek() || self.primary_clip() != Some(gesture.target) {
+            return;
+        }
+        let draft = self.chroma_preview.peek();
+        let mut key = draft
+            .filter(|(clip, _)| *clip == gesture.target)
+            .map_or(gesture.key, |(_, key)| key);
+        let x = pointer.x - gesture.rect.x;
+        let value = (((x - 6.0) / (gesture.rect.width - 12.0).max(1.0)).clamp(0.0, 1.0) * 100.0)
+            .round()
+            / 100.0;
+        match gesture.property {
+            0 => key.similarity = value,
+            1 => key.smoothness = value,
+            _ => key.spill = value,
+        }
+        if draft != Some((gesture.target, key)) {
+            self.chroma_preview.set(Some((gesture.target, key)));
+            self.request_preview();
+        }
+    }
+
     pub(super) fn clear_title_gesture(&self) {
         self.title_gesture.borrow_mut().take();
+        self.chroma_gesture.borrow_mut().take();
+        if self.chroma_preview.peek().is_some() {
+            self.chroma_preview.set(None);
+            self.request_preview();
+        }
         if self.title_preview.peek().is_some() {
             self.title_preview.set(None);
             self.request_preview();
@@ -1646,6 +1690,7 @@ impl UiState {
                         speed: clip.speed,
                         playback: clip.playback,
                         lut: clip.lut.clone(),
+                        chroma_key: clip.chroma_key,
                         color: clip.color,
                         clip_id: clip.id,
                         path: media.path.clone(),
@@ -1667,6 +1712,14 @@ impl UiState {
         let mut visual = VisualPlan::without_media(project, &missing);
         if let Some(((.., clip_id), title)) = self.title_preview.peek() {
             visual.replace_title(clip_id, title);
+        }
+        if let Some(((.., clip_id), key)) = self.chroma_preview.peek() {
+            for source in &mut sources {
+                if source.clip_id == clip_id {
+                    source.chroma_key = Some(key);
+                }
+            }
+            visual.replace_chroma_key(clip_id, key);
         }
         drop(editor);
         let end = self.sequence_end();
@@ -1710,6 +1763,7 @@ impl UiState {
                     speed: 1.0,
                     playback: range.playback,
                     lut: None,
+                    chroma_key: None,
                     color: Default::default(),
                     clip_id: 0,
                     path: range.path.clone(),
@@ -4742,6 +4796,7 @@ mod tests {
                             crate::timeline::Transform::default(),
                         ),
                         lut: None,
+                        chroma_key: None,
                         color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
                         playback: crate::timeline::Playback::Forward,
                         path: "video.mp4".into(),
@@ -4881,9 +4936,10 @@ mod tests {
         for index in 0..100 {
             assert!(state.edit(Command::InsertClip {
                 track_id: 0,
-                clip: Clip {
+                clip: Box::new(Clip {
                     playback: crate::timeline::Playback::Forward,
                     lut: None,
+                    chroma_key: None,
                     id: index,
                     start_frame: index * 30,
                     source_start_frame: index * 30,
@@ -4901,7 +4957,7 @@ mod tests {
                     linked_audio: false,
                     keyframes: Vec::new(),
                     transform: Transform::default(),
-                }
+                })
             }));
         }
         for key in state.storyboard_requests() {
@@ -4976,6 +5032,32 @@ mod tests {
         assert!(storyboard_requests(&[], &mut cache, &mut recent).is_empty());
         assert!(cache.is_empty());
         assert!(recent.is_empty());
+    }
+
+    #[test]
+    fn chroma_draft_updates_preview_plan_without_editing_the_project() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "green.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(1_000_000),
+            has_audio: false,
+        })));
+        state.insert_media(1);
+        let target = state.primary_clip().unwrap();
+        let saved = state.editor.borrow().project().clone();
+        let key = crate::timeline::ChromaKey {
+            similarity: 0.4,
+            ..Default::default()
+        };
+        state.chroma_preview.set(Some((target, key)));
+        let (plan, _) = state.program_plan();
+        assert_eq!(plan.sources[0].chroma_key, Some(key));
+        assert_eq!(state.editor.borrow().project(), &saved);
+        state.select_clip(None);
+        assert!(state.chroma_preview.peek().is_none());
+        assert!(state.program_plan().0.sources[0].chroma_key.is_none());
     }
 
     #[test]
@@ -5738,9 +5820,10 @@ mod tests {
         })));
         assert!(state.edit(Command::InsertClip {
             track_id: 2,
-            clip: Clip {
+            clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 lut: None,
+                chroma_key: None,
                 id: 0,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -5758,7 +5841,7 @@ mod tests {
                 linked_audio: false,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
-            }
+            })
         }));
         state.play();
         assert!(state.program.playing.peek());

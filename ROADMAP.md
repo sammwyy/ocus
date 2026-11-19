@@ -107,7 +107,7 @@ The smallest version that can take raw footage and produce a finished video.
 Feature-complete for most everyday editing, with a focus on polish and stability. Work is grouped into rough milestones.
 
 ### v0.5: Timeline and motion
-- [ ] Transitions: fade, dissolve, slide
+- [x] Transitions: fade, dissolve, slide
 - [ ] Speed control from 0.25x to 4x
 - [ ] Reverse clip and freeze frame
 - [ ] Transforms: scale, position, rotation, crop, opacity

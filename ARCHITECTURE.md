@@ -116,8 +116,9 @@ The shared compositor clamps transition length to the clip duration and uses
 the adjacent previous clip's continued picture (holding at source EOF), or
 the lower tracks, as the outgoing picture. Transitions are edited through
 `SetTransition`; splitting leaves the transition only on the left piece.
-The optional field remains compatible with version 1 projects. Transition
-controls are not yet exposed in the UI.
+The optional field remains compatible with version 1 projects. The Inspector
+offers transition choices and quarter-second duration steps; the timeline
+marks the effective transition range with a ramp at the clip start.
 
 ## Where new work belongs
 

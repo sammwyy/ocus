@@ -120,7 +120,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [ ] LUT support (.cube)
 - [x] Audio waveforms on the timeline and in the Source monitor
 - [x] Audio fade in and fade out
-- [ ] Loudness normalization
+- [x] Loudness normalization
 - [ ] Noise reduction
 
 ### v0.7: Subtitles and keyframes
@@ -132,7 +132,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 ### v0.8: Performance and safety
 - [ ] Hardware accelerated encoding and decoding (NVENC, VAAPI, VideoToolbox)
 - [ ] Proxy media for smooth 4K editing
-- [ ] Frame and thumbnail cache
+- [x] Frame and thumbnail cache
 - [x] Autosave
 - [x] Crash recovery
 

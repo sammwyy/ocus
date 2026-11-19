@@ -2,11 +2,12 @@ use super::edits::{self, ClipRef, CopiedClip};
 use super::interaction::{DragState, Gesture, MenuState};
 use crate::export::{self, ExportControl, presets};
 use crate::media::audio::{self, AudioPlan, AudioSource, Clock, Waveform, carries_sound};
+use crate::media::cache::{storyboard, thumbnail};
 use crate::media::composite::VisualPlan;
 use crate::media::preview::{
-    FrameImage, FrameSource, PreviewEvent, PreviewPlan, StoryboardKey, decode_sequence, storyboard,
+    FrameImage, FrameSource, PreviewEvent, PreviewPlan, StoryboardKey, decode_sequence,
 };
-use crate::media::{Media, MediaKind, MediaProbe, Thumbnail, probe, thumbnail};
+use crate::media::{Media, MediaKind, MediaProbe, Thumbnail, probe};
 use crate::playback::{self, Session};
 use crate::project::export_settings::{
     AudioCodec, Container, EncodingSpeed, ExportSettings, LastExport, VideoCodec,
@@ -193,6 +194,7 @@ pub(crate) struct Monitor {
     pub playing: Signal<bool>,
     pub position: Signal<u64>,
     pub(super) preview: Signal<PreviewState>,
+    failure_status: Rc<RefCell<Option<String>>>,
     cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
     serial: Rc<Cell<u64>>,
     audio: Rc<RefCell<Option<Session>>>,
@@ -217,6 +219,7 @@ impl Monitor {
             playing: Signal::new(false),
             position: Signal::new(0),
             preview: Signal::new(PreviewState::Ready),
+            failure_status: Rc::new(RefCell::new(None)),
             cancel: Rc::new(RefCell::new(None)),
             serial: Rc::new(Cell::new(0)),
             audio: Rc::new(RefCell::new(None)),
@@ -808,6 +811,88 @@ impl UiState {
         } else {
             format!("{status} · {checkpoint}")
         });
+    }
+
+    pub(super) fn normalize_loudness(&self) {
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let Some((track_id, clip_id)) = self.primary_clip() else {
+            return;
+        };
+        let editor = self.editor.borrow();
+        let project = editor.project();
+        let Some(track) = project.tracks().iter().find(|track| track.id == track_id) else {
+            return;
+        };
+        let Some(clip) = track.clips.iter().find(|clip| clip.id == clip_id).cloned() else {
+            return;
+        };
+        let ClipContent::Media { media_id } = clip.content else {
+            return;
+        };
+        let Some(media) = project.media().iter().find(|media| media.id == media_id) else {
+            return;
+        };
+        if !carries_sound(track.kind, &clip, media) {
+            return;
+        }
+        let path = media.path.clone();
+        let fps = self.frame_rate();
+        let revision = self.revision.peek();
+        drop(editor);
+        self.status.set("Analyzing clip loudness…".into());
+        let state = self.clone();
+        app.spawn_background(
+            move || audio::loudness(&path, clip.source_start_frame, clip.duration_frames, fps),
+            move |result| state.finish_normalization(revision, track_id, clip_id, result),
+        );
+    }
+
+    fn finish_normalization(
+        &self,
+        revision: u64,
+        track_id: u64,
+        clip_id: u64,
+        result: Result<audio::Loudness, String>,
+    ) {
+        if self.revision.peek() != revision {
+            return;
+        }
+        let muted = self
+            .editor
+            .borrow()
+            .project()
+            .tracks()
+            .iter()
+            .find(|track| track.id == track_id)
+            .and_then(|track| track.clips.iter().find(|clip| clip.id == clip_id))
+            .map(|clip| clip.muted);
+        let Some(muted) = muted else { return };
+        match result {
+            Ok(measurement) => {
+                let Some((volume, clamped)) = measurement.gain() else {
+                    self.status
+                        .set("Clip is silent or below the loudness gate; volume unchanged".into());
+                    return;
+                };
+                if self.edit(Command::SetClipAudio {
+                    track_id,
+                    clip_id,
+                    volume,
+                    muted,
+                }) {
+                    self.status.set(if clamped {
+                        "Raised to the maximum volume (+6 dB)".into()
+                    } else {
+                        "Loudness normalized (−14 LUFS target, −1 dB peak limit)".into()
+                    });
+                }
+            }
+            Err(error) => self
+                .status
+                .set(format!("Cannot normalize loudness: {error}")),
+        }
     }
 
     pub fn edit(&self, command: Command) -> bool {
@@ -1528,14 +1613,14 @@ impl UiState {
                 match image.map(|image| upload_preview_frame(&window, image)) {
                     Some(Ok(texture)) => {
                         monitor.slot.publish(texture, &window);
-                        monitor.frame_ready();
+                        state.preview_frame_ready(&monitor);
                     }
                     Some(Err(error)) => {
                         state.fail_preview(&monitor, error);
                     }
                     None => {
                         monitor.slot.clear(&window);
-                        monitor.frame_ready();
+                        state.preview_frame_ready(&monitor);
                     }
                 }
             },
@@ -1553,10 +1638,21 @@ impl UiState {
         })
     }
 
+    fn preview_frame_ready(&self, monitor: &Monitor) {
+        monitor.frame_ready();
+        if let Some(failure) = monitor.failure_status.borrow_mut().take()
+            && self.status.peek() == failure
+        {
+            self.status.set("Preview ready".into());
+        }
+    }
+
     fn fail_preview(&self, monitor: &Monitor, error: String) {
         self.stop(monitor);
         monitor.preview.set(PreviewState::Failed(error.clone()));
-        self.status.set(format!("Preview failed: {error}"));
+        let status = format!("Preview failed: {error}");
+        *monitor.failure_status.borrow_mut() = Some(status.clone());
+        self.status.set(status);
     }
 
     pub(super) fn retry_preview(&self, target: PlaybackMonitor) {
@@ -3408,6 +3504,35 @@ mod tests {
     }
 
     #[test]
+    fn successful_preview_frame_clears_only_its_stale_failure_status() {
+        let state = UiState::new();
+        for monitor in [&state.source, &state.program] {
+            state.status.set("Ready".into());
+            state.preview_frame_ready(monitor);
+            assert_eq!(state.status.peek(), "Ready");
+
+            state.fail_preview(monitor, "Decode failed".into());
+            monitor.begin_preview(true);
+            state.preview_frame_ready(monitor);
+            assert_eq!(monitor.preview.peek(), PreviewState::Ready);
+            assert_eq!(state.status.peek(), "Preview ready");
+
+            state.fail_preview(monitor, "Upload failed".into());
+            monitor.begin_preview(true);
+            state.status.set("Project saved".into());
+            state.preview_frame_ready(monitor);
+            assert_eq!(monitor.preview.peek(), PreviewState::Ready);
+            assert_eq!(state.status.peek(), "Project saved");
+        }
+        state.fail_preview(&state.source, "Source decode failed".into());
+        state.fail_preview(&state.program, "Program decode failed".into());
+        state.preview_frame_ready(&state.source);
+        assert_eq!(state.status.peek(), "Preview failed: Program decode failed");
+        state.preview_frame_ready(&state.program);
+        assert_eq!(state.status.peek(), "Preview ready");
+    }
+
+    #[test]
     fn monitor_preview_transitions_clear_errors_and_loading() {
         let state = UiState::new();
         for (target, monitor) in [
@@ -3504,6 +3629,75 @@ mod tests {
         assert_eq!(media_frames(&media, (30, 1)), None);
         media.duration_us = None;
         assert_eq!(media_frames(&media, (30, 1)), Some(90));
+    }
+
+    #[test]
+    fn normalization_import_insert_is_undoable_and_ignores_stale_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("quiet.wav");
+        assert!(
+            std::process::Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=d=2:r=48000",
+                    "-af",
+                    "volume=0.25"
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (path, info, _) = inspect_source(&path).unwrap();
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: path.clone(),
+            kind: info.kind,
+            duration_us: info.duration_us,
+            has_audio: info.has_audio,
+        })));
+        state.insert_media_at(1, None).unwrap();
+        let (track_id, clip_id) = state.primary_clip().unwrap();
+        let volume = || {
+            state
+                .editor
+                .borrow()
+                .project()
+                .tracks()
+                .iter()
+                .find(|track| track.id == track_id)
+                .unwrap()
+                .clips[0]
+                .volume
+        };
+        let revision = state.revision.peek();
+        let measurement = audio::loudness(&path, 0, 60, (30, 1)).unwrap();
+        state.finish_normalization(revision, track_id, clip_id, Ok(measurement));
+        assert_eq!(volume(), 2.0);
+        assert!(state.status.peek().contains("maximum volume"));
+        state.undo();
+        assert_eq!(volume(), 1.0);
+        state.finish_normalization(revision, track_id, clip_id, Ok(measurement));
+        assert_eq!(volume(), 1.0);
+        let revision = state.revision.peek();
+        state.finish_normalization(
+            revision,
+            track_id,
+            clip_id,
+            Ok(audio::Loudness {
+                integrated: f64::NEG_INFINITY,
+                peak: 0.0,
+            }),
+        );
+        assert_eq!(volume(), 1.0);
+        assert!(state.status.peek().contains("silent"));
+        state.finish_normalization(revision, track_id, clip_id, Err("decode failed".into()));
+        assert!(state.status.peek().contains("decode failed"));
     }
 
     #[test]

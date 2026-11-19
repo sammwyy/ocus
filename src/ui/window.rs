@@ -2230,6 +2230,19 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         state,
                         |s| set_clip_audio(s, |clip| (clip.volume, !clip.muted)),
                     )),
+                    inline(with_help(
+                        secondary_button(
+                            None,
+                            "Normalize loudness",
+                            true,
+                            state,
+                            UiState::normalize_loudness,
+                        ),
+                        Help::new(
+                            "Set volume so this clip plays at a standard loudness (-14 LUFS)",
+                        ),
+                        state,
+                    )),
                     fade_row(state, &clip, true),
                     fade_row(state, &clip, false),
                     if clip.linked_audio {

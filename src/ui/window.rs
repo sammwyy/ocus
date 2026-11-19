@@ -1294,6 +1294,13 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
             );
             let badge = if missing {
                 Some("Missing".into())
+            } else if let Some(status) = state
+                .proxy_status
+                .get()
+                .get(&media.path)
+                .filter(|status| !status.is_empty())
+            {
+                Some(status.clone())
             } else {
                 media
                     .duration_us
@@ -1371,7 +1378,17 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                                     if missing {
                                         "Missing · Relink to restore".into()
                                     } else {
-                                        media_details(media)
+                                        let status = state
+                                            .proxy_status
+                                            .get()
+                                            .get(&media.path)
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        if status.is_empty() {
+                                            media_details(media)
+                                        } else {
+                                            format!("{} · {status}", media_details(media))
+                                        }
                                     },
                                     muted(),
                                     10.0,
@@ -4208,6 +4225,16 @@ fn settings_modal(state: &UiState, viewport: Size) -> BoxedWidget {
                 .width(content_width)
                 .gap(12.0)
                 .child(heading("Appearance", text_color(), 16.0))
+                .child(Box::new(
+                    Flex::row()
+                        .gap(8.0)
+                        .align(Align::Center)
+                        .child(Box::new(Checkbox::new(settings.use_proxies, {
+                            let state = state.clone();
+                            move || state.toggle_proxies()
+                        })))
+                        .child(text("Use proxies for preview", text_color(), 12.0)),
+                ))
                 .child(Box::new(append(Flex::column().gap(6.0), theme_rows)))
                 .child(heading("Accent color", text_color(), 16.0))
                 .child(if settings.theme == ThemeMode::System {

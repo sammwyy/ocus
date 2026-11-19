@@ -14,13 +14,25 @@ pub(crate) enum ThemeMode {
     Midnight,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Settings {
+    pub use_proxies: bool,
     pub theme: ThemeMode,
     pub accent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_export_directory: Option<PathBuf>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            use_proxies: true,
+            theme: ThemeMode::default(),
+            accent: None,
+            last_export_directory: None,
+        }
+    }
 }
 
 impl Settings {
@@ -106,6 +118,20 @@ pub(crate) fn save(path: &Path, settings: &Settings) -> Result<(), Box<dyn std::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxies_default_on_and_preference_round_trips() {
+        let defaults: Settings = toml::from_str("").unwrap();
+        assert!(defaults.use_proxies);
+        let settings = Settings {
+            use_proxies: false,
+            ..defaults
+        };
+        assert_eq!(
+            toml::from_str::<Settings>(&toml::to_string(&settings).unwrap()).unwrap(),
+            settings
+        );
+    }
 
     #[test]
     fn settings_round_trip_and_reject_invalid_accent() {
@@ -225,6 +251,7 @@ mod tests {
             theme: ThemeMode::Light,
             accent: Some("orange".into()),
             last_export_directory: Some(directory.clone()),
+            ..Settings::default()
         };
         save(&path, &settings).unwrap();
         assert_eq!(load(&path).unwrap(), settings);

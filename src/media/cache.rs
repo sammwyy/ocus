@@ -48,16 +48,30 @@ fn thumbnail_in(root: Option<&Path>, path: &Path) -> Result<Thumbnail, String> {
 pub fn storyboard(
     key: &StoryboardKey,
     cancelled: Arc<AtomicBool>,
+    use_proxies: bool,
 ) -> Result<Vec<FrameImage>, String> {
-    storyboard_in(directory().as_deref(), key, cancelled)
+    storyboard_selected(directory().as_deref(), key, cancelled, use_proxies)
 }
 
+#[cfg(test)]
 fn storyboard_in(
     root: Option<&Path>,
     request: &StoryboardKey,
     cancelled: Arc<AtomicBool>,
 ) -> Result<Vec<FrameImage>, String> {
+    storyboard_selected(root, request, cancelled, false)
+}
+
+fn storyboard_selected(
+    root: Option<&Path>,
+    request: &StoryboardKey,
+    cancelled: Arc<AtomicBool>,
+    use_proxies: bool,
+) -> Result<Vec<FrameImage>, String> {
     let mut params = Vec::from(b"storyboard:160x90".as_slice());
+    if use_proxies && super::proxy::ready(&request.path).is_some() {
+        params.extend(b":proxy:v1");
+    }
     params.push(match request.kind {
         MediaKind::Video => 0,
         MediaKind::Image => 1,
@@ -80,7 +94,7 @@ fn storyboard_in(
     {
         return Ok(frames);
     }
-    let frames = super::preview::storyboard(request, cancelled.clone())?;
+    let frames = super::preview::storyboard(request, cancelled.clone(), use_proxies)?;
     if frames.len() == expected
         && !cancelled.load(Ordering::Relaxed)
         && let (Some(root), Some(entry)) = (root, entry)
@@ -90,7 +104,7 @@ fn storyboard_in(
     Ok(frames)
 }
 
-fn key(path: &Path, params: &[u8]) -> Option<String> {
+pub(super) fn key(path: &Path, params: &[u8]) -> Option<String> {
     let path = path.canonicalize().ok()?;
     let metadata = path.metadata().ok()?;
     let modified = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
@@ -188,10 +202,10 @@ fn write(root: &Path, path: &Path, frames: &[FrameImage], cap: u64) -> io::Resul
     evict(root, cap)
 }
 
-fn evict(root: &Path, cap: u64) -> io::Result<()> {
+pub(super) fn evict(root: &Path, cap: u64) -> io::Result<()> {
     let mut entries = Vec::new();
     let mut total = 0;
-    for directory in ["thumbnails", "frames"] {
+    for directory in ["thumbnails", "frames", "proxies"] {
         let Ok(files) = fs::read_dir(root.join(directory)) else {
             continue;
         };
@@ -199,7 +213,8 @@ fn evict(root: &Path, cap: u64) -> io::Result<()> {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.len() != 16 || !name.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let key = name.strip_suffix(".nut").unwrap_or(&name);
+            if key.len() != 16 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
                 continue;
             }
             let metadata = entry.metadata()?;

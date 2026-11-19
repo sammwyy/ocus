@@ -802,6 +802,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                color: Default::default(),
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,

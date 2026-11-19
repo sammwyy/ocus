@@ -526,6 +526,7 @@ mod tests {
 
     fn proxy_source(path: PathBuf, duration: u64) -> FrameSource {
         FrameSource {
+            color: ColorAdjust::default(),
             clip_id: 1,
             path,
             kind: MediaKind::Video,

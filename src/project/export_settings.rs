@@ -8,6 +8,8 @@ pub enum Container {
     Mp4,
     Matroska,
     WebM,
+    Gif,
+    Wav,
 }
 
 impl Container {
@@ -16,7 +18,21 @@ impl Container {
             Self::Mp4 => "mp4",
             Self::Matroska => "mkv",
             Self::WebM => "webm",
+            Self::Gif => "gif",
+            Self::Wav => "wav",
         }
+    }
+
+    pub fn has_video(self) -> bool {
+        self != Self::Wav
+    }
+
+    pub fn has_audio(self) -> bool {
+        self != Self::Gif
+    }
+
+    pub fn uses_video_codec(self) -> bool {
+        matches!(self, Self::Mp4 | Self::Matroska | Self::WebM)
     }
 }
 
@@ -78,6 +94,9 @@ impl ExportSettings {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if self.container == Container::Wav {
+            return Ok(());
+        }
         if self.width < 2
             || self.height < 2
             || self.width > 8192
@@ -94,6 +113,12 @@ impl ExportSettings {
             || u64::from(rate.numerator) > 120 * u64::from(rate.denominator)
         {
             return Err("Output frame rate must be between 1 and 120 fps".into());
+        }
+        if self.container == Container::Gif {
+            if self.width > 1280 || self.height > 1280 || rate.numerator > 50 * rate.denominator {
+                return Err("GIF size must be at most 1280 × 1280 and 50 fps".into());
+            }
+            return Ok(());
         }
         if !(100..=200_000).contains(&self.video_bitrate_kbps)
             || !(32..=512).contains(&self.audio_bitrate_kbps)

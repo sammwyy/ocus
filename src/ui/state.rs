@@ -1,7 +1,7 @@
 use super::edits::{self, ClipRef, CopiedClip};
 use super::interaction::{DragState, Gesture, MenuState};
 use crate::export::{self, ExportControl, presets};
-use crate::media::audio::{self, AudioPlan, AudioSource, Clock, carries_sound};
+use crate::media::audio::{self, AudioPlan, AudioSource, Clock, Waveform, carries_sound};
 use crate::media::composite::VisualPlan;
 use crate::media::preview::{
     FrameImage, FrameSource, PreviewEvent, PreviewPlan, StoryboardKey, decode_sequence, storyboard,
@@ -76,6 +76,12 @@ const DISCARD_CHOICE: &str = "Don't Save";
 const CANCEL_CHOICE: &str = "Cancel";
 const MAX_THUMBNAILS: usize = 256;
 
+#[derive(Clone, Default)]
+struct Waveforms {
+    peaks: Rc<RefCell<HashMap<PathBuf, Option<Arc<Waveform>>>>>,
+    pending: Rc<RefCell<Option<Arc<AtomicBool>>>>,
+}
+
 fn missing_sources(project: &Project) -> HashSet<u64> {
     project
         .media()
@@ -114,46 +120,38 @@ fn storyboard_requests(
     cache: &mut HashMap<StoryboardKey, Storyboard>,
     recent: &mut Vec<StoryboardKey>,
 ) -> Vec<StoryboardKey> {
-    let live: HashSet<_> = keys.iter().map(|(key, _)| key.clone()).collect();
-    cache.retain(|key, _| live.contains(key));
-    recent.retain(|key| cache.contains_key(key));
+    let live: HashSet<_> = keys.iter().map(|(key, _)| key).collect();
+    recent.retain(|key| live.contains(key) && cache.contains_key(key));
     let visible: HashSet<_> = keys
         .iter()
         .filter(|(_, visible)| *visible)
-        .map(|(key, _)| key.clone())
+        .map(|(key, _)| key)
         .collect();
+    // On-screen ranges may overflow the cache; off-screen retention never does.
+    let capacity = MAX_STORYBOARDS.max(visible.len());
     let mut selected = Vec::new();
     let mut seen = HashSet::new();
     for key in keys
         .iter()
         .map(|(key, _)| key)
-        .filter(|key| visible.contains(*key) && cache.contains_key(*key))
-        .chain(
-            keys.iter()
-                .map(|(key, _)| key)
-                .filter(|key| visible.contains(*key)),
-        )
+        .filter(|key| visible.contains(*key))
         .chain(recent.iter().rev())
-        .chain(
-            keys.iter()
-                .map(|(key, _)| key)
-                .filter(|key| cache.contains_key(*key)),
-        )
         .chain(keys.iter().map(|(key, _)| key))
     {
         if seen.insert(key.clone()) {
             selected.push(key.clone());
-            if selected.len() == MAX_STORYBOARDS {
+            if selected.len() == capacity {
                 break;
             }
         }
     }
-    cache.retain(|key, _| selected.contains(key));
-    recent.retain(|key| selected.contains(key) && !visible.contains(key));
-    for key in &selected {
-        if !recent.contains(key) && !visible.contains(key) {
-            recent.insert(0, key.clone());
-        }
+    cache.retain(|key, _| seen.contains(key));
+    recent.retain(|key| seen.contains(key) && !visible.contains(key));
+    for key in selected
+        .iter()
+        .filter(|key| !visible.contains(*key) && !cache.contains_key(*key))
+    {
+        recent.insert(0, key.clone());
     }
     recent.extend(
         selected
@@ -279,6 +277,7 @@ pub(crate) struct UiState {
     pub export_scroll: ScrollController,
     pub thumbnails: Rc<RefCell<HashMap<PathBuf, Arc<RgbaImage>>>>,
     pub storyboards: Rc<RefCell<HashMap<StoryboardKey, Storyboard>>>,
+    waveforms: Waveforms,
     pub media_scroll: ScrollController,
     pub inspector_scroll: ScrollController,
     pub timeline_start: Signal<u64>,
@@ -441,6 +440,7 @@ impl UiState {
             export_scroll: ScrollController::default(),
             thumbnails: Rc::new(RefCell::new(HashMap::new())),
             storyboards: Rc::new(RefCell::new(HashMap::new())),
+            waveforms: Waveforms::default(),
             media_scroll: ScrollController::default(),
             inspector_scroll: ScrollController::default(),
             timeline_start: Signal::new(0),
@@ -739,6 +739,7 @@ impl UiState {
                     state.request_preview();
                     state.request_source_preview();
                     state.queue_storyboards();
+                    state.queue_waveforms();
                 }
             },
         );
@@ -1155,6 +1156,7 @@ impl UiState {
         self.stop(&self.source);
         self.source.position.set(0);
         self.request_source_preview();
+        self.queue_waveforms();
     }
 
     pub fn play_source(&self) {
@@ -1485,6 +1487,83 @@ impl UiState {
         self.timeline_start.set(0);
     }
 
+    pub(super) fn waveform(&self, path: &Path) -> Option<Arc<Waveform>> {
+        self.waveforms.peaks.borrow().get(path)?.clone()
+    }
+
+    fn queue_waveforms(&self) {
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        if self.waveforms.pending.borrow().is_some() {
+            return;
+        }
+        let source = self
+            .source_range()
+            .filter(|range| range.kind == MediaKind::Audio);
+        let editor = self.editor.borrow();
+        let project = editor.project();
+        let missing = self.missing_media.peek();
+        let mut peaks = self.waveforms.peaks.borrow_mut();
+        peaks.retain(|path, _| {
+            project
+                .media()
+                .iter()
+                .any(|media| media.path == *path && !missing.contains(&media.id))
+        });
+        let needed = project.tracks().iter().flat_map(|track| {
+            track.clips.iter().filter_map(|clip| {
+                let ClipContent::Media { media_id } = clip.content else {
+                    return None;
+                };
+                if missing.contains(&media_id) {
+                    return None;
+                }
+                let media = project.media().iter().find(|media| media.id == media_id)?;
+                carries_sound(track.kind, clip, media).then_some(media.path.as_path())
+            })
+        });
+        let path = source
+            .iter()
+            .map(|range| range.path.as_path())
+            .chain(needed)
+            .find(|path| !peaks.contains_key(*path))
+            .map(Path::to_path_buf);
+        drop(peaks);
+        drop(editor);
+        let Some(path) = path else { return };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancelled.clone();
+        *self.waveforms.pending.borrow_mut() = Some(cancelled.clone());
+        let state = self.clone();
+        app.spawn_background(
+            move || {
+                let result = audio::waveform(&path, worker_cancel);
+                (path, result)
+            },
+            move |(path, result)| {
+                if cancelled.load(Ordering::Relaxed) {
+                    return;
+                }
+                state.waveforms.pending.borrow_mut().take();
+                let peaks = result.ok().flatten().map(Arc::new);
+                let changed = peaks.is_some();
+                state.waveforms.peaks.borrow_mut().insert(path, peaks);
+                if changed {
+                    state.ui_revision.update(|revision| *revision += 1);
+                }
+                state.queue_waveforms();
+            },
+        );
+    }
+
+    fn reset_waveforms(&self) {
+        if let Some(cancelled) = self.waveforms.pending.borrow_mut().take() {
+            cancelled.store(true, Ordering::Relaxed);
+        }
+        self.waveforms.peaks.borrow_mut().clear();
+    }
+
     fn cancel_storyboards(&self) {
         if let Some(cancel) = self.storyboard_cancel.borrow_mut().take() {
             cancel.store(true, Ordering::Relaxed);
@@ -1548,7 +1627,6 @@ impl UiState {
             project.settings().frame_rate.denominator,
         );
         let start = self.timeline_start.peek();
-        let end = start.saturating_add(self.visible_frames());
         let weights: Vec<_> = project
             .tracks()
             .iter()
@@ -1588,9 +1666,7 @@ impl UiState {
                         duration: clip.duration_frames,
                         fps,
                     },
-                    geometry.lane_visible(index)
-                        && clip.start_frame < end
-                        && clip.start_frame.saturating_add(clip.duration_frames) > start,
+                    geometry.clip_visible(index, clip.start_frame, clip.duration_frames),
                 ))
             })
             .collect();
@@ -1666,6 +1742,7 @@ impl UiState {
             return;
         }
         self.replace_project(Project::new("Untitled"));
+        self.reset_waveforms();
         self.missing_media.set(HashSet::new());
         self.export_modal.set(false);
         self.project_path.set(None);
@@ -1744,6 +1821,7 @@ impl UiState {
         recovered: bool,
         missing: HashSet<u64>,
     ) {
+        self.reset_waveforms();
         let sources = project
             .media()
             .iter()
@@ -1781,6 +1859,7 @@ impl UiState {
         });
         self.load_thumbnails(sources);
         self.queue_storyboards();
+        self.queue_waveforms();
         self.request_preview();
     }
 
@@ -2035,6 +2114,9 @@ impl UiState {
 
     fn export_form_for_quality(&self, constant_quality: bool) -> Result<ExportSettings, String> {
         let mut settings = self.export_draft.peek();
+        if !settings.container.has_video() {
+            return Ok(settings);
+        }
         let field = |controller: &TextController, label: &str| {
             controller
                 .peek()
@@ -2046,6 +2128,10 @@ impl UiState {
         settings.height = field(&self.export_height, "height")?;
         settings.frame_rate.numerator = field(&self.export_fps_num, "frame rate numerator")?;
         settings.frame_rate.denominator = field(&self.export_fps_den, "frame rate denominator")?;
+        if !settings.container.uses_video_codec() {
+            settings.validate()?;
+            return Ok(settings);
+        }
         settings.audio_bitrate_kbps = field(&self.export_audio_bitrate, "audio bitrate")?;
         if constant_quality {
             settings.video_quality = Some(
@@ -2088,7 +2174,25 @@ impl UiState {
         video: Option<VideoCodec>,
         audio: Option<AudioCodec>,
     ) {
-        let Ok(mut settings) = self.export_form() else {
+        let current = self.export_draft.peek().container;
+        let settings = match container {
+            Some(Container::Gif) if current != Container::Gif => {
+                Ok(presets::gif_settings(self.editor.borrow().project()))
+            }
+            Some(next)
+                if next != current && (next == Container::Wav || !current.uses_video_codec()) =>
+            {
+                let editor = self.editor.borrow();
+                let project = editor.project().settings();
+                Ok(ExportSettings::for_project(
+                    project.width,
+                    project.height,
+                    project.frame_rate.clone(),
+                ))
+            }
+            _ => self.export_form(),
+        };
+        let Ok(mut settings) = settings else {
             self.status
                 .set("Fix the numeric export fields first".into());
             return;
@@ -2106,7 +2210,7 @@ impl UiState {
                     settings.video_codec = VideoCodec::Vp9;
                     settings.audio_codec = AudioCodec::Opus;
                 }
-                Container::Matroska => {}
+                Container::Matroska | Container::Gif | Container::Wav => {}
             }
         }
         if let Some(video) = video {
@@ -2140,8 +2244,15 @@ impl UiState {
         let settings = self.export_draft.peek();
         let path = PathBuf::from(self.export_path.peek());
         let mut dialog = FileDialog::new()
-            .set_title("Export video")
-            .add_filter("Video", &[settings.container.extension()])
+            .set_title("Export timeline")
+            .add_filter(
+                match settings.container {
+                    Container::Gif => "Animated GIF",
+                    Container::Wav => "WAV audio",
+                    _ => "Video",
+                },
+                &[settings.container.extension()],
+            )
             .set_file_name(
                 path.file_name()
                     .and_then(|name| name.to_str())
@@ -2295,7 +2406,7 @@ impl UiState {
         let control = Arc::new(ExportControl::default());
         let end = self.sequence_end();
         let fps = &project.settings().frame_rate;
-        self.export_total.set(
+        self.export_total.set(if settings.container.has_video() {
             export::output_frames(
                 end,
                 (fps.numerator, fps.denominator),
@@ -2304,8 +2415,10 @@ impl UiState {
                     settings.frame_rate.denominator,
                 ),
             )
-            .unwrap_or(0),
-        );
+            .unwrap_or(0)
+        } else {
+            end
+        });
         self.export_modal.set(false);
         *self.export_control.borrow_mut() = Some(control.clone());
         self.exporting.set(true);
@@ -2483,6 +2596,7 @@ impl UiState {
                 }
                 state.load_thumbnails(paths);
                 state.queue_storyboards();
+                state.queue_waveforms();
                 state.request_preview();
                 state.request_source_preview();
                 let remaining = state.missing_media.peek().len();
@@ -3259,7 +3373,74 @@ mod tests {
     }
 
     #[test]
+    fn storyboard_loads_every_visible_range_and_trims_overflow_when_hidden() {
+        let mut keys = storyboard_ranges();
+        for (_, visible) in &mut keys {
+            *visible = true;
+        }
+        let mut cache = HashMap::new();
+        let mut recent = Vec::new();
+        let requests = storyboard_requests(&keys, &mut cache, &mut recent);
+        println!("100 visible ranges: {} queued", requests.len());
+        assert!(requests.iter().eq(keys.iter().map(|(key, _)| key)));
+        for key in requests {
+            cache.insert(key, Arc::new(Vec::new()));
+        }
+        assert!(storyboard_requests(&keys, &mut cache, &mut recent).is_empty());
+
+        for (_, visible) in &mut keys[..90] {
+            *visible = false;
+        }
+        assert!(storyboard_requests(&keys, &mut cache, &mut recent).is_empty());
+        assert_eq!(cache.len(), MAX_STORYBOARDS);
+        assert!(keys[90..].iter().all(|(key, _)| cache.contains_key(key)));
+        assert_eq!(recent.len(), MAX_STORYBOARDS);
+        println!("10 visible ranges after zoom: {} retained", cache.len());
+    }
+
+    #[test]
+    fn storyboard_does_not_warm_hidden_ranges_past_the_initial_budget() {
+        let mut keys = storyboard_ranges();
+        for (_, visible) in &mut keys {
+            *visible = false;
+        }
+        keys[90].1 = true;
+        let mut cache = HashMap::new();
+        let mut recent = Vec::new();
+        let requests = storyboard_requests(&keys, &mut cache, &mut recent);
+        cache.insert(keys[90].0.clone(), Arc::new(Vec::new()));
+        keys[90].1 = false;
+        assert_eq!(requests.first(), Some(&keys[90].0));
+        assert_eq!(requests.len(), MAX_STORYBOARDS);
+        let requests = storyboard_requests(&keys, &mut cache, &mut recent);
+        assert!(
+            requests
+                .iter()
+                .eq(keys[..MAX_STORYBOARDS - 1].iter().map(|(key, _)| key))
+        );
+    }
+
+    #[test]
     fn storyboard_viewport_scroll_and_zoom_request_later_clip_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("video.mkv");
+        assert!(
+            std::process::Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=32x18:rate=30:duration=100",
+                    "-c:v",
+                    "ffv1",
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
         let state = UiState::new();
         state.timeline_rect.set(Rect {
             x: 0.0,
@@ -3269,7 +3450,7 @@ mod tests {
         });
         assert!(state.edit(Command::ImportMedia(Media {
             id: 1,
-            path: "video.mp4".into(),
+            path,
             kind: MediaKind::Video,
             duration_us: Some(100_000_000),
             has_audio: false,
@@ -3311,8 +3492,30 @@ mod tests {
         assert!(state.storyboard_requests().is_empty());
         assert_eq!(state.storyboards.borrow().len(), MAX_STORYBOARDS);
         state.zoom_to_fit();
-        assert!(state.storyboard_requests().is_empty());
-        assert_eq!(state.storyboards.borrow().len(), MAX_STORYBOARDS);
+        let requests = state.storyboard_requests();
+        assert_eq!(requests.len(), 100 - MAX_STORYBOARDS);
+        let range = requests
+            .iter()
+            .find(|key| key.source_start == 89 * 30)
+            .unwrap();
+        let frames = storyboard(range, Arc::new(AtomicBool::new(false))).unwrap();
+        assert_eq!(frames.len(), 3);
+        assert!(
+            frames
+                .iter()
+                .all(|frame| (frame.width, frame.height) == (160, 90))
+        );
+        println!(
+            "Zoom to Fit decoded {} real frames for clip 90",
+            frames.len()
+        );
+        for key in requests {
+            state
+                .storyboards
+                .borrow_mut()
+                .insert(key, Arc::new(Vec::new()));
+        }
+        assert_eq!(state.storyboards.borrow().len(), 100);
         state.missing_media.set(HashSet::from([1]));
         assert!(state.storyboard_requests().is_empty());
         assert!(state.storyboards.borrow().is_empty());
@@ -3330,11 +3533,8 @@ mod tests {
         let mut cache = HashMap::new();
         let mut recent = Vec::new();
         let requests = storyboard_requests(&keys, &mut cache, &mut recent);
-        assert_eq!(requests.len(), MAX_STORYBOARDS);
-        assert_eq!(
-            requests.iter().collect::<HashSet<_>>().len(),
-            MAX_STORYBOARDS
-        );
+        assert_eq!(requests.len(), 100);
+        assert_eq!(requests.iter().collect::<HashSet<_>>().len(), 100);
         // A failed decode leaves no cache entry and can be requested again.
         assert_eq!(
             storyboard_requests(&keys, &mut cache, &mut recent),

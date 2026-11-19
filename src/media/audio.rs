@@ -15,6 +15,90 @@ pub const CHANNELS: usize = 2;
 /// Samples held ahead of playback; caps decode memory and restart latency.
 const CAPACITY: usize = RATE as usize / 4 * CHANNELS;
 const CHUNK: usize = 2_048;
+const PEAK_BUCKET_FRAMES: usize = RATE as usize / 100;
+const MAX_PEAK_BUCKETS: usize = 32_768;
+
+#[derive(Debug)]
+pub(crate) struct Waveform {
+    peaks: Vec<f32>,
+    bucket_frames: usize,
+    frames: u64,
+}
+
+impl Waveform {
+    fn collect(
+        mut read: impl FnMut(&mut Vec<f32>, usize) -> Result<usize, String>,
+    ) -> Result<Self, String> {
+        let mut peaks: Vec<f32> = Vec::new();
+        let mut samples = Vec::new();
+        let mut bucket_frames = PEAK_BUCKET_FRAMES;
+        let mut frames = 0;
+        let mut remaining = bucket_frames;
+        let mut peak = 0.0_f32;
+        loop {
+            samples.clear();
+            let requested = remaining.min(CHUNK);
+            let count = read(&mut samples, requested)?;
+            frames += count as u64;
+            peak = samples
+                .iter()
+                .fold(peak, |peak, sample| peak.max(sample.abs()).min(1.0));
+            if count < requested {
+                if remaining != bucket_frames || count > 0 {
+                    peaks.push(peak);
+                }
+                break;
+            }
+            remaining -= count;
+            if remaining > 0 {
+                continue;
+            }
+            peaks.push(peak);
+            // Merge adjacent peaks to bound the cache without cutting off long sources.
+            if peaks.len() == MAX_PEAK_BUCKETS {
+                for index in 0..peaks.len() / 2 {
+                    peaks[index] = peaks[2 * index].max(peaks[2 * index + 1]);
+                }
+                peaks.truncate(peaks.len() / 2);
+                bucket_frames *= 2;
+            }
+            remaining = bucket_frames;
+            peak = 0.0;
+        }
+        Ok(Self {
+            peaks,
+            bucket_frames,
+            frames,
+        })
+    }
+
+    pub(crate) fn peak(&self, start: f64, end: f64, fps: (u32, u32)) -> f32 {
+        let samples_per_frame = f64::from(RATE) * f64::from(fps.1) / f64::from(fps.0);
+        let start = start * samples_per_frame;
+        let end = (end * samples_per_frame).min(self.frames as f64);
+        if start >= end {
+            return 0.0;
+        }
+        let first = (start / self.bucket_frames as f64).floor() as usize;
+        let last = (end / self.bucket_frames as f64).ceil() as usize;
+        self.peaks[first.min(self.peaks.len())..last.min(self.peaks.len())]
+            .iter()
+            .copied()
+            .fold(0.0, f32::max)
+    }
+}
+
+pub(crate) fn waveform(
+    path: &Path,
+    cancelled: Arc<AtomicBool>,
+) -> Result<Option<Waveform>, String> {
+    ffmpeg::init().map_err(|error| error.to_string())?;
+    let Some(mut reader) = AudioReader::open(path, 0, (1, 1), cancelled.clone())? else {
+        return Ok(None);
+    };
+    let waveform = Waveform::collect(|samples, frames| reader.read(samples, frames, &cancelled))?;
+    Ok((waveform.frames > 0 && !cancelled.load(Ordering::Relaxed)).then_some(waveform))
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AudioSource {
@@ -835,6 +919,50 @@ mod tests {
             bytes.extend(sample.to_le_bytes());
         }
         fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn waveform_maps_stereo_peaks_and_silence_to_source_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("peaks.wav");
+        let samples = [[0, 0], [8_192, -24_576], [-16_384, 16_384], [4_096, 0]]
+            .into_iter()
+            .zip([1_920, 1_920, 1_920, 240])
+            .flat_map(|(pair, frames)| std::iter::repeat_n(pair, frames).flatten())
+            .collect::<Vec<_>>();
+        write_wav(&path, RATE, CHANNELS as u16, &samples);
+        let peaks = waveform(&path, Arc::new(AtomicBool::new(false)))
+            .unwrap()
+            .unwrap();
+        let fps = (25, 1);
+        assert_eq!(peaks.peak(0.0, 1.0, fps), 0.0);
+        assert_eq!(peaks.peak(1.0, 2.0, fps), 0.75);
+        assert_eq!(peaks.peak(2.25, 2.5, fps), 0.5);
+        assert_eq!(peaks.peak(0.0, 3.0, fps), 0.75);
+        assert_eq!(peaks.peak(3.0, 4.0, fps), 0.125);
+        assert_eq!(peaks.peak(3.125, 4.0, fps), 0.0);
+    }
+
+    #[test]
+    fn waveform_coarsens_without_losing_earlier_peaks_or_truncating_long_sources() {
+        let frames = (MAX_PEAK_BUCKETS + 2) * PEAK_BUCKET_FRAMES;
+        let mut position = 0;
+        let peaks = Waveform::collect(|samples, requested| {
+            let count = requested.min(frames - position);
+            for (index, level) in [(PEAK_BUCKET_FRAMES, 0.75), (frames - 1, 0.5)] {
+                if (position..position + count).contains(&index) {
+                    samples.push(level);
+                }
+            }
+            position += count;
+            Ok(count)
+        })
+        .unwrap();
+        assert!(peaks.peaks.len() <= MAX_PEAK_BUCKETS);
+        let fps = (100, 1);
+        assert_eq!(peaks.peak(0.0, 2.0, fps), 0.75);
+        assert_eq!(peaks.peak(2.0, 3.0, fps), 0.0);
+        assert_eq!(peaks.peak(MAX_PEAK_BUCKETS as f64, frames as f64, fps), 0.5);
     }
 
     fn drain(queue: &AudioQueue) -> (usize, usize) {

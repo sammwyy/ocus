@@ -1,287 +1,91 @@
 # Ocus
 
-The timeline model supports `forward` (the omitted default), `reverse`, and
-`freeze` clip playback in project JSON. Reverse uses the same source range in
-the opposite direction; freeze holds one video frame with an independent
-duration. `SetPlayback` and `freeze_at` are validated, undoable project edits.
-Leaving freeze keeps the held source frame as the source range start and
-clamps the duration to the remaining source. Preview, filmstrips and export
-render reverse and freeze playback; reverse audio follows the picture and
-freeze audio is silent. Select a media clip to choose Normal, Reverse, or
-Freeze in the Inspector. Shift+R toggles reverse; Shift+F adds a frame hold
-at the playhead, splitting the selected video clip when needed. Both actions
-are also in the clip context menu and support undo/redo. Timeline badges
-identify reversed and frozen clips.
+**A desktop video editor for everyday projects, from the first cut to the final export.**
 
-Projects open even when source files have moved. Missing files are marked in the
-media bin; choose **Relink…** to search a folder by exact filename, or right-click
-a missing item and choose **Relink file…** to locate a renamed file. Locating one
-file also reconnects missing files with matching names in the same folder. Each
-relinked file can be undone independently. Relink missing timeline media before
-exporting, then save the project to keep its updated source paths.
+[Build from source](#build-from-source) · [Make your first edit](#make-your-first-edit) · [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md)
 
-Relative media paths resolve beside the project file. Opening a project (or
-restoring unsaved work) refreshes available sources' duration and sound metadata
-in the background, retaining stored metadata if a source cannot be probed or
-the new metadata would invalidate existing clips. Linked clips whose source no
-longer has sound are unlinked, with a note in the status line. Opening repairs
-do not mark the project as edited. Relinking to a silent video also unlinks its
-sound; undo restores both the original source and its linked clips.
+![The same Ocus workspace in light and dark themes, split diagonally, with a title over illustrated mountain footage and a multitrack timeline](docs/screenshot.png)
 
-Ocus is an early-stage, lightweight video editor written in Rust. The
-[roadmap](ROADMAP.md) tracks its intended milestones. The CreamUI editor
-supports importing media, editing and previewing a multitrack timeline,
-saving projects and exporting video. A full manual end-to-end workflow check
-is still pending. The editor has an integrated titlebar, four initial timeline
-tracks, a versioned JSON project format and undo/redo for project edits. The
-timeline toolbar's **Title** tool adds a text clip initially three seconds long,
-whose duration can be changed in the inspector; over footage
-it places the title on a free video track at the playhead. Selecting a title
-shows a frame around it in the Program monitor: drag inside to move it or drag
-its bottom-right handle to resize it. The inspector edits its multiline text,
-font family, size, color (picker or hex), bold, italic and outline. Use `Serif`
-to request an installed serif font; if none is found, the default font is used.
-Independent HTML and Markdown switches parse `<b>` / `<bold>`, `<i>` / `<italic>`,
-`<color=red>` / `<color=#ff0000>`, `**bold**` and `_italic_` in the preview;
-other HTML remains literal text. These edits can be undone and are saved with
-the project. The workspace also supports splitting, moving, trimming, deleting
-and ripple-deleting clips. Ripple delete closes the selected clips' time ranges
-across unlocked tracks; a clip spanning a removed range keeps its surviving source
-frames as two clips, and the whole edit is one undo step. Double-click a track
-name to rename it (up to 32 characters; blank restores its positional label).
-Track headers always offer lock and visibility controls: locking protects clips
-from selection and edits, while hiding video or muting audio removes that track
-from both Program playback and export, including linked video sound. Right-click
-a header to rename, reorder within its kind, lock, hide/mute, or delete a track.
-V1 remains the base layer; lower video rows appear above it. All track changes
-support Undo/Redo. **Open** and
-**Save as…** use native file dialogs instead of requiring typed paths;
-**Save** reuses the chosen path. **New**, **Open** and closing the window
-offer Save, Don't Save or Cancel when there are unsaved changes; Save finishes
-first and the action continues only if it succeeds. Undoing or redoing back to
-the last saved version clears the edited indicator; undoing all edits in a new
-project clears it too. Saves are atomic and file operations run in the background.
-**Import** accepts multiple
-files from the native picker and probes video, audio, and images with FFmpeg
-on a worker thread. Video and still-image sources get small, regenerable
-first-frame thumbnails.
+*Ocus in Light and Dark. Switch themes in Settings → Appearance.*
 
-**Import subtitles…** accepts SRT files; the regular import picker and file drops
-also recognize `.srt`. Each file adds a dedicated subtitle video track in one
-undoable edit, with bottom-positioned, outlined title clips. Supported bold,
-italic and font-color markup is preserved; unsupported tags (including underline)
-are stripped. Overlapping cues end at the next cue's start; cues rounding to the
-same start frame keep the later cue. Subtitle titles use the existing preview and
-export compositor. Select a subtitle cue to edit the track's font, color, outline,
-background and position in **Subtitle style**. Each style change updates all cues
-on that track in one undoable step without changing their text or timing.
-Subtitle clips use normal, Forward-only playback, like titles; they cannot be
-reversed or frozen.
-Video export burns subtitles in by default. Turn off **Burn in subtitles** on
-the Export dialog's Video tab to export a clean video and an SRT sidecar beside
-it. Multiple subtitle tracks merge into one time-sorted sidecar. GIF always burns
-subtitles in; WAV has no subtitle output. Existing output or sidecar files are
-never overwritten.
+## What you can do
 
-The media bin offers search, a segmented
-All/video/audio/still filter with per-type counts, grid and list views, and files can also be dropped onto it to import
-them. Each source has a one-click insert action that adds a clip on a video or
-audio track using the probed duration (still images default to three seconds).
-To make a **picture-in-picture**, overlap a video or still clip on V2 with a
-background clip on V1. Select the overlay, then choose a corner under
-**Picture-in-picture** in the Inspector. The preset replaces the clip's
-transform with a 30% scale and a corner position. Fine-tune it under
-**Transform**, or undo once to restore the previous settings. The Program
-monitor and export use the same placement.
+- **Cut and arrange.** Import video, audio, and stills; then trim, split, snap, and layer clips on a multitrack timeline. Use markers to find your place and undo or redo project edits.
+- **Refine the picture.** Preview clips in **Source** and the whole sequence in **Program**. Add transitions, change clip speed, adjust color or apply a `.cube` LUT, and position picture-in-picture overlays.
+- **Add titles and subtitles.** Style text directly on your footage or import an SRT file. Burn subtitles into a video or write an SRT alongside it.
+- **Shape the sound.** See waveforms on the timeline, keep sound linked to its video or detach it, and adjust volume, fades, loudness, and noise reduction per clip.
+- **Export for your destination.** Start with H.264/AAC MP4, pick a preset for vertical or square video, or export WebM, animated GIF, or audio-only WAV.
 
-A video with sound becomes one clip whose audio is linked to the picture:
-the timeline draws it as an attached audio band under the video, and every
-split, move, trim, delete or ripple applies to both, so cutting a clip in three
-and ripple-deleting the middle keeps picture and sound 1:1. **Detach audio**
-(inspector or right-click) moves that sound to an audio track that is free for
-the same range, creating a new one if needed, and **Link audio** folds a
-matching pair back together. Clip volume and mute are editable, saved, and
-honored during preview playback and export. Select an audio clip or a video
-clip with linked sound, then enable **Audio → Noise reduction** in the
-Inspector to reduce background noise in speech. The setting is saved per
-clip and applies to the Program monitor and export. Source playback and
-waveforms still show the original audio. Previously saved references without
-probe metadata can be re-imported.
+## Build from source
 
-Select a video or audio clip and use **Inspector → Speed** to choose 0.25x,
-0.5x, 1x, 1.5x, 2x or 4x. Slower clips become longer and faster clips shorter,
-keeping the source range unless the next clip leaves too little room. Linked
-audio follows the picture and keeps its pitch in preview and export. Changed
-speeds appear as small timeline badges and can be undone. Still images and
-titles do not have playback speed.
+Use current stable [Rust](https://rustup.rs/) and the FFmpeg **development libraries**, plus a graphical desktop session with GPU support for video preview. Ocus links FFmpeg directly; the `ffmpeg` executable alone is not enough. The default MP4 export needs H.264 and AAC encoders in your FFmpeg build.
 
-The workspace has two GPU monitors: **Source** shows the selected timeline
-clip's trimmed range, or the whole file selected in the media bin, and
-**Program** shows the sequence at the playhead. Each has its own scrub bar,
-Play/Pause, frame stepping and jump-to-start/end; starting one pauses the
-other. **Match frame** moves the program playhead to the source monitor's
-frame, and **Insert** adds the selected bin file. Audio files show a waveform
-and playhead in **Source**. The timeline is one painted
-surface with track headers, a zoomable ruler (1 s to 10 min per view, with zoom buttons, a slider and **Fit**), clip
-filmstrips and audio waveforms sampled from their trimmed source ranges, and a
-playhead across every track. Timeline waveforms reflect clip volume and are
-dimmed when muted. Markers are numbered flags on the ruler with a line through
-the tracks; ruler scrubbing and clip edges snap to them, and they are saved
-with the project.
-
-Tracks can be added from the timeline's **Tracks** button, the **Add
-track** button under the track headers or any right-click menu, and deleted
-from a header's hover button or its menu (one video and one audio track always
-remain). Right-click opens a context menu on clips (cut, copy, paste,
-duplicate, split, detach/link audio, mute, delete, ripple delete), on empty
-track space (paste here, add title here, move playhead, track actions), on
-the ruler (add a marker, or go to / remove the one under the pointer), on
-track headers and on media bin items (insert at end or at the playhead, open in
-the source monitor, remove an unused source); Esc or clicking outside closes it.
-
-Editing is direct: drag clips along a track or onto another track of the same
-kind (edges snap to other clips, markers, the playhead and the start), drag sources from
-the media bin onto a track, or drop files from the desktop anywhere on the
-window to import them (over a track they are also placed there). Ctrl+click
-and Shift+click add to the selection and dragging over empty track space draws
-a selection rectangle; a multi-selection moves, copies and deletes together.
-If a copied clip's track was deleted, paste uses the first track of the same
-kind with room at the destination.
-Keyboard shortcuts work whenever a text field is not focused: Ctrl+Z /
-Ctrl+Shift+Z (or Ctrl+Y) undo and redo, Delete or Backspace removes the
-selection (Shift ripple-deletes), Ctrl+C/X/V/D copy, cut, paste at the playhead
-and duplicate, S or Ctrl+K splits at the playhead, Ctrl+A selects all, Esc
-clears the selection or cancels a drag, Space plays or pauses the last monitor
-used for playback or seeking (Program by default), K pauses playback or starts
-Program, the arrows step a frame (Shift: one second, Alt: nudge the selection), Home/End
-jump, +/− zoom, T adds a title, M adds or removes a marker at the playhead
-(the **Marker** timeline button does the same), Shift+M / Ctrl+Shift+M jump to
-the next / previous marker, and Ctrl+N/O/S/Shift+S/I/E run the file
-actions. Hover or keyboard-focus an icon-only control to see what it does;
-its tooltip includes a shortcut when one is available for that action. Source
-transport controls do not show sequence-only shortcuts.
-Every edit is one undoable step. On the timeline, vertical scrolling
-only moves through the tracks (when they overflow) and horizontal scrolling
-only moves through time, so two-finger touchpad gestures follow their axis;
-with a plain mouse wheel, Shift+wheel scrolls time. Ctrl+wheel (or a touchpad
-pinch reported as Ctrl+wheel) zooms around the pointer. Selecting several
-clips turns the inspector into a selection view with a summary, shared
-actions and the list of selected clips. Filmstrips regenerate in the
-background and do not change the project file. The timeline can expand to give
-tracks more room. Video decoding happens on workers and frames are presented
-on the same GPU device as CreamUI. On a CPU-only window the monitors instead
-explain why video cannot be displayed. On narrower windows the media bin and
-inspector share a tabbed sidebar.
-
-The titlebar gear opens an in-editor settings dialog with Appearance,
-Performance and About sections. Performance turns hardware acceleration on or
-off (on by default): previews decode through CUDA or VAAPI on Linux and
-VideoToolbox on macOS, and H.264/HEVC exports use NVENC, VAAPI or
-VideoToolbox (VP9 through VAAPI). Unsupported media, missing drivers or a
-failing device fall back to software decoding and libx264, libx265 or libvpx. About shows the package version, build commit and author, with links
-to the source, issue tracker and releases in the default browser. Appearance can
-follow the system through CreamUI or use Light, Dark, or Midnight. Custom themes offer
-CreamUI's built-in Blue, Cyan, Green, Pink, Purple, and Orange accent presets;
-Orange is the initial custom accent. Preferences are saved independently of
-project files in `Ocus/settings.toml` under the platform configuration
-directory (XDG config on Linux, AppData on Windows).
-Regenerable media-bin thumbnails and timeline storyboard frames live under
-`thumbnails/` and `frames/` in the platform `Ocus` cache directory
-(`~/.cache/ocus` on Linux), bounded to 512 MiB in total. This directory can
-be deleted safely; missing entries are decoded again in the background.
-
-**Export** (disabled while the timeline is empty) opens a settings dialog with
-built-in presets for the original project, 1080p, 720p, vertical 9:16, square,
-4K, WebM, HEVC, Animated GIF and Audio only (WAV). For video you can set
-even output dimensions (up to 8192 × 8192),
-frame rate (including rational rates such as 30000/1001), video and audio
-bitrates or constant-quality CRF, encoder speed, container (MP4, MKV or WebM)
-and compatible video/audio codecs
-(H.264, HEVC or VP9; AAC or Opus). Audio mixing remains at 48 kHz stereo and
-video uses 8-bit YUV420p; the exporter requires the selected encoders to be
-present in FFmpeg. When the output aspect ratio differs from the
-project, it fits the entire composition inside the output with black bars
-instead of stretching it. Presets can be saved with a custom name in
-`Ocus/export-presets.json` under the platform config directory and used in
-other projects. Successful exports remember the settings and destination in
-the project file; a saved project is automatically saved after exporting.
-**Export again** generates a new numbered file using the last settings
-without reopening the dialog; **Options…** reopens it. Outputs are never
-silently overwritten. An unsaved project still needs to be saved to retain
-its export settings between sessions. For a first export, saved projects use
-their own folder; unsaved projects use the last chosen export folder, or the
-system Videos folder. Unavailable folders are skipped: last chosen folder,
-Videos, Documents, home, and finally the working directory. A folder chosen
-with **Browse…** (or used by a successful export) is
-remembered in editor preferences across projects and sessions. The destination
-is also shown beside the export actions on every settings tab; **Change…** opens
-the full path and folder picker.
-
-Ocus encodes one export at a time. Open **Queue** to track progress and use
-**Add export…** to set up another output without waiting. **Remove** skips a
-waiting job; **Cancel** stops the current job. The queue continues after a
-cancellation or failure and keeps recent results until cleared or the app
-closes. Project editing stays locked until the queue finishes.
-
-**Animated GIF** exports the visual timeline and titles as a silent loop.
-It defaults to 15 fps and fits the project within 640 × 640;
-you can adjust the size and frame rate in the Video tab. **Audio only (WAV)**
-exports the complete 48 kHz stereo timeline mix as uncompressed 32-bit float,
-including linked clip sound, gaps, volume and mute, without rendering video.
-
-The default MP4 export encodes H.264
-video composited from every video track (V1 is the base; V2 and lower rows are
-drawn above it), transparent
-still images and all title overlays, plus AAC stereo audio from audio tracks and
-linked clip sound. Titles honor font, size, position, color, transparency,
-bold/italic, outline (scaled with text size) and enabled HTML/Markdown styling.
-Cuts, trims, gaps (black video/silent audio), per-clip volume and mute are honored.
-The Inspector's **Normalize loudness** measures the trimmed clip using EBU R128
-and sets undoable volume toward −14 LUFS, limited to −1 dB true peak and 200% gain.
-Silent clips are unchanged; mute is preserved. Audio-only
-timelines export with black video. Export runs in the background, shows
-progress, can be cancelled, and publishes a completed file atomically.
-Available H.264 and AAC encoders are required in FFmpeg for the default MP4.
-
-The Program monitor uses the same visual compositor as export, including
-overlapping video, transparent images and titles. The Source monitor shows a
-single source. Preview sound plays through the default output device, with
-picture timed to the audio clock. New titles are placed above existing footage
-and create a video track if needed; V1 is marked BASE and other video tracks
-ABOVE in the timeline. The manual end-to-end workflow check remains outstanding.
-Building requires FFmpeg development libraries (available
-on the Fedora development machine) and a GPU-capable CreamUI window.
-
-## Run and check
-
-See [DEVELOPMENT.md](DEVELOPMENT.md) for per-OS installation and building
-instructions. With the prerequisites installed, run from the repository root:
+On Ubuntu/Debian, install the build dependencies:
 
 ```sh
-cargo run --locked
-cargo test --all-targets --locked
-cargo fmt --all --check
-cargo clippy --all-targets --locked -- -D warnings
+sudo apt update
+sudo apt install build-essential pkg-config libclang-dev \
+  libavformat-dev libavcodec-dev libavfilter-dev libavutil-dev \
+  libswscale-dev libswresample-dev libasound2-dev libdbus-1-dev \
+  libudev-dev libwayland-dev libxkbcommon-dev
 ```
 
-The app needs a graphical desktop session; tests run headlessly. CreamUI is
-pinned to a commit on its GitHub repository, while other dependencies come
-from crates.io. No local CreamUI checkout is needed.
+Linux file dialogs use an XDG desktop portal; install `zenity` if you need a fallback. For Fedora, macOS, Windows, or installer builds, see the [development guide](DEVELOPMENT.md).
 
-## Code map
+```sh
+git clone https://github.com/sammwyy/ocus.git
+cd ocus
+cargo build --locked
+cargo run --locked
+```
 
-- `src/app.rs`: window startup and wiring.
-- `src/project/`: saved project, JSON format, and edit history/undo-redo.
-- `src/timeline.rs`: tracks, clips, and titles.
-- `src/media.rs`, `src/media/preview.rs`, `src/media/composite.rs`,
-  `src/media/hardware.rs` and `src/media/audio.rs`: sources, decoding,
-  hardware acceleration, and shared preview/export composition.
-- `src/playback.rs`: default audio device and playback sessions.
-- `src/export.rs`: timeline video, GIF and audio export with cancellation.
-- `src/ui/`: compact CreamUI workspace and background file workflow.
-- `src/main.rs`: executable entry point.
+## Make your first edit
 
-See [architecture](ARCHITECTURE.md) for dependencies and planned media
-boundaries, [contributing](CONTRIBUTING.md) for the workflow, and
-[code style](CODESTYLE.md) for source conventions. Concrete release blockers
-are listed in [TODO.md](TODO.md).
+1. **Import your media.** Choose **Import** or drop files into the media bin. Select a source to preview it.
+2. **Build your timeline.** Drag a source from the bin onto a track. Drag a clip's edge to trim it, or move the playhead and press **S** to split the selected clip. Video on V2 appears over V1, the base layer.
+3. **Add a title.** Move the playhead over your footage and choose **Title**. Edit the text and style in the Inspector, then position it in the Program monitor.
+4. **Save and export.** Choose **Save** to keep an editable `.ocus` project. Choose **Export**, select a preset and destination, and render a file you can share.
+
+Projects reference your original media rather than copying it. If you move a source, use **Relink…** in the media bin to search a folder, or right-click the missing source and choose **Relink file…** to find a renamed file. Save the updated project to keep the new paths.
+
+### Keyboard shortcuts
+
+These shortcuts apply when a text field isn't focused. Use **Cmd** in place of **Ctrl** on macOS.
+
+| Shortcut | Action |
+| --- | --- |
+| **Space** | Play or pause the last monitor you used (Program by default) |
+| **← / →** | Step one frame; hold **Shift** to step one second |
+| **S** | Split at the playhead |
+| **Delete** / **Shift+Delete** | Delete / ripple-delete the selection |
+| **T** / **M** | Add a title / toggle a marker at the playhead |
+| **Shift+R** / **Shift+F** | Toggle reverse / add a frame hold |
+| **Ctrl+Z** / **Ctrl+Shift+Z** | Undo / redo |
+| **Ctrl+I** / **Ctrl+S** / **Ctrl+E** | Import / save / export |
+
+Hover over or keyboard-focus an icon-only control to see its label and shortcut, when available.
+
+## Project status
+
+Ocus is in early development. See the [roadmap](ROADMAP.md) for planned milestones and [TODO](TODO.md) for known gaps and release blockers.
+
+## Contributing
+
+Read the [contribution guide](CONTRIBUTING.md), [code style](CODESTYLE.md), and [architecture guide](ARCHITECTURE.md). Ocus is written in Rust and pins CreamUI to a Git revision; no separate CreamUI checkout is needed.
+
+```sh
+cargo fmt --all --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --all-targets --locked
+```
+
+| Area | Where to look |
+| --- | --- |
+| App entry point and desktop workspace | [`src/main.rs`](src/main.rs), [`src/app.rs`](src/app.rs), [`src/ui/`](src/ui/) |
+| Saved projects, undoable edits, and timeline model | [`src/project/`](src/project/), [`src/timeline.rs`](src/timeline.rs) |
+| Media decoding and shared preview/export composition | [`src/media.rs`](src/media.rs), [`src/media/`](src/media/) |
+| Playback and rendering files | [`src/playback.rs`](src/playback.rs), [`src/export.rs`](src/export.rs) |
+
+## License
+
+The repository does not currently specify a license.

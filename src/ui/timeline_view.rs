@@ -1,11 +1,12 @@
 use super::UiState;
 use super::controls::{
-    AUDIO, Glyph, IMAGE, PLAYHEAD, STAGE, TITLE, VIDEO, accent, border, draw_glyph, faint, fit,
-    muted, panel, panel_raised, surface, text_color,
+    AUDIO, Glyph, IMAGE, MARKER, MARKER_LINE, PLAYHEAD, STAGE, TITLE, VIDEO, accent, border,
+    draw_glyph, faint, fit, muted, panel, panel_raised, surface, text_color,
 };
 use super::edits::ClipRef;
 use super::interaction::Gesture;
 use super::state::Storyboard;
+use super::waveform::WaveformSlice;
 use crate::timeline::TrackKind;
 use creamui::core::layout::{Dimension, Style};
 use creamui::core::{Modifiers, Painter, Point, Rect, RgbaImage, TextAlign, Widget};
@@ -16,6 +17,8 @@ use std::sync::Arc;
 pub(super) const HEADER_WIDTH: f32 = 128.0;
 pub(super) const RULER_HEIGHT: f32 = 28.0;
 const LANE_GAP: f32 = 3.0;
+/// How close, in pixels, the pointer must be to a marker to pick it.
+const MARKER_REACH: f32 = 6.0;
 const CLIP_HEADER: f32 = 17.0;
 /// Ctrl+wheel travel, in pixels, per zoom step.
 const ZOOM_TRAVEL: f32 = 24.0;
@@ -47,6 +50,7 @@ pub(super) struct LaneClip {
     pub look: ClipLook,
     pub images: Option<Storyboard>,
     pub fallback: Option<Arc<RgbaImage>>,
+    pub waveform: Option<WaveformSlice>,
     pub volume: f32,
     pub muted: bool,
     pub linked_audio: bool,
@@ -88,6 +92,8 @@ pub(super) struct TimelineView {
     pub end: u64,
     pub fps: (u32, u32),
     pub playhead: u64,
+    /// Marker frames in ascending order.
+    pub markers: Vec<u64>,
     pub selected: Vec<ClipRef>,
     /// Where a drag would place clips, and whether that drop is allowed.
     pub ghosts: Vec<Ghost>,
@@ -198,9 +204,19 @@ impl Geometry {
         self.top
     }
 
-    pub(super) fn lane_visible(&self, index: usize) -> bool {
+    pub(super) fn clip_visible(&self, index: usize, start: u64, duration: u64) -> bool {
         let lane = self.lanes[index];
-        lane.y < self.bottom && lane.y + lane.height > self.top
+        lane.y < self.bottom
+            && lane.y + lane.height > self.top
+            && self
+                .clipped_span(self.x(start), self.x(start.saturating_add(duration)))
+                .is_some()
+    }
+
+    fn clipped_span(&self, left: f32, right: f32) -> Option<(f32, f32)> {
+        let left = left.max(self.left);
+        let right = right.min(self.right());
+        (right - left >= 1.0).then_some((left, right))
     }
 
     fn x(&self, frame: u64) -> f32 {
@@ -217,6 +233,17 @@ impl Geometry {
     /// The (possibly negative) frame under `x`, without clamping to the view.
     pub(super) fn frame_at(&self, x: f32) -> f64 {
         self.start as f64 + f64::from(x - self.left) * self.span as f64 / f64::from(self.width)
+    }
+
+    /// The marker drawn within a few pixels of `x`, if any.
+    pub(super) fn marker_near(&self, markers: &[u64], x: f32) -> Option<u64> {
+        markers
+            .iter()
+            .copied()
+            .map(|frame| (frame, (self.x(frame) - x).abs()))
+            .filter(|&(_, distance)| distance <= MARKER_REACH)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(frame, _)| frame)
     }
 
     pub(super) fn pixels_per_frame(&self) -> f32 {
@@ -664,17 +691,17 @@ impl TimelineView {
         strip: f32,
     ) {
         let linked = clip.linked_audio && strip > 0.0;
+        let x = geometry.x(clip.start);
+        let end = geometry.x(clip.start.saturating_add(clip.duration));
+        let Some((left, right)) = geometry.clipped_span(x, end) else {
+            return;
+        };
         let full = Rect {
-            x: geometry.x(clip.start),
+            x,
             y: lane.y + 2.0,
-            width: geometry.x(clip.start.saturating_add(clip.duration)) - geometry.x(clip.start),
+            width: end - x,
             height: lane.height - strip - if linked { 2.0 } else { 4.0 },
         };
-        let left = full.x.max(geometry.left);
-        let right = (full.x + full.width).min(geometry.right());
-        if right - left < 1.0 {
-            return;
-        }
         let body = Rect {
             x: left,
             width: (right - left).max(2.0),
@@ -755,26 +782,7 @@ impl TimelineView {
                 }
             }
             ClipLook::Audio if content.height > 6.0 => {
-                let level = (clip.volume / 2.0).clamp(0.0, 1.0);
-                let y = snap(painter, content.y + content.height * (1.0 - level));
-                painter.fill_rect(
-                    Rect {
-                        y,
-                        height: content.y + content.height - y,
-                        ..content
-                    },
-                    base.mix(panel(), if clip.muted { 0.85 } else { 0.5 }),
-                    0.0,
-                );
-                painter.fill_rect(
-                    Rect {
-                        y: y - 1.0,
-                        height: 2.0,
-                        ..content
-                    },
-                    if clip.muted { muted() } else { base },
-                    0.0,
-                );
+                self.paint_clip_audio(painter, clip, full, content, 1.0);
                 if clip.muted && content.height >= 16.0 && body.width >= 60.0 {
                     draw_glyph(
                         painter,
@@ -856,7 +864,7 @@ impl TimelineView {
                 height: strip - 2.0,
                 ..body
             };
-            self.paint_linked_audio(painter, clip, sound, selected);
+            self.paint_linked_audio(painter, clip, full, sound, selected);
             Rect {
                 height: body.height + sound.height,
                 ..body
@@ -876,28 +884,34 @@ impl TimelineView {
         );
     }
 
-    /// The audio half of a linked clip, drawn under its picture.
-    fn paint_linked_audio(
+    fn paint_clip_audio(
         &self,
         painter: &mut dyn Painter,
         clip: &LaneClip,
+        full: Rect,
         sound: Rect,
-        selected: bool,
+        padding: f32,
     ) {
-        painter.push_clip_rounded(sound, 4.0);
-        let tone = if clip.muted {
-            0.82
-        } else if selected {
-            0.56
-        } else {
-            0.66
-        };
-        painter.fill_rect(sound, AUDIO.mix(panel(), tone), 0.0);
+        if let Some(waveform) = &clip.waveform {
+            waveform.paint(
+                painter,
+                full,
+                Rect {
+                    y: sound.y + padding,
+                    height: sound.height - padding * 2.0,
+                    ..sound
+                },
+                clip.volume,
+                if clip.muted {
+                    AUDIO.mix(panel(), 0.55)
+                } else {
+                    AUDIO
+                },
+            );
+            return;
+        }
         let level = (clip.volume / 2.0).clamp(0.0, 1.0);
-        let y = snap(
-            painter,
-            sound.y + 2.0 + (sound.height - 4.0) * (1.0 - level),
-        );
+        let y = snap(painter, sound.y + (sound.height * (1.0 - level)));
         painter.fill_rect(
             Rect {
                 y,
@@ -916,6 +930,27 @@ impl TimelineView {
             if clip.muted { muted() } else { AUDIO },
             0.0,
         );
+    }
+
+    /// The audio half of a linked clip, drawn under its picture.
+    fn paint_linked_audio(
+        &self,
+        painter: &mut dyn Painter,
+        clip: &LaneClip,
+        full: Rect,
+        sound: Rect,
+        selected: bool,
+    ) {
+        painter.push_clip_rounded(sound, 4.0);
+        let tone = if clip.muted {
+            0.82
+        } else if selected {
+            0.56
+        } else {
+            0.66
+        };
+        painter.fill_rect(sound, AUDIO.mix(panel(), tone), 0.0);
+        self.paint_clip_audio(painter, clip, full, sound, 2.0);
         painter.fill_rect(
             Rect {
                 height: 1.0,
@@ -984,6 +1019,65 @@ impl TimelineView {
                 Color::rgba(255, 255, 255, 90),
                 0.0,
             );
+        }
+    }
+
+    fn paint_markers(&self, painter: &mut dyn Painter, rect: Rect, geometry: &Geometry) {
+        let ruler_bottom = rect.y + RULER_HEIGHT;
+        let bottom = geometry
+            .lanes
+            .last()
+            .map_or(ruler_bottom, |lane| lane.y + lane.height);
+        let end = self.start.saturating_add(self.span);
+        for (index, &frame) in self.markers.iter().enumerate() {
+            if frame < self.start || frame >= end {
+                continue;
+            }
+            let x = snap(painter, geometry.x(frame));
+            painter.fill_rect(
+                Rect {
+                    x,
+                    y: ruler_bottom,
+                    width: 1.0,
+                    height: bottom - ruler_bottom,
+                },
+                MARKER_LINE,
+                0.0,
+            );
+            painter.fill_rect(
+                Rect {
+                    x,
+                    y: rect.y + 16.0,
+                    width: 1.0,
+                    height: RULER_HEIGHT - 16.0,
+                },
+                MARKER,
+                0.0,
+            );
+            painter.fill_rect(
+                Rect {
+                    x: x - 4.0,
+                    y: rect.y + 15.0,
+                    width: 8.0,
+                    height: 8.0,
+                },
+                MARKER,
+                2.0,
+            );
+            if x + 22.0 <= geometry.right() {
+                painter.fill_text(
+                    Rect {
+                        x: x + 6.0,
+                        y: rect.y + 14.0,
+                        width: 20.0,
+                        height: 12.0,
+                    },
+                    &(index + 1).to_string(),
+                    MARKER,
+                    9.0,
+                    TextAlign::Start,
+                );
+            }
         }
     }
 
@@ -1179,6 +1273,7 @@ impl Widget for TimelineView {
             painter.stroke_rect(area, accent(), 1.0, 2.0);
         }
         painter.pop_clip();
+        self.paint_markers(painter, rect, &geometry);
         self.paint_playhead(painter, rect, &geometry);
         painter.fill_rect(
             Rect {
@@ -1338,6 +1433,7 @@ impl Widget for TimelineView {
         let state = self.state.clone();
         let weights = self.weights();
         let lanes = self.hit_lanes();
+        let markers = self.markers.clone();
         let (start, span, end, scroll) = (self.start, self.span, self.end, self.scroll);
         Some(Rc::new(move |position, rect| {
             let geometry = Geometry::new(local(rect), &weights, start, span, scroll);
@@ -1365,7 +1461,10 @@ impl Widget for TimelineView {
                     ));
                 }
                 Gesture::Scrub if end > 0 => {
-                    let frame = geometry.frame(position.x).min(end - 1);
+                    let frame = geometry
+                        .marker_near(&markers, position.x)
+                        .unwrap_or_else(|| geometry.frame(position.x))
+                        .min(end - 1);
                     if state.program.position.peek() != frame {
                         state.seek(frame);
                     }
@@ -1498,6 +1597,25 @@ impl Widget for TimelineView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storyboard_visibility_excludes_subpixel_clips_and_hidden_lanes() {
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: HEADER_WIDTH + 100.0,
+            height: 62.0,
+        };
+        let geometry = Geometry::new(rect, &[1.0, 1.0], 100, 1000, 0.0);
+        assert!(!geometry.clip_visible(0, 100, 9));
+        assert!(!geometry.clip_visible(0, 80, 25));
+        assert!(geometry.clip_visible(0, 90, 30));
+        assert!(!geometry.clip_visible(1, 100, 20));
+
+        let scrolled = Geometry::new(rect, &[1.0, 1.0], 100, 1000, 35.0);
+        assert!(!scrolled.clip_visible(0, 100, 20));
+        assert!(scrolled.clip_visible(1, 100, 20));
+    }
 
     #[test]
     fn edge_hit_keeps_narrow_clip_body_movable() {

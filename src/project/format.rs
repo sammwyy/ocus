@@ -29,12 +29,17 @@ struct ProjectInput {
 }
 
 pub fn from_json(json: &str) -> Result<Project, serde_json::Error> {
-    let document: ProjectInput = serde_json::from_str(json)?;
+    from_json_with_repairs(json).map(|(project, _)| project)
+}
+
+pub(super) fn from_json_with_repairs(json: &str) -> Result<(Project, usize), serde_json::Error> {
+    let mut document: ProjectInput = serde_json::from_str(json)?;
+    let repaired = document.project.repair_linked_audio();
     document
         .project
         .validate()
         .map_err(<serde_json::Error as serde::de::Error>::custom)?;
-    Ok(document.project)
+    Ok((document.project, repaired))
 }
 
 pub fn to_json(project: &Project) -> Result<String, serde_json::Error> {
@@ -96,6 +101,24 @@ mod tests {
         }]);
         let project = from_json(&fixture.to_string()).unwrap();
         assert_eq!(from_json(&to_json(&project).unwrap()).unwrap(), project);
+    }
+
+    #[test]
+    fn markers_round_trip_and_unordered_markers_are_rejected() {
+        let old = to_json(&Project::new("Old")).unwrap();
+        assert!(!old.contains("markers"));
+        assert!(from_json(&old).unwrap().markers().is_empty());
+        let mut editor = crate::project::Editor::new(Project::new("Marked"));
+        assert!(editor.apply(crate::project::Command::AddMarker(48)));
+        assert!(editor.apply(crate::project::Command::AddMarker(12)));
+        let json = to_json(editor.project()).unwrap();
+        let project = from_json(&json).unwrap();
+        assert_eq!(&project, editor.project());
+        let mut document: serde_json::Value = serde_json::from_str(&json).unwrap();
+        document["markers"] = serde_json::json!([{ "frame": 48 }, { "frame": 12 }]);
+        assert!(from_json(&document.to_string()).is_err());
+        document["markers"] = serde_json::json!([{ "frame": 12 }, { "frame": 12 }]);
+        assert!(from_json(&document.to_string()).is_err());
     }
 
     #[test]
@@ -191,6 +214,28 @@ mod tests {
     }
 
     #[test]
+    fn stale_linked_audio_is_repaired_without_relaxing_other_validation() {
+        let mut document: serde_json::Value =
+            serde_json::from_str(&to_json(&Project::new("Stale sound")).unwrap()).unwrap();
+        document["media"] = serde_json::json!([{
+            "id": 4, "path": "relative.mp4", "kind": "video", "has_audio": false
+        }]);
+        document["tracks"][0]["clips"] = serde_json::json!([{
+            "id": 1, "start_frame": 0, "source_start_frame": 0,
+            "duration_frames": 30, "content": {"media": {"media_id": 4}},
+            "volume": 1.0, "muted": false, "linked_audio": true
+        }]);
+        let project = from_json(&document.to_string()).unwrap();
+        assert!(!project.tracks()[0].clips[0].linked_audio);
+        assert_eq!(project.media()[0].path, PathBuf::from("relative.mp4"));
+        document["tracks"][0]["clips"][0]["duration_frames"] = 0.into();
+        assert!(from_json(&document.to_string()).is_err());
+        document["tracks"][0]["clips"][0]["duration_frames"] = 30.into();
+        document["tracks"][0]["clips"][0]["content"]["media"]["media_id"] = 99.into();
+        assert!(from_json(&document.to_string()).is_err());
+    }
+
+    #[test]
     fn old_media_references_without_probe_metadata_remain_readable() {
         let mut document: serde_json::Value =
             serde_json::from_str(&to_json(&Project::new("Legacy")).unwrap()).unwrap();
@@ -236,7 +281,7 @@ mod tests {
         assert!(linked.tracks()[0].clips[0].linked_audio);
         assert_eq!(from_json(&to_json(&linked).unwrap()).unwrap(), linked);
         document["media"][0]["has_audio"] = serde_json::json!(false);
-        assert!(from_json(&document.to_string()).is_err());
+        assert!(!from_json(&document.to_string()).unwrap().tracks()[0].clips[0].linked_audio);
         document["media"][0]["has_audio"] = serde_json::json!(true);
         document["tracks"][2]["clips"] = document["tracks"][0]["clips"].clone();
         document["tracks"][0]["clips"] = serde_json::json!([]);

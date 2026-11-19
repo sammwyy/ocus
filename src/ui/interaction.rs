@@ -111,6 +111,9 @@ pub(crate) enum Action {
     ZoomIn,
     ZoomOut,
     AddTitle,
+    ToggleMarker,
+    PreviousMarker,
+    NextMarker,
     New,
     Open,
     Save,
@@ -161,6 +164,9 @@ const KEY_BINDINGS: &[(Key, bool, bool, Action)] = &[
     (Key::Char('+'), false, true, Action::ZoomIn),
     (Key::Char('-'), false, false, Action::ZoomOut),
     (Key::Char('t'), false, false, Action::AddTitle),
+    (Key::Char('m'), false, false, Action::ToggleMarker),
+    (Key::Char('m'), true, true, Action::PreviousMarker),
+    (Key::Char('m'), false, true, Action::NextMarker),
     (Key::Char('n'), true, false, Action::New),
     (Key::Char('o'), true, false, Action::Open),
     (Key::Char('s'), true, false, Action::Save),
@@ -190,7 +196,9 @@ impl Action {
             | Self::SecondBack
             | Self::SecondForward
             | Self::ToStart
-            | Self::ToEnd => "Playback",
+            | Self::ToEnd
+            | Self::PreviousMarker
+            | Self::NextMarker => "Playback",
             Self::Undo
             | Self::Redo
             | Self::Delete
@@ -202,7 +210,8 @@ impl Action {
             | Self::Paste
             | Self::Duplicate
             | Self::Split
-            | Self::AddTitle => "Editing",
+            | Self::AddTitle
+            | Self::ToggleMarker => "Editing",
             Self::NudgeLeft | Self::NudgeRight | Self::ZoomIn | Self::ZoomOut => "Timeline",
             Self::New | Self::Open | Self::Save | Self::SaveAs | Self::Import | Self::Export => {
                 "File"
@@ -236,6 +245,9 @@ impl Action {
             Self::ZoomIn => "Zoom in",
             Self::ZoomOut => "Zoom out",
             Self::AddTitle => "Add title",
+            Self::ToggleMarker => "Add / remove marker",
+            Self::PreviousMarker => "Previous marker",
+            Self::NextMarker => "Next marker",
             Self::New => "New project",
             Self::Open => "Open project",
             Self::Save => "Save project",
@@ -422,6 +434,9 @@ impl UiState {
             Action::AddTitle if !busy => {
                 self.add_title();
             }
+            Action::ToggleMarker if !busy => self.toggle_marker(),
+            Action::PreviousMarker => self.jump_to_marker(false),
+            Action::NextMarker => self.jump_to_marker(true),
             Action::New => self.new_project(),
             Action::Open => self.open_dialog(),
             Action::Save => self.save(),
@@ -619,6 +634,47 @@ impl UiState {
             under
         } else {
             selected
+        }
+    }
+
+    /// Adds a marker at the playhead, or removes the one already there.
+    pub fn toggle_marker(&self) {
+        let frame = self.program.position.peek();
+        let exists = self
+            .editor
+            .borrow()
+            .project()
+            .markers()
+            .iter()
+            .any(|marker| marker.frame == frame);
+        if exists {
+            self.edit(Command::RemoveMarker(frame));
+        } else {
+            self.edit(Command::AddMarker(frame));
+        }
+    }
+
+    fn jump_to_marker(&self, forward: bool) {
+        let at = self.program.position.peek();
+        let target = {
+            let editor = self.editor.borrow();
+            let mut frames = editor.project().markers().iter().map(|marker| marker.frame);
+            if forward {
+                frames.find(|&frame| frame > at)
+            } else {
+                frames.rev().find(|&frame| frame < at)
+            }
+        };
+        match target {
+            Some(frame) => self.seek(frame),
+            None => self.status.set(
+                if forward {
+                    "There is no marker after the playhead"
+                } else {
+                    "There is no marker before the playhead"
+                }
+                .into(),
+            ),
         }
     }
 
@@ -951,6 +1007,8 @@ pub(crate) enum MenuCommand {
     Seek(u64),
     PasteAt(u64),
     TitleAt(u64, u64),
+    AddMarker(u64),
+    RemoveMarker(u64),
     DetachAudio,
     LinkAudio,
     ToggleMute,
@@ -1049,6 +1107,12 @@ impl UiState {
                 if !self.add_title_at(Some((track_id, frame))) {
                     self.status.set("There is no room for a title here".into());
                 }
+            }
+            MenuCommand::AddMarker(frame) => {
+                self.edit(Command::AddMarker(frame));
+            }
+            MenuCommand::RemoveMarker(frame) => {
+                self.edit(Command::RemoveMarker(frame));
             }
             MenuCommand::DetachAudio => self.detach_audio(),
             MenuCommand::LinkAudio => self.link_audio(),
@@ -1246,6 +1310,36 @@ impl UiState {
     /// coordinates) on the timeline: a clip, a gap, or a track header.
     pub fn open_timeline_menu(&self, point: Point) {
         let geometry = self.timeline_geometry();
+        if point.y < geometry.top() && point.x >= geometry.left() {
+            let markers: Vec<u64> = {
+                let editor = self.editor.borrow();
+                editor
+                    .project()
+                    .markers()
+                    .iter()
+                    .map(|marker| marker.frame)
+                    .collect()
+            };
+            let entries = match geometry.marker_near(&markers, point.x) {
+                Some(frame) => vec![
+                    MenuEntry::new("Go to marker", Glyph::Locate, "", MenuCommand::Seek(frame)),
+                    MenuEntry::new(
+                        "Remove marker",
+                        Glyph::Trash,
+                        "",
+                        MenuCommand::RemoveMarker(frame),
+                    ),
+                ],
+                None => vec![MenuEntry::new(
+                    "Add marker here",
+                    Glyph::Marker,
+                    "",
+                    MenuCommand::AddMarker(geometry.frame_at(point.x).max(0.0).round() as u64),
+                )],
+            };
+            self.open_menu(point, "Marker", entries);
+            return;
+        }
         let Some(lane) = geometry
             .lane_at(point.y)
             .filter(|_| point.y >= geometry.top())
@@ -2133,6 +2227,107 @@ mod tests {
         assert_eq!(starts(&state, 1), vec![0]);
         state.run(Action::Redo);
         assert_eq!(starts(&state, 1), vec![0, 20]);
+    }
+
+    #[test]
+    fn markers_toggle_navigate_snap_and_open_from_the_ruler() {
+        let state = UiState::new();
+        state.timeline_rect.set(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1128.0,
+            height: 300.0,
+        });
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "scene.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(4_000_000),
+            has_audio: false,
+        })));
+        state.insert_media(1);
+        let markers = |state: &UiState| {
+            state
+                .editor
+                .borrow()
+                .project()
+                .markers()
+                .iter()
+                .map(|marker| marker.frame)
+                .collect::<Vec<_>>()
+        };
+        for frame in [40, 10] {
+            state.seek(frame);
+            state.run(Action::ToggleMarker);
+        }
+        assert_eq!(markers(&state), [10, 40]);
+        state.seek(0);
+        state.run(Action::NextMarker);
+        assert_eq!(state.program.position.peek(), 10);
+        state.run(Action::NextMarker);
+        assert_eq!(state.program.position.peek(), 40);
+        state.run(Action::NextMarker);
+        assert_eq!(state.program.position.peek(), 40);
+        assert_eq!(state.status.peek(), "There is no marker after the playhead");
+        state.run(Action::PreviousMarker);
+        assert_eq!(state.program.position.peek(), 10);
+        state.run(Action::ToggleMarker);
+        assert_eq!(markers(&state), [40]);
+        state.run(Action::Undo);
+        assert_eq!(markers(&state), [10, 40]);
+
+        state.seek(90);
+        let edges = edits::selection_edges(state.editor.borrow().project(), &[(0, 1)]);
+        assert_eq!(
+            edits::snap(
+                state.editor.borrow().project(),
+                &[(0, 1)],
+                &[edges[0] + 38],
+                90,
+                3
+            ),
+            2
+        );
+
+        let geometry = state.timeline_geometry();
+        let x = |frame: u64| {
+            geometry.left()
+                + (frame - state.timeline_start.peek()) as f32 * geometry.pixels_per_frame()
+        };
+        let labels = |state: &UiState| {
+            state
+                .menu
+                .peek()
+                .map(|menu| {
+                    menu.entries
+                        .iter()
+                        .filter_map(|entry| {
+                            entry.command.map(|command| (entry.label.clone(), command))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        state.open_timeline_menu(Point {
+            x: x(40) + 3.0,
+            y: 10.0,
+        });
+        assert_eq!(
+            labels(&state),
+            [
+                ("Go to marker".to_string(), MenuCommand::Seek(40)),
+                ("Remove marker".to_string(), MenuCommand::RemoveMarker(40)),
+            ]
+        );
+        state.run_menu(MenuCommand::RemoveMarker(40));
+        assert_eq!(markers(&state), [10]);
+        state.open_timeline_menu(Point { x: x(70), y: 10.0 });
+        assert_eq!(
+            labels(&state),
+            [("Add marker here".to_string(), MenuCommand::AddMarker(70))]
+        );
+        state.run_menu(MenuCommand::AddMarker(70));
+        assert_eq!(markers(&state), [10, 70]);
     }
 
     #[test]

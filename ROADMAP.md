@@ -113,12 +113,12 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [ ] Transforms: scale, position, rotation, crop, opacity
 - [ ] Picture-in-picture
 - [x] Snapping and timeline zoom
-- [ ] Timeline markers
+- [x] Timeline markers
 
 ### v0.6: Color and audio
 - [ ] Brightness, contrast and saturation
 - [ ] LUT support (.cube)
-- [ ] Audio waveforms on the timeline
+- [x] Audio waveforms on the timeline and in the Source monitor
 - [ ] Audio fade in and fade out
 - [ ] Loudness normalization
 - [ ] Noise reduction
@@ -138,8 +138,8 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 
 ### v0.9: Formats and stabilization
 - [x] WebM export
-- [ ] GIF export
-- [ ] Audio-only export
+- [x] GIF export
+- [x] Audio-only export (WAV)
 - [ ] Bug fixing, UX cleanup and feature freeze
 - [ ] Packaging and installer tests on all platforms
 

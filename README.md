@@ -7,6 +7,14 @@ file also reconnects missing files with matching names in the same folder. Each
 relinked file can be undone independently. Relink missing timeline media before
 exporting, then save the project to keep its updated source paths.
 
+Relative media paths resolve beside the project file. Opening a project (or
+restoring unsaved work) refreshes available sources' duration and sound metadata
+in the background, retaining stored metadata if a source cannot be probed or
+the new metadata would invalidate existing clips. Linked clips whose source no
+longer has sound are unlinked, with a note in the status line. Opening repairs
+do not mark the project as edited. Relinking to a silent video also unlinks its
+sound; undo restores both the original source and its linked clips.
+
 Ocus is an early-stage, lightweight video editor written in Rust. The
 [roadmap](ROADMAP.md) tracks its intended milestones. The CreamUI editor
 supports importing media, editing and previewing a multitrack timeline,
@@ -55,10 +63,14 @@ clip's trimmed range, or the whole file selected in the media bin, and
 **Program** shows the sequence at the playhead. Each has its own scrub bar,
 Play/Pause, frame stepping and jump-to-start/end; starting one pauses the
 other. **Match frame** moves the program playhead to the source monitor's
-frame, and **Insert** adds the selected bin file. The timeline is one painted
+frame, and **Insert** adds the selected bin file. Audio files show a waveform
+and playhead in **Source**. The timeline is one painted
 surface with track headers, a zoomable ruler (1 s to 10 min per view, with zoom buttons, a slider and **Fit**), clip
-filmstrips sampled from their actual trimmed source range, audio volume
-levels and a playhead across every track.
+filmstrips and audio waveforms sampled from their trimmed source ranges, and a
+playhead across every track. Timeline waveforms reflect clip volume and are
+dimmed when muted. Markers are numbered flags on the ruler with a line through
+the tracks; ruler scrubbing and clip edges snap to them, and they are saved
+with the project.
 
 Tracks can be added from the timeline's **Tracks** button, the **Add
 track** button under the track headers or any right-click menu, and deleted
@@ -66,11 +78,12 @@ from a header's hover button or its menu (one video and one audio track always
 remain). Right-click opens a context menu on clips (cut, copy, paste,
 duplicate, split, detach/link audio, mute, delete, ripple delete), on empty
 track space (paste here, add title here, move playhead, track actions), on
+the ruler (add a marker, or go to / remove the one under the pointer), on
 track headers and on media bin items (insert at end or at the playhead, open in
 the source monitor, remove an unused source); Esc or clicking outside closes it.
 
 Editing is direct: drag clips along a track or onto another track of the same
-kind (edges snap to other clips, the playhead and the start), drag sources from
+kind (edges snap to other clips, markers, the playhead and the start), drag sources from
 the media bin onto a track, or drop files from the desktop anywhere on the
 window to import them (over a track they are also placed there). Ctrl+click
 and Shift+click add to the selection and dragging over empty track space draws
@@ -84,7 +97,9 @@ and duplicate, S or Ctrl+K splits at the playhead, Ctrl+A selects all, Esc
 clears the selection or cancels a drag, Space plays or pauses the last monitor
 used for playback or seeking (Program by default), K pauses playback or starts
 Program, the arrows step a frame (Shift: one second, Alt: nudge the selection), Home/End
-jump, +/− zoom, T adds a title, and Ctrl+N/O/S/Shift+S/I/E run the file
+jump, +/− zoom, T adds a title, M adds or removes a marker at the playhead
+(the **Marker** timeline button does the same), Shift+M / Ctrl+Shift+M jump to
+the next / previous marker, and Ctrl+N/O/S/Shift+S/I/E run the file
 actions. Hover or keyboard-focus an icon-only control to see what it does;
 its tooltip includes a shortcut when one is available for that action. Source
 transport controls do not show sequence-only shortcuts.
@@ -112,7 +127,8 @@ directory (XDG config on Linux, AppData on Windows).
 
 **Export** (disabled while the timeline is empty) opens a settings dialog with
 built-in presets for the original project, 1080p, 720p, vertical 9:16, square,
-4K, WebM and HEVC. You can set even output dimensions (up to 8192 × 8192),
+4K, WebM, HEVC, Animated GIF and Audio only (WAV). For video you can set
+even output dimensions (up to 8192 × 8192),
 frame rate (including rational rates such as 30000/1001), video and audio
 bitrates or constant-quality CRF, encoder speed, container (MP4, MKV or WebM)
 and compatible video/audio codecs
@@ -135,6 +151,12 @@ with **Browse…** (or used by a successful export) is
 remembered in editor preferences across projects and sessions. The destination
 is also shown beside the export actions on every settings tab; **Change…** opens
 the full path and folder picker.
+
+**Animated GIF** exports the visual timeline and titles as a silent loop.
+It defaults to 15 fps and fits the project within 640 × 640;
+you can adjust the size and frame rate in the Video tab. **Audio only (WAV)**
+exports the complete 48 kHz stereo timeline mix as uncompressed 32-bit float,
+including linked clip sound, gaps, volume and mute, without rendering video.
 
 The default MP4 export encodes H.264
 video composited from every video track (V1 is the base; V2 and lower rows are
@@ -180,7 +202,7 @@ from crates.io. No local CreamUI checkout is needed.
 - `src/media.rs`, `src/media/preview.rs`, `src/media/composite.rs` and
   `src/media/audio.rs`: sources, decoding, and shared preview/export composition.
 - `src/playback.rs`: default audio device and playback sessions.
-- `src/export.rs`: H.264/AAC MP4 encoding and cancellation.
+- `src/export.rs`: timeline video, GIF and audio export with cancellation.
 - `src/ui/`: compact CreamUI workspace and background file workflow.
 - `src/main.rs`: executable entry point.
 

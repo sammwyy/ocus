@@ -24,7 +24,7 @@ src/
   media/composite.rs  shared preview/export visual composition
   media/audio.rs    background audio decoding, mixing and the playback clock
   playback.rs       default output device and monitor sound sessions
-  export.rs         H.264/HEVC/VP9 video and AAC/Opus encoding with cancellation
+  export.rs         timeline video, GIF and WAV encoding with cancellation
   export/presets.rs  built-in profiles and global named preset storage
   timeline.rs       tracks, clips, and title data
   ui/
@@ -54,15 +54,24 @@ and the in-memory project. It rejects missing or unsupported versions and
 round-trips media references and title clips. Project load validates settings,
 IDs, clip ranges and reference existence. `project::store` loads and saves on
 background jobs, with same-directory temporary files, sync, and rename for
-atomic writes. Imported media paths are absolute. Format migrations do not
-exist yet; optional probe metadata and title style/parse flags keep version 1
-files readable. Media
+atomic writes. Imported media paths are absolute; loaded relative paths resolve
+against the project file's directory, not the working directory. The JSON
+format stays path-agnostic and clears stale linked-audio flags before validation.
+On the existing open/recovery worker, the store probes present sources and
+adopts matching-kind metadata only if the repaired project still validates.
+Failed probes and incompatible metadata retain the stored values. Repairs are
+not undo steps and normal opens remain clean; the status line reports unlinked
+clips alongside missing files. Relink commands repair linked flags atomically
+with the source replacement, so undo restores both. Optional probe metadata and
+title style/parse flags keep version 1 files readable. Media
 probing and bounded first-frame thumbnails use the `ffmpeg-next` library on
 workers. `media/preview.rs` decodes and scales frames off the UI thread,
 maintaining a small frame buffer during playback and seeking to source frames
 after an edit. It also generates three representative thumbnails per video
 clip's current source range on workers; `ui::state` keeps a bounded, transient
-cache and drops obsolete entries when clips change. The UI transfers decoded
+cache and drops obsolete entries when clips change. `media/audio.rs` also
+extracts bounded waveform peaks on a worker. The timeline and Source monitor
+share the project's transient, per-source peak cache. The UI transfers decoded
 frames to textures on CreamUI's own GPU device and presents them through its
 viewport. `media/composite.rs` decodes active video and still-image clips with
 bounded frame storage and alpha-composites video tracks in timeline order:
@@ -71,7 +80,9 @@ own track's Z order with the same markup parser and font shaping in preview
 and export; gaps show black. `export.rs` encodes MP4, Matroska or WebM using
 the configured compatible H.264, HEVC or VP9 codec; it mixes sound from audio
 tracks and linked video sound through the bounded stereo queue used by preview
-playback, and encodes AAC or Opus. Audio-only timelines use black video.
+playback, and encodes AAC or Opus. GIF uses the same compositor with
+per-frame palettes and skips the sound mix; WAV only renders the sound mix.
+Audio-only timelines use black video when exported to a video format.
 Output resolution, bitrate or constant-quality CRF, encoder speed and frame rate
 are independent of the edit
 timeline; the visual composition is letterboxed when output aspect differs

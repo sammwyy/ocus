@@ -116,8 +116,8 @@ pub(crate) fn move_clips(
     })
 }
 
-/// The smallest shift that lands one of `edges` on another clip's edge, the
-/// playhead, or the sequence start, when within `tolerance` frames. Clips in
+/// The smallest shift that lands one of `edges` on another clip's edge, a
+/// marker, the playhead, or the sequence start, when within `tolerance` frames. Clips in
 /// `exclude` are the ones being moved and never attract.
 pub(crate) fn snap(
     project: &Project,
@@ -129,6 +129,7 @@ pub(crate) fn snap(
     let excluded: HashSet<_> = exclude.iter().copied().collect();
     let targets: Vec<i64> = [0, playhead as i64]
         .into_iter()
+        .chain(project.markers().iter().map(|marker| marker.frame as i64))
         .chain(project.tracks().iter().flat_map(|track| {
             let excluded = &excluded;
             track

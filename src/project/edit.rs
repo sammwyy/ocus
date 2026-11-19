@@ -31,10 +31,14 @@ pub(crate) fn split_tracks(
             start_frame: at_frame,
             source_start_frame: clip.source_start_frame.checked_add(offset)?,
             duration_frames: clip.duration_frames - offset,
+            fade_in_frames: 0,
+            fade_out_frames: clip.fade_out_frames.min(clip.duration_frames - offset),
             ..clip.clone()
         };
         next_id = next_id.checked_add(1)?;
         clip.duration_frames = offset;
+        clip.fade_out_frames = 0;
+        clip.clamp_fades();
         track.clips.insert(index + 1, right);
         changed = true;
     }
@@ -85,6 +89,12 @@ pub enum Command {
         clip_id: u64,
         volume: f32,
         muted: bool,
+    },
+    SetClipFades {
+        track_id: u64,
+        clip_id: u64,
+        fade_in_frames: u64,
+        fade_out_frames: u64,
     },
     SetTitle {
         track_id: u64,
@@ -167,6 +177,9 @@ fn ripple_delete(project: &Project, selection: &[(u64, u64)]) -> Option<Vec<Trac
                             .checked_add(end - clip.start_frame)?;
                         right.start_frame = start;
                         right.duration_frames = clip_end - end;
+                        right.fade_in_frames = 0;
+                        right.clamp_fades();
+                        clip.fade_out_frames = 0;
                         clip.duration_frames = start - clip.start_frame;
                         kept.push(clip);
                         kept.push(right);
@@ -182,6 +195,9 @@ fn ripple_delete(project: &Project, selection: &[(u64, u64)]) -> Option<Vec<Trac
                     clip.start_frame = start;
                     kept.push(clip);
                 }
+            }
+            for clip in &mut kept {
+                clip.clamp_fades();
             }
             track.clips = kept;
         }
@@ -363,6 +379,7 @@ impl Editor {
                         .is_none()
                     || !clip.volume.is_finite()
                     || !(0.0..=2.0).contains(&clip.volume)
+                    || !clip.valid_fades()
                     || self
                         .project
                         .tracks
@@ -608,7 +625,39 @@ impl Editor {
                 clip.start_frame = start_frame;
                 clip.source_start_frame = source_start_frame;
                 clip.duration_frames = duration_frames;
+                clip.clamp_fades();
                 self.execute(Command::ReplaceTracks(tracks))
+            }
+            Command::SetClipFades {
+                track_id,
+                clip_id,
+                fade_in_frames,
+                fade_out_frames,
+            } => {
+                let track = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.id == track_id)?;
+                let audio = track.kind == TrackKind::Audio;
+                let clip = track.clips.iter_mut().find(|clip| clip.id == clip_id)?;
+                if (!audio && !clip.linked_audio)
+                    || fade_in_frames > clip.duration_frames
+                    || fade_out_frames > clip.duration_frames - fade_in_frames
+                    || (fade_in_frames == clip.fade_in_frames
+                        && fade_out_frames == clip.fade_out_frames)
+                {
+                    return None;
+                }
+                let inverse = Command::SetClipFades {
+                    track_id,
+                    clip_id,
+                    fade_in_frames: clip.fade_in_frames,
+                    fade_out_frames: clip.fade_out_frames,
+                };
+                clip.fade_in_frames = fade_in_frames;
+                clip.fade_out_frames = fade_out_frames;
+                Some(inverse)
             }
             Command::SetClipAudio {
                 track_id,
@@ -914,6 +963,8 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             };
             assert!(editor.apply(Command::InsertClip {
@@ -987,6 +1038,8 @@ mod tests {
             content: ClipContent::Media { media_id: 1 },
             volume: 1.0,
             muted: false,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             linked_audio: false,
         };
         assert!(editor.apply(Command::InsertClip {
@@ -1063,6 +1116,8 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             linked_audio: false,
         };
         assert!(editor.apply(Command::InsertClip {
@@ -1106,6 +1161,8 @@ mod tests {
                 content: ClipContent::Title(title.clone()),
                 volume: 1.0,
                 muted: false,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             },
         }));
@@ -1167,6 +1224,8 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             linked_audio: false,
         };
         let insert =
@@ -1246,6 +1305,8 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 0.75,
             muted: true,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             linked_audio: false,
         };
         project.tracks[0].clips = vec![
@@ -1344,6 +1405,8 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             linked_audio: false,
         };
         for (id, start_frame, track_id) in [(1, 0, 0), (2, 30, 0), (3, 30, 1)] {
@@ -1432,6 +1495,8 @@ mod tests {
                     },
                     volume: if id == 2 { 0.4 } else { 1.0 },
                     muted: id == 2,
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
                     linked_audio: id == 2,
                 },
             }));
@@ -1484,6 +1549,8 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 1.0,
             muted: false,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             linked_audio: false,
         };
         for (track_id, clip) in [
@@ -1504,6 +1571,8 @@ mod tests {
                     content: ClipContent::Media { media_id: 1 },
                     volume: 0.5,
                     muted: true,
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
                     linked_audio: false,
                 },
             ),
@@ -1569,6 +1638,8 @@ mod tests {
                     content: ClipContent::Title(Title::default()),
                     volume: 1.0,
                     muted: false,
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
                     linked_audio: false,
                 },
             }));
@@ -1599,6 +1670,8 @@ mod tests {
             content: ClipContent::Media { media_id: 1 },
             volume: 1.0,
             muted: false,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             linked_audio: false,
         };
         assert!(!editor.apply(Command::InsertClip {
@@ -1638,6 +1711,8 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             },
         }));
@@ -1656,6 +1731,8 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             },
         }));
@@ -1689,6 +1766,8 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             },
         }));
@@ -1717,5 +1796,65 @@ mod tests {
         assert!(!editor.project().tracks()[2].clips[0].muted);
         assert!(editor.redo());
         assert!(editor.project().tracks()[2].clips[0].muted);
+    }
+
+    #[test]
+    fn fades_validate_undo_split_and_trim() {
+        let mut editor = Editor::new(Project::new("Fades"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "tone.wav".into(),
+            kind: MediaKind::Audio,
+            duration_us: Some(4_000_000),
+            has_audio: true,
+        })));
+        let old = r#"{"id":1,"start_frame":0,"source_start_frame":0,"duration_frames":120,"content":{"media":{"media_id":1}},"volume":1.0,"muted":false}"#;
+        let clip: Clip = serde_json::from_str(old).unwrap();
+        assert_eq!((clip.fade_in_frames, clip.fade_out_frames), (0, 0));
+        assert!(!serde_json::to_string(&clip).unwrap().contains("fade_"));
+        assert!(editor.apply(Command::InsertClip { track_id: 2, clip }));
+        let fades = |track_id, incoming, outgoing| Command::SetClipFades {
+            track_id,
+            clip_id: 1,
+            fade_in_frames: incoming,
+            fade_out_frames: outgoing,
+        };
+        assert!(!editor.apply(fades(2, 0, 0)));
+        assert!(!editor.apply(fades(0, 20, 20)));
+        assert!(!editor.apply(fades(2, u64::MAX, 1)));
+        assert!(!editor.apply(fades(2, 80, 50)));
+        assert!(editor.apply(fades(2, 30, 30)));
+        assert!(editor.undo());
+        assert_eq!(editor.project().tracks()[2].clips[0].fade_in_frames, 0);
+        assert!(editor.redo());
+        let tracks = split_tracks(editor.project().tracks(), &[(2, 1)], 20, 2).unwrap();
+        assert_eq!(
+            (
+                tracks[2].clips[0].fade_in_frames,
+                tracks[2].clips[0].fade_out_frames
+            ),
+            (20, 0)
+        );
+        assert_eq!(
+            (
+                tracks[2].clips[1].fade_in_frames,
+                tracks[2].clips[1].fade_out_frames
+            ),
+            (0, 30)
+        );
+        assert!(editor.apply(Command::Trim {
+            track_id: 2,
+            clip_id: 1,
+            start_frame: 0,
+            source_start_frame: 0,
+            duration_frames: 40
+        }));
+        let clip = &editor.project().tracks()[2].clips[0];
+        assert_eq!((clip.fade_in_frames, clip.fade_out_frames), (30, 10));
+        assert!(editor.undo());
+        assert_eq!(editor.project().tracks()[2].clips[0].fade_out_frames, 30);
+        let mut invalid = editor.project().tracks().to_vec();
+        invalid[2].clips[0].fade_out_frames = 100;
+        assert!(!editor.apply(Command::ReplaceTracks(invalid)));
     }
 }

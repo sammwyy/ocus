@@ -52,6 +52,8 @@ pub(super) struct LaneClip {
     pub fallback: Option<Arc<RgbaImage>>,
     pub waveform: Option<WaveformSlice>,
     pub volume: f32,
+    pub fade_in_frames: u64,
+    pub fade_out_frames: u64,
     pub muted: bool,
     pub linked_audio: bool,
 }
@@ -856,6 +858,58 @@ impl TimelineView {
         } else {
             body
         };
+        if matches!(clip.look, ClipLook::Audio) || linked {
+            let sound = if linked {
+                Rect {
+                    y: body.y + body.height,
+                    height: strip - 2.0,
+                    ..full
+                }
+            } else {
+                full
+            };
+            painter.push_clip_rounded(outline, 4.0);
+            for (frames, incoming) in [(clip.fade_in_frames, true), (clip.fade_out_frames, false)] {
+                let width = full.width * frames as f32 / clip.duration.max(1) as f32;
+                if width <= 0.0 {
+                    continue;
+                }
+                let left = if incoming {
+                    sound.x
+                } else {
+                    sound.x + sound.width - width
+                };
+                let from = left.max(outline.x);
+                let until = (left + width).min(outline.x + outline.width);
+                for column in 0..(until - from).ceil().max(0.0) as usize {
+                    let x = from + column as f32;
+                    let progress = ((x - left) / width).clamp(0.0, 1.0);
+                    let gain = if incoming { progress } else { 1.0 - progress };
+                    let y = sound.y + sound.height * (1.0 - gain);
+                    painter.fill_rect(
+                        Rect {
+                            x,
+                            y: sound.y,
+                            width: 1.0,
+                            height: y - sound.y,
+                        },
+                        Color::rgba(255, 255, 255, 18),
+                        0.0,
+                    );
+                    painter.fill_rect(
+                        Rect {
+                            x,
+                            y,
+                            width: 1.0,
+                            height: 1.0,
+                        },
+                        AUDIO.mix(text_color(), 0.35),
+                        0.0,
+                    );
+                }
+            }
+            painter.pop_clip();
+        }
         painter.stroke_rect(
             outline,
             if selected {

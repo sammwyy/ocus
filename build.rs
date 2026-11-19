@@ -48,14 +48,6 @@ fn ffmpeg_bin_dir() -> Option<PathBuf> {
     None
 }
 
-fn is_ffmpeg_dll(name: &str) -> bool {
-    name.ends_with(".dll")
-        && (name.starts_with("av")
-            || name.starts_with("swresample")
-            || name.starts_with("swscale")
-            || name.starts_with("pkgconf"))
-}
-
 fn main() {
     embed_commit();
     #[cfg(windows)]
@@ -83,7 +75,7 @@ fn main() {
     for entry in fs::read_dir(bin_dir).into_iter().flatten().flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if is_ffmpeg_dll(name) {
+        if name.ends_with(".dll") {
             let _ = fs::copy(entry.path(), profile_dir.join(name));
         }
     }

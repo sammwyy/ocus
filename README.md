@@ -75,8 +75,12 @@ and ripple-deleting the middle keeps picture and sound 1:1. **Detach audio**
 (inspector or right-click) moves that sound to an audio track that is free for
 the same range, creating a new one if needed, and **Link audio** folds a
 matching pair back together. Clip volume and mute are editable, saved, and
-honored during preview playback and export. Previously saved references without probe
-metadata can be re-imported.
+honored during preview playback and export. Select an audio clip or a video
+clip with linked sound, then enable **Audio → Noise reduction** in the
+Inspector to reduce background noise in speech. The setting is saved per
+clip and applies to the Program monitor and export. Source playback and
+waveforms still show the original audio. Previously saved references without
+probe metadata can be re-imported.
 
 The workspace has two GPU monitors: **Source** shows the selected timeline
 clip's trimmed range, or the whole file selected in the media bin, and
@@ -179,6 +183,12 @@ with **Browse…** (or used by a successful export) is
 remembered in editor preferences across projects and sessions. The destination
 is also shown beside the export actions on every settings tab; **Change…** opens
 the full path and folder picker.
+
+Ocus encodes one export at a time. Open **Queue** to track progress and use
+**Add export…** to set up another output without waiting. **Remove** skips a
+waiting job; **Cancel** stops the current job. The queue continues after a
+cancellation or failure and keeps recent results until cleared or the app
+closes. Project editing stays locked until the queue finishes.
 
 **Animated GIF** exports the visual timeline and titles as a silent loop.
 It defaults to 15 fps and fits the project within 640 × 640;

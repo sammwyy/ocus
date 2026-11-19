@@ -508,6 +508,14 @@ impl UiState {
             }
             return;
         }
+        if self.export_queue_modal.peek() {
+            match action {
+                Action::Escape => self.close_export_queue(),
+                Action::Export => self.export_dialog(),
+                _ => {}
+            }
+            return;
+        }
         let busy = self.busy.peek();
         let second = self.frames_per_second_step();
         let frame = self.program.position.peek();
@@ -579,9 +587,7 @@ impl UiState {
             Action::Save => self.save(),
             Action::SaveAs => self.save_as_dialog(),
             Action::Import => self.import_dialog(),
-            Action::Export if !self.exporting.peek() && self.sequence_end() > 0 => {
-                self.quick_export()
-            }
+            Action::Export if self.sequence_end() > 0 => self.quick_export(),
             _ => {}
         }
     }
@@ -2044,6 +2050,7 @@ mod tests {
                     fade_in_frames: 0,
                     fade_out_frames: 0,
                     muted: false,
+                    noise_reduction: false,
                     linked_audio: false,
                 },
             }));
@@ -2100,6 +2107,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: true,
             },
         }));
@@ -2391,6 +2399,7 @@ mod tests {
                     transition_out: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
+                    noise_reduction: false,
                     linked_audio: false,
                 },
             }));
@@ -2452,6 +2461,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         };
         assert!(state.edit(Command::InsertClip {
@@ -2616,12 +2626,11 @@ mod tests {
     }
 
     #[test]
-    fn busy_export_blocks_toolbar_delete() {
+    fn busy_blocks_toolbar_delete() {
         let state = UiState::new();
         assert!(state.add_title());
         state.select_clip(Some((0, 1)));
         let before = state.editor.borrow().project().clone();
-        state.exporting.set(true);
         state.busy.set(true);
 
         state.delete_selection(false);
@@ -2631,7 +2640,7 @@ mod tests {
     }
 
     #[test]
-    fn busy_export_blocks_destructive_keyboard_actions() {
+    fn busy_blocks_destructive_keyboard_actions() {
         for action in [
             Action::Cut,
             Action::Paste,
@@ -2640,28 +2649,27 @@ mod tests {
             Action::NudgeLeft,
             Action::NudgeRight,
         ] {
-            assert_busy_export_blocks(action);
+            assert_busy_blocks(action);
         }
     }
 
     #[test]
-    fn busy_export_blocks_delete_shortcut() {
-        assert_busy_export_blocks(Action::Delete);
+    fn busy_blocks_delete_shortcut() {
+        assert_busy_blocks(Action::Delete);
     }
 
     #[test]
-    fn busy_export_blocks_shift_delete_shortcut() {
-        assert_busy_export_blocks(Action::RippleDelete);
+    fn busy_blocks_shift_delete_shortcut() {
+        assert_busy_blocks(Action::RippleDelete);
     }
 
-    fn assert_busy_export_blocks(action: Action) {
+    fn assert_busy_blocks(action: Action) {
         let state = UiState::new();
         assert!(state.add_title());
         state.select_clip(Some((0, 1)));
         state.run(Action::Copy);
         state.seek(if action == Action::Paste { 180 } else { 45 });
         let before = state.editor.borrow().project().clone();
-        state.exporting.set(true);
         state.busy.set(true);
 
         state.run(action);
@@ -2726,6 +2734,7 @@ mod tests {
                     transition_out: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
+                    noise_reduction: false,
                     linked_audio: false,
                 },
             }));

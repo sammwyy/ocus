@@ -15,6 +15,7 @@ use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
 use super::waveform::WaveformSlice;
 use super::{MediaFilter, Sidebar, UiState};
 use super::{title_fonts, title_markup};
+use crate::export::queue::{Queue, Status as ExportStatus};
 use crate::media::audio::carries_sound;
 use crate::media::composite::title_outline_radius;
 use crate::media::{Media, MediaKind};
@@ -810,6 +811,16 @@ fn fade_row(state: &UiState, clip: &Clip, incoming: bool) -> Box<dyn Widget> {
     )
 }
 
+fn toggle_clip_noise_reduction(state: &UiState) {
+    if let Some((track_id, clip)) = selected_clip(state) {
+        state.edit(Command::SetClipNoiseReduction {
+            track_id,
+            clip_id: clip.id,
+            enabled: !clip.noise_reduction,
+        });
+    }
+}
+
 fn media_name(media: &Media) -> String {
     media.path.file_name().map_or_else(
         || media.path.display().to_string(),
@@ -1566,6 +1577,13 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
             );
             let badge = if missing {
                 Some("Missing".into())
+            } else if let Some(status) = state
+                .proxy_status
+                .get()
+                .get(&media.path)
+                .filter(|status| !status.is_empty())
+            {
+                Some(status.clone())
             } else {
                 media
                     .duration_us
@@ -1643,7 +1661,17 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                                     if missing {
                                         "Missing · Relink to restore".into()
                                     } else {
-                                        media_details(media)
+                                        let status = state
+                                            .proxy_status
+                                            .get()
+                                            .get(&media.path)
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        if status.is_empty() {
+                                            media_details(media)
+                                        } else {
+                                            format!("{} · {status}", media_details(media))
+                                        }
                                     },
                                     muted(),
                                     10.0,
@@ -2393,6 +2421,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
             ));
         } else if (track_kind == TrackKind::Audio || clip.linked_audio) && media.is_some() {
             let volume = clip.volume;
+            let audio_state = state.clone();
             rows.push(section(
                 "Audio",
                 vec![
@@ -2473,6 +2502,16 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         state,
                         |s| set_clip_audio(s, |clip| (clip.volume, !clip.muted)),
                     )),
+                    Box::new(
+                        Flex::row()
+                            .gap(8.0)
+                            .align(Align::Center)
+                            .child(Box::new(Checkbox::new(clip.noise_reduction, move || {
+                                toggle_clip_noise_reduction(&audio_state);
+                            })))
+                            .child(text("Noise reduction", text_color(), 11.0)),
+                    ),
+                    text("Best for speech with background noise.", faint(), 10.0),
                     inline(with_help(
                         secondary_button(
                             None,
@@ -2923,6 +2962,9 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
     let compact = viewport.width < 1200.0;
     let narrow = viewport.width < 1000.0;
     let busy = state.busy.get();
+    let exports = state.export_queue.get();
+    let exporting = exports.active().is_some();
+    let can_add_export = !busy || exports.accepts_jobs_while_busy();
     let dirty = state.dirty.get();
     let fps = (
         project.settings().frame_rate.numerator,
@@ -3036,17 +3078,17 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     state,
                     UiState::import_dialog,
                 ))
-                .child(if state.exporting.get() {
-                    secondary_button(None, "Cancel export", true, state, UiState::cancel_export)
-                } else {
+                .child({
                     let button = accent_button(
                         Some(Glyph::Export),
-                        if project.last_export().is_some() {
+                        if busy && (exporting || can_add_export) {
+                            "Add export…"
+                        } else if project.last_export().is_some() {
                             "Export again"
                         } else {
                             "Export"
                         },
-                        !busy && state.sequence_end() > 0,
+                        can_add_export && state.sequence_end() > 0,
                         state,
                         UiState::quick_export,
                     );
@@ -3060,13 +3102,28 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                         button
                     }
                 })
-                .child(
-                    if project.last_export().is_some() && !state.exporting.get() {
-                        secondary_button(None, "Options…", !busy, state, UiState::export_dialog)
-                    } else {
-                        Box::new(Flex::row().width(0.0)) as BoxedWidget
-                    },
-                ),
+                .child(if project.last_export().is_some() && !exporting {
+                    secondary_button(None, "Options…", !busy, state, UiState::export_dialog)
+                } else {
+                    Box::new(Flex::row().width(0.0)) as BoxedWidget
+                })
+                .child(if narrow {
+                    icon_button(
+                        Glyph::List,
+                        Help::new("Export queue"),
+                        true,
+                        state,
+                        UiState::open_export_queue,
+                    )
+                } else {
+                    secondary_button(
+                        Some(Glyph::List),
+                        "Queue",
+                        true,
+                        state,
+                        UiState::open_export_queue,
+                    )
+                }),
         ));
 
     let frame = state.program.position.get();
@@ -3245,6 +3302,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     waveform: WaveformSlice {
                         peaks,
                         clip: Clip {
+                            noise_reduction: false,
                             lut: None,
                             transition_out: None,
                             color: Default::default(),
@@ -3629,14 +3687,14 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             11.0,
         ))
         .child(spacer());
-    if state.exporting.get()
-        && let Some(control) = state.export_control()
+    if let Some(ExportStatus::Encoding { control, total, .. }) =
+        exports.active().map(|job| &job.status)
     {
         status = status
             .child(text("Exporting", muted(), 10.0))
             .child(Box::new(ExportMeter {
-                control,
-                total: state.export_total.get(),
+                control: control.clone(),
+                total: *total,
             }));
     }
     status = status.child(text(
@@ -3681,6 +3739,8 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             })
             .child(if state.export_modal.get() {
                 export_modal(state, project, viewport)
+            } else if state.export_queue_modal.get() {
+                export_queue_modal(state, &exports, viewport, can_add_export)
             } else {
                 Box::new(Flex::row().size(0.0, 0.0)) as BoxedWidget
             })
@@ -3764,6 +3824,174 @@ fn rename_track_modal(state: &UiState, viewport: Size) -> BoxedWidget {
                                     valid,
                                     state,
                                     UiState::apply_track_rename,
+                                )),
+                        )),
+                )],
+            }),
+        ],
+    })
+}
+
+fn export_queue_modal(
+    state: &UiState,
+    queue: &Queue,
+    viewport: Size,
+    can_add: bool,
+) -> BoxedWidget {
+    let width = 600.0_f32.min(viewport.width - 16.0);
+    let height = 420.0_f32.min(viewport.height - 16.0);
+    let inner = width - 40.0;
+    let mut jobs = Flex::column().width(inner).gap(8.0);
+    if queue.jobs().is_empty() {
+        jobs = jobs.child(Box::new(
+            Flex::column()
+                .width(inner)
+                .padding(16.0)
+                .gap(6.0)
+                .background(surface())
+                .corner_radius(8.0)
+                .child(heading("No exports yet", text_color(), 13.0))
+                .child(text(
+                    "Add an export to see its progress here.",
+                    muted(),
+                    11.0,
+                )),
+        ));
+    }
+    let (pending, finished): (Vec<_>, Vec<_>) =
+        queue.jobs().iter().partition(|job| job.status.pending());
+    for job in pending
+        .iter()
+        .copied()
+        .chain(finished.iter().rev().copied())
+    {
+        let (label, color, cancel) = match &job.status {
+            ExportStatus::Queued(_) => ("Waiting", muted(), Some("Remove")),
+            ExportStatus::Encoding {
+                cancelling: true, ..
+            } => ("Cancelling…", IMAGE, None),
+            ExportStatus::Encoding {
+                resolving: true, ..
+            } => ("Preparing…", accent(), Some("Cancel")),
+            ExportStatus::Encoding { .. } => ("Encoding", accent(), Some("Cancel")),
+            ExportStatus::Completed => ("Completed", AUDIO, None),
+            ExportStatus::Cancelled => ("Cancelled", muted(), None),
+            ExportStatus::Failed(_) => ("Failed", PLAYHEAD, None),
+        };
+        let id = job.id;
+        let name = job.path.file_name().unwrap_or(job.path.as_os_str());
+        let mut header = Flex::row()
+            .align(Align::Center)
+            .gap(8.0)
+            .child(heading(
+                fit(&name.to_string_lossy(), inner - 160.0, 12.0),
+                text_color(),
+                12.0,
+            ))
+            .child(spacer())
+            .child(text(label, color, 11.0));
+        if let Some(label) = cancel {
+            header = header.child(secondary_button(None, label, true, state, move |state| {
+                state.cancel_export(id);
+            }));
+        }
+        let mut row = Flex::column()
+            .width(inner)
+            .gap(6.0)
+            .padding(10.0)
+            .background(surface())
+            .corner_radius(8.0)
+            .child(Box::new(header))
+            .child(text(
+                fit(&job.path.to_string_lossy(), inner - 24.0, 11.0),
+                muted(),
+                11.0,
+            ));
+        match &job.status {
+            ExportStatus::Encoding { control, total, .. } => {
+                row = row.child(Box::new(ExportMeter {
+                    control: control.clone(),
+                    total: *total,
+                }));
+            }
+            ExportStatus::Failed(error) => {
+                row = row.child(text(error.clone(), PLAYHEAD, 11.0));
+            }
+            _ => {}
+        }
+        jobs = jobs.child(Box::new(row));
+    }
+    let active = usize::from(queue.active().is_some());
+    let close = state.clone();
+    Box::new(Layer {
+        style: Layer::at(0.0, 0.0, viewport.width, viewport.height),
+        on_click: Some(Rc::new(move || close.close_export_queue())),
+        children: vec![
+            Box::new(
+                Flex::row()
+                    .size(viewport.width, viewport.height)
+                    .background(Color::rgba(0, 0, 0, 180)),
+            ),
+            Box::new(Layer {
+                style: Layer::at(
+                    (viewport.width - width) / 2.0,
+                    (viewport.height - height) / 2.0,
+                    width,
+                    height,
+                ),
+                on_click: Some(Rc::new(|| {})),
+                children: vec![Box::new(
+                    Flex::column()
+                        .size(width, height)
+                        .padding(20.0)
+                        .gap(10.0)
+                        .background(panel_raised())
+                        .border(border(), 1.0)
+                        .corner_radius(12.0)
+                        .child(Box::new(
+                            Flex::row()
+                                .align(Align::Center)
+                                .child(heading("Export queue", text_color(), 18.0))
+                                .child(spacer())
+                                .child(icon_button(
+                                    Glyph::Close,
+                                    Help::new("Close export queue").shortcut("Esc"),
+                                    true,
+                                    state,
+                                    UiState::close_export_queue,
+                                )),
+                        ))
+                        .child(text(
+                            format!("{active} active · {} waiting", pending.len() - active),
+                            muted(),
+                            11.0,
+                        ))
+                        .child(Box::new(
+                            Flex::column().grow(1.0).child(Box::new(
+                                RawScrollView::controlled(
+                                    fill_style(),
+                                    state.export_queue_scroll.clone(),
+                                )
+                                .child(Box::new(jobs)),
+                            )),
+                        ))
+                        .child(Box::new(
+                            Flex::row()
+                                .gap(8.0)
+                                .child(secondary_button(
+                                    None,
+                                    "Clear finished",
+                                    !finished.is_empty(),
+                                    state,
+                                    UiState::clear_finished_exports,
+                                ))
+                                .child(spacer())
+                                .child(accent_button(
+                                    Some(Glyph::Export),
+                                    "Add export…",
+                                    can_add && state.sequence_end() > 0,
+                                    state,
+                                    UiState::export_dialog,
                                 )),
                         )),
                 )],
@@ -3888,6 +4116,8 @@ fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidg
     let input_width = if inner < 360.0 { 70.0 } else { 104.0 };
     let narrow = inner < 360.0;
     let draft = state.export_draft.get();
+    let busy = state.busy.get();
+    let can_add = !busy || state.export_queue.get().accepts_jobs_while_busy();
     let page = state.export_page.get();
     let selected = state.export_preset.get();
     let mut all = crate::export::presets::builtins(project);
@@ -4302,8 +4532,8 @@ fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidg
             ))
             .child(accent_button(
                 Some(Glyph::Export),
-                "Export",
-                !state.busy.get(),
+                if busy { "Add to queue" } else { "Export" },
+                can_add,
                 state,
                 UiState::submit_export,
             )),
@@ -4325,7 +4555,7 @@ fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidg
             Flex::row()
                 .gap(8.0)
                 .align(Align::Center)
-                .child(text(fit(&status, inner - 200.0, 11.0), muted(), 11.0))
+                .child(text(fit(&status, inner - 224.0, 11.0), muted(), 11.0))
                 .child(footer_actions),
         )
     };
@@ -4483,7 +4713,7 @@ fn open_project_link(url: &'static str, state: &UiState) {
     }
 }
 
-fn performance_settings(state: &UiState, hardware: bool, width: f32) -> BoxedWidget {
+fn performance_settings(state: &UiState, hardware: bool, proxies: bool, width: f32) -> BoxedWidget {
     let backends = crate::media::hardware::Backend::PLATFORM
         .iter()
         .map(|backend| backend.name())
@@ -4521,7 +4751,27 @@ fn performance_settings(state: &UiState, hardware: bool, width: f32) -> BoxedWid
                 ),
                 muted(),
                 11.0,
-            )),
+            ))
+            .child(Box::new(
+                Flex::row()
+                    .gap(10.0)
+                    .align(Align::Center)
+                    .child(Box::new(Checkbox::new(proxies, {
+                        let state = state.clone();
+                        move || state.toggle_proxies()
+                    })))
+                    .child(heading("Use proxies for preview", text_color(), 11.0)),
+            ))
+            .child(text(
+                fit(
+                    "Edit 4K footage smoothly with lightweight copies.",
+                    width,
+                    11.0,
+                ),
+                muted(),
+                11.0,
+            ))
+            .child(text("Export always uses the originals.", muted(), 11.0)),
     )
 }
 
@@ -4839,6 +5089,7 @@ fn settings_modal(state: &UiState, viewport: Size) -> BoxedWidget {
                                                 SettingsPage::Performance => performance_settings(
                                                     state,
                                                     settings.hardware_acceleration,
+                                                    settings.use_proxies,
                                                     content_width,
                                                 ),
                                                 SettingsPage::About => {
@@ -4952,6 +5203,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         }
     }
@@ -5141,7 +5393,7 @@ mod tests {
                 state.clip_thumbnail(&clip, &media, (30, 1)).is_none(),
                 "do not show source frame zero while loading"
             );
-            let frames = storyboard(&key, Arc::new(AtomicBool::new(false))).unwrap();
+            let frames = storyboard(&key, Arc::new(AtomicBool::new(false)), false).unwrap();
             let expected_frames: Vec<_> = [0, clip.duration_frames / 2, clip.duration_frames - 1]
                 .into_iter()
                 .map(|offset| clip.source_frame_at(offset).unwrap())
@@ -5155,6 +5407,7 @@ mod tests {
                         ..key.clone()
                     },
                     Arc::new(AtomicBool::new(false)),
+                    false,
                 )
                 .unwrap();
                 assert_eq!(frame.pixels, expected[0].pixels);
@@ -6684,6 +6937,63 @@ mod tests {
     }
 
     #[test]
+    fn proxy_preference_is_only_in_performance_and_remains_clickable() {
+        let state = UiState::new();
+        state.open_settings();
+        let appearance = render(&state, 1280.0, 760.0);
+        assert!(
+            !appearance
+                .labels
+                .iter()
+                .any(|label| label == "Use proxies for preview")
+        );
+        state.settings_page.set(SettingsPage::Performance);
+        let enabled = state.settings.peek().use_proxies;
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let viewport = Size {
+                width: 1280.0,
+                height: 760.0,
+            };
+            let mut painter = TestPainter::default();
+            let scene = Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+            assert!(
+                painter
+                    .labels
+                    .iter()
+                    .any(|label| label == "Hardware acceleration")
+            );
+            assert!(
+                painter
+                    .labels
+                    .iter()
+                    .any(|label| label == "Edit 4K footage smoothly with lightweight copies.")
+            );
+            assert!(
+                painter
+                    .labels
+                    .iter()
+                    .any(|label| label == "Export always uses the originals.")
+            );
+            let label = painter
+                .bounds
+                .iter()
+                .find(|(label, _)| label == "Use proxies for preview")
+                .unwrap()
+                .1;
+            scene
+                .hit_test(Point {
+                    x: label.x - 16.0,
+                    y: label.y + label.height / 2.0,
+                })
+                .expect("proxy checkbox must be clickable")();
+        });
+        assert_eq!(state.settings.peek().use_proxies, !enabled);
+        state.toggle_proxies();
+        assert_eq!(state.settings.peek().use_proxies, enabled);
+    }
+
+    #[test]
     fn performance_settings_toggle_hardware_acceleration() {
         let state = UiState::new();
         state.open_settings();
@@ -7374,7 +7684,8 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
-                linked_audio: false
+                noise_reduction: false,
+                linked_audio: false,
             }
         }));
         state.select_clip(Some((0, 1)));
@@ -7575,6 +7886,7 @@ mod tests {
         let painter = render(&state, 1440.0, 900.0);
         assert!(painter.labels.iter().any(|text| text == "Title 1"));
         assert!(painter.labels.iter().any(|text| text == "Title clip"));
+        assert!(!painter.labels.iter().any(|text| text == "Noise reduction"));
         state.title_text.set_value("Opening scene");
         set_title_text(&state);
         assert_eq!(
@@ -7630,10 +7942,34 @@ mod tests {
         );
         let painter = render(&state, 1440.0, 1600.0);
         assert!(painter.labels.iter().any(|label| label == "0.5 s"));
+        assert!(
+            painter
+                .labels
+                .iter()
+                .any(|label| label == "Noise reduction")
+        );
+        assert!(!selected_clip(&state).unwrap().1.noise_reduction);
+        toggle_clip_noise_reduction(&state);
+        assert!(selected_clip(&state).unwrap().1.noise_reduction);
+        state.undo();
+        assert!(!selected_clip(&state).unwrap().1.noise_reduction);
+        state.redo();
+        assert!(selected_clip(&state).unwrap().1.noise_reduction);
         set_clip_audio(&state, |clip| (clip.volume - 0.5, true));
+        assert!(selected_clip(&state).unwrap().1.noise_reduction);
         let painter = render(&state, 1440.0, 900.0);
         assert!(painter.labels.iter().any(|label| label == "50%"));
         assert!(painter.labels.iter().any(|label| label == "Unmute"));
+        let (track_id, clip) = selected_clip(&state).unwrap();
+        assert!(state.edit(Command::SetTrackLocked {
+            track_id,
+            locked: true,
+        }));
+        assert!(!state.edit(Command::SetClipNoiseReduction {
+            track_id,
+            clip_id: clip.id,
+            enabled: false,
+        }));
     }
 
     #[test]
@@ -7897,6 +8233,126 @@ mod tests {
                 .iter()
                 .any(|label| label == "My vertical")
         );
+    }
+
+    #[test]
+    fn export_queue_shows_progress_and_lets_busy_users_add_or_remove_jobs() {
+        use crate::export::queue::Request;
+        use crate::project::export_settings::LastExport;
+
+        let state = UiState::new();
+        assert!(state.add_title());
+        let exported = std::env::temp_dir().join("active.mp4");
+        state
+            .project_path
+            .set(Some(exported.with_extension("ocus")));
+        let mut queue = Queue::default();
+        for path in [&exported, &exported.with_file_name("waiting.mp4")] {
+            queue
+                .enqueue(Request {
+                    project: state.editor.borrow().project().clone(),
+                    output: LastExport {
+                        path: path.clone(),
+                        settings: state.export_draft.peek(),
+                    },
+                    total: 90,
+                    auto_number: false,
+                })
+                .unwrap();
+        }
+        let active = queue.start_next().unwrap();
+        state.export_queue.set(queue);
+        state.busy.set(true);
+        state.open_export_queue();
+
+        for (width, height) in [(420.0, 480.0), (1280.0, 760.0)] {
+            let painter = render(&state, width, height);
+            for label in [
+                "Export queue",
+                "active.mp4",
+                "waiting.mp4",
+                "Remove",
+                "Clear finished",
+                "1 active · 1 waiting",
+            ] {
+                let (_, bounds) = painter
+                    .bounds
+                    .iter()
+                    .find(|(text, _)| text == label)
+                    .unwrap_or_else(|| panic!("missing {label}"));
+                assert!(
+                    bounds.x >= 0.0 && bounds.x + bounds.width <= width,
+                    "{label}: {bounds:?}"
+                );
+                assert!(
+                    bounds.y >= 0.0 && bounds.y + bounds.height <= height,
+                    "{label}: {bounds:?}"
+                );
+            }
+        }
+
+        let viewport = Size {
+            width: 420.0,
+            height: 480.0,
+        };
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let click = |label: &str| {
+                let mut painter = TestPainter::default();
+                let scene = Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+                let rect = painter
+                    .bounds
+                    .iter()
+                    .rev()
+                    .find(|(text, _)| text == label)
+                    .unwrap()
+                    .1;
+                scene
+                    .hit_test(Point {
+                        x: rect.x + rect.width / 2.0,
+                        y: rect.y + rect.height / 2.0,
+                    })
+                    .expect(label)();
+            };
+            click("Remove");
+            assert!(matches!(
+                state.export_queue.peek().jobs()[1].status,
+                ExportStatus::Cancelled
+            ));
+            assert!(matches!(
+                state.export_queue.peek().active().unwrap().status,
+                ExportStatus::Encoding {
+                    cancelling: false,
+                    ..
+                }
+            ));
+            click("Add export…");
+            assert!(state.export_modal.peek());
+            assert_eq!(
+                std::path::PathBuf::from(state.export_path.peek()),
+                exported.with_file_name("export.mp4")
+            );
+            assert!(
+                render(&state, viewport.width, viewport.height)
+                    .labels
+                    .iter()
+                    .any(|label| label == "Add to queue")
+            );
+            state.run(Action::Escape);
+            assert!(!state.export_modal.peek());
+            assert!(state.export_queue_modal.peek());
+            click("Cancel");
+            assert!(matches!(
+                state.export_queue.peek().active().unwrap().status,
+                ExportStatus::Encoding {
+                    cancelling: true,
+                    ..
+                }
+            ));
+            state.run(Action::Escape);
+            assert!(!state.export_queue_modal.peek());
+            assert_eq!(state.export_queue.peek().active().unwrap().id, active.id);
+        });
     }
 
     #[test]

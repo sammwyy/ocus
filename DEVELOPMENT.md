@@ -25,6 +25,11 @@ worker stream API. Do not replace it with a sibling checkout.
   from GitHub on the first build.
 - Use a graphical desktop session for `cargo run`; build and tests can run
   headlessly.
+- Proxy generation uses the linked FFmpeg libraries, with the native MJPEG
+  encoder and NUT muxer enabled. No command-line executable is needed at runtime.
+  Preview falls back to originals if proxy generation is unavailable. The NUT
+  container preserves source timestamp precision (unlike Matroska's default
+  millisecond time base).
 
 Run from the repository root (the directory containing `Cargo.toml`):
 
@@ -128,6 +133,40 @@ installation. Do not assume installing an `ffmpeg.exe` alone supplies
 development libraries. Windows
 FFmpeg discovery, H.264/AAC encoder availability, and the Windows build have
 not yet been verified in this repository.
+
+## Packaging
+
+Install the pinned packaging tool with
+`cargo install cargo-packager --version 0.11.8 --locked`. From the repository
+root, `cargo packager --release` builds the locked release binary and produces
+Ubuntu 22.04 `.deb` and `.AppImage` packages in `target/release`. Linux packaging
+also needs `patchelf`, `desktop-file-utils` and `libfuse2`. The Debian runtime
+dependencies target Ubuntu 22.04's FFmpeg ABI; rebuild and update the dependency
+list for a different distribution/FFmpeg ABI.
+
+On macOS run `cargo packager --release --formats app,dmg`; on Windows use
+`cargo packager --release --formats nsis`. The platform format lists live in
+`package.metadata.installer-formats`; cargo-packager uses the Linux formats by
+default, so other platforms must pass the indicated override. Windows packages
+include release-directory DLLs copied by `build.rs`. Keep the matching vcpkg
+runtime DLLs available when building; packaging integration tests check they
+are present. macOS packages currently **require Homebrew FFmpeg** at the same
+prefix/ABI used to build them: Homebrew dylibs are not vendored or rewritten.
+These unsigned installers are development artifacts, not signed/notarized
+standalone releases.
+
+Run `sh scripts/smoke-linux.sh` (requires passwordless sudo),
+`sh scripts/smoke-macos.sh`, or `./scripts/smoke-windows.ps1` to install, check
+the headless `ocus --version` output and desktop assets, then uninstall. Pass
+the package directory and expected version as the first two arguments when
+testing another release. These scripts refuse to replace existing installs;
+run them on disposable test machines. AppImages are extracted and run without
+FUSE, then removed. The macOS app bundle itself is the desktop launch entry.
+
+The packaging workflow builds and smoke-tests all three platforms and retains
+their installers as artifacts. macOS and Windows installer execution has not
+yet been verified locally; the roadmap checkbox remains open until all three
+platforms have actually passed.
 
 ## Checks and troubleshooting
 

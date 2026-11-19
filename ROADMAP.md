@@ -121,7 +121,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [x] Audio waveforms on the timeline and in the Source monitor
 - [x] Audio fade in and fade out
 - [x] Loudness normalization
-- [ ] Noise reduction
+- [x] Noise reduction
 
 ### v0.7: Subtitles and keyframes
 - [ ] Import SRT files
@@ -131,7 +131,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 
 ### v0.8: Performance and safety
 - [x] Hardware accelerated encoding and decoding (NVENC, VAAPI, VideoToolbox)
-- [ ] Proxy media for smooth 4K editing
+- [x] Proxy media for smooth 4K editing
 - [x] Frame and thumbnail cache
 - [x] Autosave
 - [x] Crash recovery
@@ -161,7 +161,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [ ] Automatic silence removal
 
 **Export**
-- [ ] Export queue
+- [x] Export queue
 - [x] Custom export presets
 
 **Extensibility**

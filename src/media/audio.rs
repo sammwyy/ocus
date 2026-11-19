@@ -1,7 +1,10 @@
+mod noise_reduction;
+
 use crate::media::{Media, MediaKind};
 use crate::project::Project;
 use crate::timeline::{Clip, ClipContent, Playback, TrackKind};
 use ffmpeg_next as ffmpeg;
+use noise_reduction::NoiseReduction;
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -168,6 +171,7 @@ pub struct AudioSource {
     pub volume: f32,
     pub fade_in_frames: u64,
     pub fade_out_frames: u64,
+    pub noise_reduction: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -206,6 +210,7 @@ impl AudioPlan {
                         volume: clip.volume,
                         fade_in_frames: clip.fade_in_frames,
                         fade_out_frames: clip.fade_out_frames,
+                        noise_reduction: clip.noise_reduction,
                     })
                 })
             })
@@ -350,6 +355,8 @@ pub fn feed(
         offset: u64,
         reader: Option<AudioReader>,
         reverse: Option<ReverseAudioReader>,
+        noise_reduction: bool,
+        denoiser: Option<Box<NoiseReduction>>,
         begin: u64,
         end: u64,
         volume: f32,
@@ -378,6 +385,8 @@ pub fn feed(
                         .saturating_sub(to_samples(from) - to_samples(source.start)),
                     samples: VecDeque::new(),
                 }),
+                noise_reduction: source.noise_reduction,
+                denoiser: None,
                 begin: to_samples(from),
                 end: to_samples(until),
                 volume: source.volume,
@@ -401,34 +410,43 @@ pub fn feed(
             if from >= until {
                 continue;
             }
-            let mut sound = Vec::with_capacity((until - from) as usize * CHANNELS);
-            let result = if let Some(reverse) = &mut slot.reverse {
-                reverse.read(&mut sound, (until - from) as usize, &cancelled)
-            } else {
-                let reader = match &mut slot.reader {
-                    Some(reader) => reader,
-                    None => {
-                        match AudioReader::open(slot.path, slot.offset, plan.fps, cancelled.clone())
-                        {
-                            Ok(Some(reader)) => slot.reader.insert(reader),
-                            Ok(None) => {
-                                slot.end = from;
-                                continue;
-                            }
-                            Err(error) => {
-                                if !cancelled.load(Ordering::Relaxed) {
-                                    first_error.get_or_insert(error);
-                                }
-                                slot.end = from;
-                                continue;
-                            }
-                        }
+            if slot.reverse.is_none() && slot.reader.is_none() {
+                match AudioReader::open(slot.path, slot.offset, plan.fps, cancelled.clone()) {
+                    Ok(Some(reader)) => {
+                        slot.reader = Some(reader);
                     }
-                };
-                reader.read(&mut sound, (until - from) as usize, &cancelled)
+                    Ok(None) => {
+                        slot.end = from;
+                        continue;
+                    }
+                    Err(error) => {
+                        if !cancelled.load(Ordering::Relaxed) {
+                            first_error.get_or_insert(error);
+                        }
+                        slot.end = from;
+                        continue;
+                    }
+                }
+            }
+            if slot.noise_reduction && slot.denoiser.is_none() {
+                slot.denoiser = Some(Box::new(NoiseReduction::new(slot.end - slot.begin)));
+            }
+            let mut read = |out: &mut Vec<f32>, count| {
+                if let Some(reverse) = &mut slot.reverse {
+                    reverse.read(out, count, &cancelled)
+                } else {
+                    slot.reader.as_mut().unwrap().read(out, count, &cancelled)
+                }
+            };
+            let frames = (until - from) as usize;
+            let mut sound = Vec::with_capacity(frames * CHANNELS);
+            let result = if let Some(denoiser) = &mut slot.denoiser {
+                denoiser.read(&mut sound, frames, read)
+            } else {
+                read(&mut sound, frames).map(|_| ())
             };
             match result {
-                Ok(_) => {
+                Ok(()) => {
                     for (index, frame) in sound.as_chunks::<CHANNELS>().0.iter().enumerate() {
                         let offset = (from - position) as usize * CHANNELS + index * CHANNELS;
                         let sample = from + index as u64;
@@ -958,6 +976,7 @@ mod tests {
             source_start: 2,
             duration: 10,
             volume,
+            noise_reduction: false,
         };
         let expected = AudioPlan {
             sources: vec![
@@ -1044,6 +1063,7 @@ mod tests {
                     source_start: 0,
                     duration: 6,
                     volume: 1.0,
+                    noise_reduction: false,
                 }],
                 end: 6,
                 fps: (30, 1),
@@ -1256,6 +1276,7 @@ mod tests {
                         source_start: 0,
                         duration: 240,
                         volume: 1.0,
+                        noise_reduction: false,
                     })
                     .collect(),
                 end: clips * 240,
@@ -1321,6 +1342,7 @@ mod tests {
                     source_start: 0,
                     duration: 15,
                     volume: 1.0,
+                    noise_reduction: false,
                 },
                 AudioSource {
                     playback: crate::timeline::Playback::Forward,
@@ -1331,6 +1353,7 @@ mod tests {
                     source_start: 6,
                     duration: 10,
                     volume: 0.5,
+                    noise_reduction: false,
                 },
                 AudioSource {
                     playback: crate::timeline::Playback::Forward,
@@ -1341,6 +1364,7 @@ mod tests {
                     source_start: 0,
                     duration: 15,
                     volume: 1.0,
+                    noise_reduction: false,
                 },
             ],
             end: 15,
@@ -1381,6 +1405,7 @@ mod tests {
                 source_start: 0,
                 duration: 10,
                 volume: 1.0,
+                noise_reduction: false,
             }],
             end: 10,
             fps: (30, 1),
@@ -1439,6 +1464,7 @@ mod tests {
                 source_start: 3,
                 duration: 6,
                 volume: 1.0,
+                noise_reduction: false,
             }],
             end: 6,
             fps: (30, 1),
@@ -1509,6 +1535,7 @@ mod tests {
                     source_start: 0,
                     duration: 6,
                     volume: 1.0,
+                    noise_reduction: false,
                 }],
                 end: 6,
                 fps: (30, 1),
@@ -1626,6 +1653,7 @@ mod tests {
             write_wav(&path, rate, 2, &samples);
             for fps in [(30, 1), (30000, 1001)] {
                 let source = AudioSource {
+                    noise_reduction: false,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
                     playback: Playback::Forward,
@@ -1687,12 +1715,70 @@ mod tests {
     }
 
     #[test]
+    fn reverse_noise_reduction_filters_display_order_and_resets_on_seek() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reverse-noise.wav");
+        let input: Vec<_> = (0..RATE * 2)
+            .flat_map(|n| {
+                [
+                    ((n as f32 * 0.13).sin() * 2000.0) as i16,
+                    ((n as f32 * 0.21).cos() * 1000.0) as i16,
+                ]
+            })
+            .collect();
+        write_wav(&path, RATE, CHANNELS as u16, &input);
+        let dry = AudioPlan {
+            sources: vec![AudioSource {
+                path,
+                start: 3,
+                source_start: 2,
+                duration: 40,
+                volume: 1.0,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
+                playback: Playback::Reverse,
+                noise_reduction: false,
+            }],
+            end: 43,
+            fps: (30, 1),
+        };
+        let mut wet = AudioPlan {
+            sources: dry.sources.clone(),
+            end: dry.end,
+            fps: dry.fps,
+        };
+        wet.sources[0].noise_reduction = true;
+        let dry = Arc::new(dry);
+        let wet = Arc::new(wet);
+        for start in [3, 20] {
+            let samples = play(&dry, start, None);
+            let frames = samples.len() / CHANNELS;
+            let mut expected = Vec::new();
+            let mut position = 0;
+            NoiseReduction::new(frames as u64)
+                .read(&mut expected, frames, |out, count| {
+                    let count = count.min(frames - position);
+                    out.extend_from_slice(
+                        &samples[position * CHANNELS..(position + count) * CHANNELS],
+                    );
+                    position += count;
+                    Ok(count)
+                })
+                .unwrap();
+            let actual = play(&wet, start, None);
+            assert_eq!(actual, expected);
+            assert_ne!(actual, samples);
+        }
+    }
+
+    #[test]
     fn freeze_is_silent_in_plans_and_direct_feeds() {
         let mut project = mixed_project();
         let mut tracks = project.tracks().to_vec();
         for track in &mut tracks {
             for clip in &mut track.clips {
                 clip.playback = Playback::Freeze;
+                clip.noise_reduction = true;
             }
         }
         let value = serde_json::to_value(&project).unwrap();
@@ -1702,6 +1788,7 @@ mod tests {
         assert!(AudioPlan::from_project(&project).sources.is_empty());
         let plan = Arc::new(AudioPlan {
             sources: vec![AudioSource {
+                noise_reduction: true,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
                 playback: Playback::Freeze,
@@ -1746,6 +1833,112 @@ mod tests {
         reader.path = dir.path().join("missing.wav");
         reader.end = 10;
         assert!(reader.read(&mut sound, 10, &cancelled).is_err());
+    }
+
+    #[test]
+    fn noise_reduction_reaches_playback_and_wav_export() {
+        use crate::export::{ExportControl, render_with_settings};
+        use crate::project::edit::{Command, Editor};
+        use crate::project::export_settings::{Container, ExportSettings};
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("noise.wav");
+        let mut seed = 1_u32;
+        let mut low_pass = 0_i32;
+        let input: Vec<_> = (0..RATE * 2)
+            .flat_map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let white = i32::from((seed >> 16) as i16) / 8;
+                low_pass += (white - low_pass) / 16;
+                [low_pass as i16, 0]
+            })
+            .collect();
+        write_wav(&source, RATE, CHANNELS as u16, &input);
+
+        let mut editor = Editor::new(Project::new("Noise reduction"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: source.clone(),
+            kind: MediaKind::Audio,
+            duration_us: Some(2_000_000),
+            has_audio: true,
+        })));
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 2,
+            clip: Clip {
+                playback: crate::timeline::Playback::Forward,
+                id: 1,
+                start_frame: 3,
+                source_start_frame: 2,
+                duration_frames: 31,
+                content: ClipContent::Media { media_id: 1 },
+                volume: 0.5,
+                fade_in_frames: 3,
+                fade_out_frames: 0,
+                transition: None,
+                transition_out: None,
+                muted: false,
+                noise_reduction: false,
+                linked_audio: false,
+                color: Default::default(),
+                lut: None,
+            },
+        }));
+        let dry_plan = Arc::new(AudioPlan::from_project(editor.project()));
+        let dry = play(&dry_plan, 0, None);
+        assert!(editor.apply(Command::SetClipNoiseReduction {
+            track_id: 2,
+            clip_id: 1,
+            enabled: true,
+        }));
+        let plan = Arc::new(AudioPlan::from_project(editor.project()));
+        let wet = play(&plan, 0, None);
+        assert_eq!(dry.len(), 54_400 * CHANNELS);
+        assert_eq!(wet.len(), dry.len());
+        assert!(wet[..4800 * CHANNELS].iter().all(|&sample| sample == 0.0));
+        assert!(
+            wet.iter()
+                .skip(1)
+                .step_by(CHANNELS)
+                .all(|&right| right == 0.0)
+        );
+        assert!(wet.iter().all(|sample| sample.is_finite()));
+        let rms = |samples: &[f32]| {
+            let left = samples[14_400 * CHANNELS..].iter().step_by(CHANNELS);
+            (left.clone().map(|sample| sample.powi(2)).sum::<f32>() / left.len() as f32).sqrt()
+        };
+        let (before, after) = (rms(&dry), rms(&wet));
+        assert!(after < before * 0.5, "noise RMS: {before:.6} → {after:.6}");
+
+        let project_settings = editor.project().settings();
+        let mut settings = ExportSettings::for_project(
+            project_settings.width,
+            project_settings.height,
+            project_settings.frame_rate.clone(),
+        );
+        settings.container = Container::Wav;
+        let output = dir.path().join("denoised.wav");
+        render_with_settings(
+            editor.project(),
+            &output,
+            &settings,
+            Arc::new(ExportControl::default()),
+        )
+        .unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut exported = Vec::new();
+        AudioReader::open(&output, 0, plan.fps, cancelled.clone())
+            .unwrap()
+            .unwrap()
+            .read(&mut exported, wet.len() / CHANNELS + 1, &cancelled)
+            .unwrap();
+        assert_eq!(wet, exported);
+        assert!(editor.undo());
+        assert_eq!(AudioPlan::from_project(editor.project()), *dry_plan);
+        println!(
+            "left noise RMS {before:.6} → {after:.6}; {} playback/export frames match",
+            wet.len() / CHANNELS
+        );
     }
 
     #[test]
@@ -1798,6 +1991,7 @@ mod tests {
                     source_start: 0,
                     duration: 120,
                     volume: 1.0,
+                    noise_reduction: false,
                 }],
                 end: 120,
                 fps: (30, 1),
@@ -1848,6 +2042,7 @@ mod tests {
             source_start,
             duration,
             volume,
+            noise_reduction: false,
         };
         // Overlap at 10..20, a gap at 30..40, a second overlap at 45..55.
         Arc::new(AudioPlan {
@@ -1917,6 +2112,7 @@ mod tests {
                 source_start: 0,
                 duration: 6,
                 volume: 1.0,
+                noise_reduction: false,
             }],
             end: 6,
             fps: (30, 1),
@@ -1951,6 +2147,7 @@ mod tests {
                 source_start: 0,
                 duration: 6,
                 volume: 1.0,
+                noise_reduction: false,
             }],
             end: 6,
             fps: (30, 1),
@@ -1982,6 +2179,7 @@ mod tests {
                 volume: 1.0,
                 fade_in_frames: 30,
                 fade_out_frames: 30,
+                noise_reduction: false,
             }],
             end: 150,
             fps: (30, 1),

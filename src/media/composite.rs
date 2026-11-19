@@ -205,6 +205,10 @@ enum Layer<'a> {
 }
 
 impl Compositor {
+    pub(crate) fn use_proxies(&mut self, enabled: bool) {
+        self.layers.use_proxies = enabled;
+    }
+
     pub fn new(plan: VisualPlan, width: u32, height: u32, fps: (u32, u32)) -> Self {
         Self {
             luts: HashMap::new(),
@@ -2061,6 +2065,7 @@ mod tests {
         let mut preview = None;
         decode_sequence(
             &PreviewPlan {
+                use_proxies: false,
                 sources: Vec::new(),
                 visual: Some(plan.clone()),
                 end: 3,

@@ -85,6 +85,8 @@ pub struct Clip {
     #[serde(default, skip_serializing_if = "zero")]
     pub fade_out_frames: u64,
     pub muted: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub noise_reduction: bool,
     /// A video clip that also carries its source's audio. The audio is cut,
     /// moved and trimmed with the picture; `volume` and `muted` apply to it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

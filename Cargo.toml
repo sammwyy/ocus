@@ -5,11 +5,33 @@ edition = "2024"
 authors = ["sammwy"]
 repository = "https://github.com/sammwyy/ocus"
 
+[package.metadata.packager]
+product-name = "Ocus"
+identifier = "dev.sammwy.ocus"
+category = "Video"
+description = "A desktop multitrack video editor"
+icons = ["assets/ocus.png", "assets/ocus.ico"]
+formats = ["deb", "appimage"]
+before-packaging-command = "cargo build --release --locked"
+resources = ["target/release/*.dll"]
+
+[package.metadata.packager.deb]
+depends = ["libavcodec58", "libavformat58", "libavfilter7", "libavutil56", "libswscale5", "libswresample3", "libasound2", "libdbus-1-3", "libc6 (>= 2.34)", "libgcc-s1"]
+
+[package.metadata.packager.nsis]
+installer-icon = "assets/ocus.ico"
+
+[package.metadata.installer-formats]
+linux = ["deb", "appimage"]
+macos = ["app", "dmg"]
+windows = ["nsis"]
+
 [dependencies]
 creamui = { git = "https://github.com/sammwyy/creamui.git", rev = "335824c350b4eb4d986efd25546d0f21e337f83e", version = "0.3.0", features = ["gpu", "image", "system-theme", "theme-watch"] }
 directories = "=5.0.1"
 ebur128 = "0.1.11"
 ffmpeg-next = { version = "=7.1.0", default-features = false, features = ["format", "codec", "filter", "software-scaling", "software-resampling"] }
+nnnoiseless = { version = "=0.5.2", default-features = false }
 rfd = "=0.17.2"
 rodio = { version = "=0.22.2", default-features = false, features = ["playback"] }
 serde = { version = "1", features = ["derive"] }

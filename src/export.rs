@@ -883,6 +883,7 @@ impl AudioEncoder {
 
 #[cfg(test)]
 mod tests {
+    use super::queue;
     use super::{ExportControl, render_with_settings};
     use crate::media::{Media, MediaKind};
     use crate::project::{Command, Editor, Project, format};
@@ -1005,6 +1006,195 @@ mod tests {
     }
 
     #[test]
+    fn exports_reversed_frames_and_frozen_video_with_silent_audio() {
+        use crate::project::export_settings::ExportSettings;
+        use crate::timeline::Playback;
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.mkv");
+        assert!(
+            std::process::Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "nullsrc=s=64x36:r=30,geq=lum=16+N*7:cb=128:cr=128",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:sample_rate=48000",
+                    "-t",
+                    "0.4",
+                    "-c:v",
+                    "ffv1",
+                    "-c:a",
+                    "pcm_s16le"
+                ])
+                .arg(&source)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut document: serde_json::Value =
+            serde_json::from_str(&format::to_json(&Project::new("Playback export")).unwrap())
+                .unwrap();
+        document["settings"]["width"] = 64.into();
+        document["settings"]["height"] = 36.into();
+        let mut editor = Editor::new(format::from_json(&document.to_string()).unwrap());
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: source,
+            kind: MediaKind::Video,
+            duration_us: Some(400_000),
+            has_audio: true
+        })));
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 0,
+            clip: Clip {
+                transform: crate::timeline::Transform::default(),
+                noise_reduction: false,
+                lut: None,
+                transition_out: None,
+                color: Default::default(),
+                transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
+                id: 1,
+                start_frame: 0,
+                source_start_frame: 3,
+                duration_frames: 6,
+                content: ClipContent::Media { media_id: 1 },
+                volume: 1.0,
+                muted: false,
+                linked_audio: true,
+                playback: Playback::Forward
+            }
+        }));
+        let mut settings =
+            ExportSettings::for_project(64, 36, editor.project().settings().frame_rate.clone());
+        settings.video_quality = Some(0);
+        let original = editor.project().clone();
+        let lut = dir.path().join("invert.cube");
+        fs::write(&lut, "LUT_1D_SIZE 2\n1 1 1\n0 0 0\n").unwrap();
+        let mut ungraded = None;
+        for graded in [false, true] {
+            let mut editor = Editor::new(original.clone());
+            if graded {
+                assert!(editor.apply(Command::SetClipTransform {
+                    track_id: 0,
+                    clip_id: 1,
+                    transform: Transform {
+                        scale: 0.8,
+                        x: 0.1,
+                        y: -0.1,
+                        rotation: 15.0,
+                        crop_left: 0.1,
+                        crop_top: 0.1,
+                        crop_right: 0.1,
+                        crop_bottom: 0.1,
+                        opacity: 0.7
+                    }
+                }));
+                assert!(editor.apply(Command::SetClipColor {
+                    track_id: 0,
+                    clip_id: 1,
+                    color: crate::timeline::ColorAdjust {
+                        brightness: 0.1,
+                        contrast: 0.6,
+                        saturation: 0.4
+                    }
+                }));
+                assert!(editor.apply(Command::SetClipLut {
+                    track_id: 0,
+                    clip_id: 1,
+                    path: Some(lut.clone())
+                }));
+            }
+            let mut images = Vec::new();
+            for playback in [Playback::Forward, Playback::Reverse, Playback::Freeze] {
+                if playback != Playback::Forward {
+                    assert!(editor.apply(Command::SetPlayback {
+                        track_id: 0,
+                        clip_id: 1,
+                        playback
+                    }));
+                }
+                let path = dir.path().join(format!("{playback:?}-{graded}.mp4"));
+                if graded {
+                    let mut queue = queue::Queue::default();
+                    queue
+                        .enqueue(queue::Request {
+                            project: editor.project().clone(),
+                            output: crate::project::export_settings::LastExport {
+                                path: path.clone(),
+                                settings: settings.clone(),
+                            },
+                            total: 6,
+                            auto_number: false,
+                        })
+                        .unwrap();
+                    queue.start_next().unwrap().render(|_| {}).1.unwrap();
+                } else {
+                    render_with_settings(
+                        editor.project(),
+                        &path,
+                        &settings,
+                        Arc::new(ExportControl::default()),
+                    )
+                    .unwrap();
+                }
+                let output = std::process::Command::new("ffmpeg")
+                    .args(["-v", "error", "-i"])
+                    .arg(&path)
+                    .args(["-an", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                let frames: Vec<_> = output
+                    .stdout
+                    .as_chunks::<{ 64 * 36 * 3 }>()
+                    .0
+                    .iter()
+                    .map(|frame| frame.to_vec())
+                    .collect();
+                assert_eq!(frames.len(), 6);
+                images.push(frames);
+                if playback == Playback::Freeze {
+                    let output = ffmpeg::format::input(&path).unwrap();
+                    assert!(output.streams().best(ffmpeg::media::Type::Audio).is_none());
+                    continue;
+                }
+                let audio = std::process::Command::new("ffmpeg")
+                    .args(["-v", "error", "-i"])
+                    .arg(&path)
+                    .args(["-vn", "-f", "f32le", "-ac", "2", "-"])
+                    .output()
+                    .unwrap();
+                assert!(audio.status.success());
+                let samples: Vec<_> = audio
+                    .stdout
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|v| f32::from_le_bytes(*v))
+                    .collect();
+                assert!(!samples.is_empty());
+                assert!(samples.iter().any(|sample| sample.abs() > 0.03));
+            }
+            for k in 0..6 {
+                assert_eq!(images[1][k], images[0][5 - k]);
+                assert_eq!(images[2][k], images[0][5]);
+            }
+            if let Some(ungraded) = &ungraded {
+                assert_ne!(&images[0][0], ungraded);
+            } else {
+                ungraded = Some(images[0][0].clone());
+            }
+        }
+    }
+
+    #[test]
     fn export_uses_full_resolution_original_even_when_proxy_is_ready() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("original.mp4");
@@ -1071,6 +1261,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 color: Default::default(),
                 lut: None,
                 transition_out: None,
@@ -1170,6 +1361,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 id: 1,
                 start_frame: 0,
@@ -1327,6 +1519,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 id: 1,
                 start_frame: 0,
@@ -1404,6 +1597,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 id: 1,
                 start_frame: 0,
@@ -1527,6 +1721,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 id: 3,
                 start_frame: 0,
@@ -1599,6 +1794,7 @@ mod tests {
         })));
         let mut layered = editor.project().tracks().to_vec();
         layered[0].clips = vec![Clip {
+            playback: crate::timeline::Playback::Forward,
             lut: None,
             id: 4,
             start_frame: 15,
@@ -1617,6 +1813,7 @@ mod tests {
             transform: Transform::default(),
         }];
         layered[1].clips = vec![Clip {
+            playback: crate::timeline::Playback::Forward,
             lut: None,
             id: 5,
             start_frame: 0,
@@ -1642,6 +1839,7 @@ mod tests {
             locked: false,
             hidden: false,
             clips: vec![Clip {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 id: 6,
                 start_frame: 0,
@@ -1761,6 +1959,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 id: 1,
                 start_frame: 0,
@@ -1843,6 +2042,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 id: 1,
                 start_frame: 0,
@@ -2017,6 +2217,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 id: 1,
                 start_frame: 0,
@@ -2146,6 +2347,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Clip {
+                playback: crate::timeline::Playback::Forward,
                 lut: None,
                 id: 1,
                 start_frame: 0,

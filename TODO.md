@@ -58,6 +58,12 @@ clip commands do not complete the corresponding editor workflows.
 - [x] Run export off the UI thread with progress, cancellation, and cleanup
   of incomplete outputs.
 
+## v0.7 subtitles
+
+- [x] Import SRT files as subtitle tracks with undo/redo.
+- [x] Style subtitle font, color, outline, background, and position across a track.
+- [x] Burn subtitles into exported video, or export a merged SRT sidecar.
+
 ## End-to-end usability
 
 - [ ] Wire import, playback, editing, project open/save, and export into the

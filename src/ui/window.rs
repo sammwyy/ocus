@@ -3179,6 +3179,63 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         if track_kind == TrackKind::Video
             && media.is_some_and(|media| media.kind != MediaKind::Audio)
         {
+            if media.is_some_and(|media| media.kind == MediaKind::Video) {
+                let mut controls = vec![with_help(
+                    secondary_button(
+                        None,
+                        if state.stabilization_analyzing.get() {
+                            "Analyzing…"
+                        } else if clip.stabilization.is_some() {
+                            "Re-analyze"
+                        } else {
+                            "Stabilize"
+                        },
+                        !busy
+                            && track.is_some_and(|t| !t.locked)
+                            && !state.stabilization_analyzing.get(),
+                        state,
+                        UiState::stabilize_clip,
+                    ),
+                    Help::new(
+                        "Analyze camera shake in the source range without changing your original video",
+                    ),
+                    state,
+                )];
+                if let Some(data) = &clip.stabilization {
+                    let strength = state
+                        .stabilization_drag
+                        .get()
+                        .filter(|(_, id, _)| *id == clip.id)
+                        .map_or(data.strength, |(_, _, draft)| draft.strength);
+                    controls.push(text(
+                        format!("Strength · {:.0}%", strength * 100.0),
+                        muted(),
+                        11.0,
+                    ));
+                    controls.push(with_help(Box::new(super::controls::StabilizationSlider {
+                        state: state.clone(),
+                        level: (strength * 100.0).round() as usize,
+                    }), Help::new("Smooth more camera shake; automatically crops up to 25% to hide borders"), state));
+                    controls.push(secondary_button(
+                        None,
+                        "Remove",
+                        !busy && track.is_some_and(|t| !t.locked),
+                        state,
+                        |state| {
+                            if let Some((track_id, clip)) = selected_clip(state) {
+                                state.edit(Command::SetClipStabilization {
+                                    track_id,
+                                    clip_id: clip.id,
+                                    stabilization: None,
+                                });
+                            }
+                        },
+                    ));
+                }
+                controls.push(text("Smooths camera shake.", faint(), 10.0));
+                controls.push(text("Original video is untouched.", faint(), 10.0));
+                rows.push(section("Stabilization", controls));
+            }
             rows.push(section(
                 "Color",
                 vec![
@@ -4211,6 +4268,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     waveform: WaveformSlice {
                         peaks,
                         clip: Clip {
+                            stabilization: None,
                             keyframes: Vec::new(),
                             speed: 1.0,
                             transform: crate::timeline::Transform::default(),
@@ -6426,6 +6484,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         }
@@ -8608,6 +8667,62 @@ mod tests {
     }
 
     #[test]
+    fn stabilization_inspector_fits_narrow_panels() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "shake.mkv".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: false
+        })));
+        let mut clip: Clip = serde_json::from_value(serde_json::json!({
+            "id":1,"start_frame":0,"source_start_frame":0,"duration_frames":60,
+            "content":{"media":{"media_id":1}},"volume":1.0,"muted":false
+        }))
+        .unwrap();
+        clip.stabilization = Some(crate::timeline::Stabilization::new(0, vec![[0.0, 0.0]; 60]));
+        assert!(state.edit(Command::InsertClip {
+            track_id: 0,
+            clip: Box::new(clip)
+        }));
+        state.select_clip(Some((0, 1)));
+        for width in [210.0, 360.0] {
+            let mut painter = TestPainter::default();
+            creamui::reactive::with_context_scope(|| {
+                creamui::reactive::provide_context(creamui::ThemeProvider::new(
+                    creamui::Theme::dark(),
+                ));
+                Renderer::new().render(
+                    inspector(&state, state.editor.borrow().project(), width, false),
+                    Size {
+                        width,
+                        height: 4000.0,
+                    },
+                    &mut painter,
+                );
+            });
+            for label in [
+                "STABILIZATION",
+                "Re-analyze",
+                "Strength · 50%",
+                "Remove",
+                "Original video is untouched.",
+            ] {
+                let (_, rect) = painter
+                    .bounds
+                    .iter()
+                    .find(|(text, _)| text == label)
+                    .unwrap_or_else(|| panic!("Missing {label}"));
+                assert!(
+                    rect.x >= 0.0 && rect.x + rect.width <= width,
+                    "{label}: {rect:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn transform_inspector_is_media_only_and_fits() {
         let state = UiState::new();
         assert!(state.edit(Command::ImportMedia(Media {
@@ -8638,6 +8753,7 @@ mod tests {
                 fade_out_frames: 0,
                 linked_audio: false,
                 color: Default::default(),
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Default::default()
             })
@@ -8897,6 +9013,7 @@ mod tests {
                     fade_out_frames: 0,
                     linked_audio: false,
                     color: Default::default(),
+                    stabilization: None,
                     keyframes: Vec::new(),
                     transform: Default::default()
                 })
@@ -8958,6 +9075,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id,
                 clip: Box::new(Clip {
+                    stabilization: None,
                     keyframes: Vec::new(),
                     id,
                     content: ClipContent::Media { media_id: id },
@@ -9634,6 +9752,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             })

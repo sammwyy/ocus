@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct FrameSource {
+    pub stabilization: Option<(u64, Arc<Vec<Transform>>)>,
     pub playback: crate::timeline::Playback,
     pub lut: Option<PathBuf>,
     pub chroma_key: Option<crate::timeline::ChromaKey>,
@@ -27,6 +28,15 @@ pub struct FrameSource {
 }
 
 impl FrameSource {
+    pub fn stabilization_at(&self, position: u64) -> Transform {
+        self.stabilization
+            .as_ref()
+            .and_then(|(start, values)| {
+                let index = self.source_frame_at(position)?.checked_sub(*start)?;
+                values.get(index as usize).copied()
+            })
+            .unwrap_or_default()
+    }
     pub fn transform_at(&self, position: u64) -> Transform {
         crate::timeline::evaluate_transform(
             self.transform,
@@ -141,6 +151,7 @@ pub fn storyboard(
         start: 0,
         source_start: key.source_start,
         duration: key.duration,
+        stabilization: None,
         keyframes: Vec::new(),
         transform: key.transform(),
     };
@@ -240,6 +251,7 @@ impl VideoLayers {
             }
             active.push(source.clip_id);
             let image = self.layer_at(source, position, cancelled)?;
+            let image = super::stabilize::apply(image, source.stabilization_at(position));
             for (dst, src) in pixels
                 .as_chunks_mut::<4>()
                 .0
@@ -724,6 +736,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         }
@@ -1024,6 +1037,7 @@ mod tests {
     fn speed_maps_timeline_offsets_to_source_frames() {
         for speed in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] {
             let source = super::FrameSource {
+                stabilization: None,
                 keyframes: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 transform: Transform::default(),
@@ -1089,6 +1103,7 @@ mod tests {
                 path.clone()
             };
             let mut source = FrameSource {
+                stabilization: None,
                 keyframes: Vec::new(),
                 speed: 1.0,
                 transform: crate::timeline::Transform::default(),
@@ -1219,6 +1234,7 @@ mod tests {
                 .success()
         );
         let mut source = FrameSource {
+            stabilization: None,
             keyframes: Vec::new(),
             speed: 1.0,
             transform: crate::timeline::Transform::default(),
@@ -1318,6 +1334,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 30,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             };
@@ -1361,6 +1378,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 1800,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             };
@@ -1415,6 +1433,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 300,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         };
@@ -1464,6 +1483,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: frames,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             };
@@ -1530,6 +1550,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 1,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         };
@@ -1607,6 +1628,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 1,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             };
@@ -1670,6 +1692,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 1,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             };
@@ -1763,6 +1786,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 120,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         };
@@ -1813,6 +1837,7 @@ mod tests {
                 chroma_key: None,
                 clip_id: 1,
                 path: quantized.clone(),
+                stabilization: None,
                 keyframes: Vec::new(),
                 kind: MediaKind::Video,
                 start: 0,
@@ -1863,6 +1888,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 6,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         }];
@@ -1973,6 +1999,7 @@ mod tests {
                 start: 3,
                 source_start: 2,
                 duration: 2,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             }],

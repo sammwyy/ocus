@@ -2522,6 +2522,7 @@ mod tests {
                     playback: crate::timeline::Playback::Forward,
                     speed,
                     transform: Transform::default(),
+                    stabilization: None,
                     keyframes: Vec::new(),
                     id: 1,
                     start_frame: 3,

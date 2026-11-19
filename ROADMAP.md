@@ -39,7 +39,7 @@ They add a lot of complexity and are not needed by the target audience. They can
 | Project format | `serde` + versioned JSON |
 | Noise reduction | `nnnoiseless` |
 | Speech-to-text | `whisper-rs` (local, optional) |
-| Stabilization | `vid.stab` via FFmpeg |
+| Stabilization | Built-in block-matching motion analysis and camera-path smoothing |
 | UI toolkit | `creamui` (pinned GitHub revision for GPU preview) |
 
 FFmpeg covers most of the codec and filter work. Where it falls short, the project pulls in focused Rust crates instead of reimplementing things.
@@ -172,7 +172,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [x] Full keyframe support with easing curves
 - [x] Chroma key (green screen)
 - [ ] Simple masks
-- [ ] Video stabilization
+- [x] Video stabilization
 - [ ] Animated title templates
 
 **Automation**

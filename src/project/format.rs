@@ -255,6 +255,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         }]);
@@ -290,6 +291,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         }]);
@@ -390,6 +392,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         })
@@ -484,6 +487,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         };

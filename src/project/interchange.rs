@@ -293,6 +293,7 @@ impl Sequence {
                     noise_reduction: false,
                     color: Default::default(),
                     transform: Default::default(),
+                    stabilization: None,
                     keyframes: Vec::new(),
                     lut: None,
                     chroma_key: None,

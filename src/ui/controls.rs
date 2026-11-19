@@ -1320,6 +1320,87 @@ impl Widget for ZoomSlider {
     }
 }
 
+pub(super) struct StabilizationSlider {
+    pub state: UiState,
+    pub level: usize,
+}
+
+impl Widget for StabilizationSlider {
+    fn style(&self) -> creamui::Style {
+        ZoomSlider {
+            level: self.level,
+            levels: 101,
+            set: Rc::new(|_| {}),
+        }
+        .style()
+    }
+
+    fn paint(&self, painter: &mut dyn Painter, rect: Rect) {
+        ZoomSlider {
+            level: self.level,
+            levels: 101,
+            set: Rc::new(|_| {}),
+        }
+        .paint(painter, rect);
+    }
+
+    fn on_drag_start(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
+        let state = self.state.clone();
+        Some(Rc::new(move |_, _| {
+            if state.busy.peek() {
+                return;
+            }
+            let Some((track_id, clip_id)) = state.primary_clip() else {
+                return;
+            };
+            let editor = state.editor.borrow();
+            if let Some(data) = editor
+                .project()
+                .tracks()
+                .iter()
+                .find(|t| t.id == track_id && !t.locked)
+                .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+                .and_then(|c| c.stabilization.clone())
+            {
+                state
+                    .stabilization_drag
+                    .set(Some((track_id, clip_id, data)));
+            }
+        }))
+    }
+
+    fn on_drag(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
+        let state = self.state.clone();
+        Some(Rc::new(move |position, rect| {
+            if let Some((track, clip, mut data)) = state.stabilization_drag.peek() {
+                data.strength =
+                    (((position.x - 6.0) / (rect.width - 12.0).max(1.0)).clamp(0.0, 1.0) * 100.0)
+                        .round()
+                        / 100.0;
+                state.stabilization_drag.set(Some((track, clip, data)));
+            }
+        }))
+    }
+
+    fn on_drag_end(&self) -> Option<Rc<dyn Fn()>> {
+        let state = self.state.clone();
+        Some(Rc::new(move || {
+            if let Some((track_id, clip_id, data)) = state.stabilization_drag.peek() {
+                state.stabilization_drag.set(None);
+                state.edit(crate::project::Command::SetClipStabilization {
+                    track_id,
+                    clip_id,
+                    stabilization: Some(data),
+                });
+            }
+        }))
+    }
+
+    fn cursor_icon(&self) -> Option<CursorIcon> {
+        Some(CursorIcon::Pointer)
+    }
+}
+
 /// One equal-width option of a segmented control: an optional glyph, an
 /// optional label and a count badge.
 pub(super) fn segment(
@@ -1468,6 +1549,77 @@ pub(super) fn menu_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stabilization_slider_survives_rebuild_and_commits_one_undo_step() {
+        use crate::media::Media;
+        use crate::project::Command;
+        use crate::timeline::{Clip, Stabilization};
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "shake.mkv".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: false
+        })));
+        let mut clip: Clip = serde_json::from_value(serde_json::json!({
+            "id":1,"start_frame":0,"source_start_frame":0,"duration_frames":60,
+            "content":{"media":{"media_id":1}},"volume":1.0,"muted":false
+        }))
+        .unwrap();
+        clip.stabilization = Some(Stabilization::new(0, vec![[0.0, 0.0]; 60]));
+        assert!(state.edit(Command::InsertClip {
+            track_id: 0,
+            clip: Box::new(clip)
+        }));
+        state.select_clip(Some((0, 1)));
+        let slider = StabilizationSlider {
+            state: state.clone(),
+            level: 50,
+        };
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 112.0,
+            height: 24.0,
+        };
+        let release = slider.on_drag_end().unwrap();
+        slider.on_drag_start().unwrap()(Point { x: 56.0, y: 12.0 }, rect);
+        slider.on_drag().unwrap()(Point { x: 71.0, y: 12.0 }, rect);
+        let rebuilt = StabilizationSlider {
+            state: state.clone(),
+            level: 65,
+        };
+        rebuilt.on_drag().unwrap()(Point { x: 91.0, y: 12.0 }, rect);
+        assert_eq!(
+            state.editor.borrow().project().tracks()[0].clips[0]
+                .stabilization
+                .as_ref()
+                .unwrap()
+                .strength,
+            0.5
+        );
+        release();
+        assert_eq!(
+            state.editor.borrow().project().tracks()[0].clips[0]
+                .stabilization
+                .as_ref()
+                .unwrap()
+                .strength,
+            0.85
+        );
+        assert!(state.editor.borrow_mut().undo());
+        assert_eq!(
+            state.editor.borrow().project().tracks()[0].clips[0]
+                .stabilization
+                .as_ref()
+                .unwrap()
+                .strength,
+            0.5
+        );
+        assert!(state.stabilization_drag.peek().is_none());
+    }
 
     #[test]
     fn labels_shorten_to_fit_and_durations_read_naturally() {

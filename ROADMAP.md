@@ -112,7 +112,8 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [ ] Reverse clip and freeze frame
 - [ ] Transforms: scale, position, rotation, crop, opacity
 - [ ] Picture-in-picture
-- [ ] Snapping, markers and timeline zoom
+- [x] Snapping and timeline zoom
+- [ ] Timeline markers
 
 ### v0.6: Color and audio
 - [ ] Brightness, contrast and saturation
@@ -132,8 +133,8 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [ ] Hardware accelerated encoding and decoding (NVENC, VAAPI, VideoToolbox)
 - [ ] Proxy media for smooth 4K editing
 - [ ] Frame and thumbnail cache
-- [ ] Autosave
-- [ ] Crash recovery
+- [x] Autosave
+- [x] Crash recovery
 
 ### v0.9: Formats and stabilization
 - [x] WebM export

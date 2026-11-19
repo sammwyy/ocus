@@ -17,8 +17,8 @@ clip commands do not complete the corresponding editor workflows.
   track names or flags yet.
 - [x] Extend ripple delete across overlapping clips that span the removed range;
   preserve the surviving source frames on both sides as separate clips.
-- [ ] Make all video and audio tracks selectable as destinations from the UI;
-  current import appends to the first compatible track.
+- [x] Make all video and audio tracks selectable as destinations from the UI:
+  drop media on any track, or insert at the playhead on the next free track.
 
 ## Media, timeline, and preview
 
@@ -38,11 +38,11 @@ clip commands do not complete the corresponding editor workflows.
   play/pause, frame stepping and frame-accurate timeline ruler seeks.
 - [x] Present video and still-image frames through CreamUI's GPU viewport.
 - [x] Composite overlapping video layers and titles consistently between
-  preview and export; support transition effects.
+  preview and export.
 
 ## Audio, titles, and export
 
-- [ ] Decode and play audio with an audio master clock; synchronize video
+- [x] Decode and play audio with an audio master clock; synchronize video
   playback and seeking to it.
 - [x] Add per-clip volume and mute controls that affect both preview and
   export, with tests.

@@ -68,7 +68,9 @@ and playhead in **Source**. The timeline is one painted
 surface with track headers, a zoomable ruler (1 s to 10 min per view, with zoom buttons, a slider and **Fit**), clip
 filmstrips and audio waveforms sampled from their trimmed source ranges, and a
 playhead across every track. Timeline waveforms reflect clip volume and are
-dimmed when muted.
+dimmed when muted. Markers are numbered flags on the ruler with a line through
+the tracks; ruler scrubbing and clip edges snap to them, and they are saved
+with the project.
 
 Tracks can be added from the timeline's **Tracks** button, the **Add
 track** button under the track headers or any right-click menu, and deleted
@@ -76,11 +78,12 @@ from a header's hover button or its menu (one video and one audio track always
 remain). Right-click opens a context menu on clips (cut, copy, paste,
 duplicate, split, detach/link audio, mute, delete, ripple delete), on empty
 track space (paste here, add title here, move playhead, track actions), on
+the ruler (add a marker, or go to / remove the one under the pointer), on
 track headers and on media bin items (insert at end or at the playhead, open in
 the source monitor, remove an unused source); Esc or clicking outside closes it.
 
 Editing is direct: drag clips along a track or onto another track of the same
-kind (edges snap to other clips, the playhead and the start), drag sources from
+kind (edges snap to other clips, markers, the playhead and the start), drag sources from
 the media bin onto a track, or drop files from the desktop anywhere on the
 window to import them (over a track they are also placed there). Ctrl+click
 and Shift+click add to the selection and dragging over empty track space draws
@@ -94,7 +97,9 @@ and duplicate, S or Ctrl+K splits at the playhead, Ctrl+A selects all, Esc
 clears the selection or cancels a drag, Space plays or pauses the last monitor
 used for playback or seeking (Program by default), K pauses playback or starts
 Program, the arrows step a frame (Shift: one second, Alt: nudge the selection), Home/End
-jump, +/− zoom, T adds a title, and Ctrl+N/O/S/Shift+S/I/E run the file
+jump, +/− zoom, T adds a title, M adds or removes a marker at the playhead
+(the **Marker** timeline button does the same), Shift+M / Ctrl+Shift+M jump to
+the next / previous marker, and Ctrl+N/O/S/Shift+S/I/E run the file
 actions. Hover or keyboard-focus an icon-only control to see what it does;
 its tooltip includes a shortcut when one is available for that action. Source
 transport controls do not show sequence-only shortcuts.

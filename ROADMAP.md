@@ -113,7 +113,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [ ] Transforms: scale, position, rotation, crop, opacity
 - [ ] Picture-in-picture
 - [x] Snapping and timeline zoom
-- [ ] Timeline markers
+- [x] Timeline markers
 
 ### v0.6: Color and audio
 - [ ] Brightness, contrast and saturation

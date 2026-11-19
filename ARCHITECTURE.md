@@ -60,7 +60,13 @@ files readable. Media clip speed is also an optional version 1 field: absent mea
 omitted when saving. It scales source time, not stored timeline duration;
 titles and still images must stay at 1x. The shared audio mixer uses FFmpeg's
 atempo filter for changed speeds, chaining stages outside 0.5x–2x to preserve
-pitch. Media probing and bounded first-frame thumbnails use the `ffmpeg-next` library on
+pitch. Silent spans retain their exact scaled sample positions rather than
+passing through atempo's waveform alignment; active spans are flushed and
+bounded to the source clock at those boundaries. A bounded output tail allows
+this without buffering entire clips. Consumers distinguish a finished audio
+producer from a drained queue so the final buffered samples cannot be lost.
+Audio seeks scale sample offsets before rounding, including sub-frame
+positions. Media probing and bounded first-frame thumbnails use the `ffmpeg-next` library on
 workers. `media/preview.rs` decodes and scales frames off the UI thread,
 maintaining a small frame buffer during playback and seeking to source frames
 after an edit. It also generates three representative thumbnails per video

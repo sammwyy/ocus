@@ -424,9 +424,14 @@ impl FrameReader {
                             i128::from(self.time_base.denominator()) * i128::from(self.fps.1);
                         (base >= 0 && denominator > 0)
                             .then(|| {
+                                // Allow half a container tick for timestamp rounding.
                                 u64::try_from(
-                                    base * i128::from(self.time_base.numerator())
+                                    (base
+                                        * i128::from(self.time_base.numerator())
                                         * i128::from(self.fps.0)
+                                        + i128::from(self.time_base.numerator())
+                                            * i128::from(self.fps.0)
+                                            / 2)
                                         / denominator,
                                 )
                                 .ok()
@@ -961,6 +966,60 @@ mod tests {
                 reader.frame_at(target, &cancelled).unwrap().pixels[0] > 200,
                 white
             );
+        }
+    }
+
+    #[test]
+    fn millisecond_timestamps_do_not_skip_source_frames_at_changed_speeds() {
+        let directory = tempfile::tempdir().unwrap();
+        let original = directory.path().join("original.y4m");
+        let quantized = directory.path().join("quantized.mkv");
+        let mut bytes = b"YUV4MPEG2 W2 H2 F30:1 Ip A1:1 C420jpeg\n".to_vec();
+        for shade in (32..224).step_by(8) {
+            bytes.extend(b"FRAME\n");
+            bytes.extend([shade, shade, shade, shade, 128, 128]);
+        }
+        fs::write(&original, bytes).unwrap();
+        assert!(
+            Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(&original)
+                .args(["-c:v", "ffv1"])
+                .arg(&quantized)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let cancelled = Arc::new(AtomicBool::new(false));
+        for speed in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] {
+            let source = FrameSource {
+                clip_id: 1,
+                path: quantized.clone(),
+                kind: MediaKind::Video,
+                start: 0,
+                source_start: 0,
+                duration: (24.0_f64 / speed) as u64,
+                speed,
+            };
+            let mut reference = FrameReader::open(
+                &FrameSource {
+                    path: original.clone(),
+                    ..source.clone()
+                },
+                0,
+                (30, 1),
+                (2, 2),
+                cancelled.clone(),
+            )
+            .unwrap();
+            let mut layers = VideoLayers::new((30, 1), (2, 2));
+            for position in 0..source.duration {
+                let expected = reference
+                    .frame_at(source.source_frame(position), &cancelled)
+                    .unwrap();
+                let actual = layers.layer_at(&source, position, &cancelled).unwrap();
+                assert_eq!(actual.pixels, expected.pixels, "{speed}x at {position}");
+            }
         }
     }
 

@@ -163,6 +163,11 @@ impl AudioQueue {
         self.done.load(Ordering::Relaxed)
     }
 
+    /// A finished producer with no buffered tail left to consume.
+    pub fn is_drained(&self) -> bool {
+        self.is_done() && self.samples.lock().unwrap().is_empty()
+    }
+
     pub fn clock(&self) -> Clock {
         Clock {
             played: self.played.clone(),
@@ -200,7 +205,7 @@ pub fn feed(
     };
     struct Slot<'a> {
         path: &'a Path,
-        offset: u64,
+        sample_offset: u64,
         reader: Option<TempoReader>,
         speed: f64,
         begin: u64,
@@ -215,8 +220,9 @@ pub fn feed(
             let until = source.start.saturating_add(source.duration).min(plan.end);
             (from < until).then(|| Slot {
                 path: &source.path,
-                offset: source.source_start
-                    + ((from - source.start) as f64 * source.speed).floor() as u64,
+                sample_offset: to_samples(source.source_start)
+                    + ((to_samples(from) - to_samples(source.start)) as f64 * source.speed).floor()
+                        as u64,
                 speed: source.speed,
                 reader: None,
                 begin: to_samples(from),
@@ -243,8 +249,7 @@ pub fn feed(
                 None => {
                     match TempoReader::open(
                         slot.path,
-                        slot.offset,
-                        plan.fps,
+                        slot.sample_offset,
                         slot.speed,
                         ((slot.end - slot.begin) as f64 * slot.speed).ceil() as u64,
                         cancelled.clone(),
@@ -299,69 +304,77 @@ pub fn feed(
 
 struct TempoReader {
     reader: AudioReader,
+    speed: f64,
     filter: Option<ffmpeg::filter::Graph>,
     pending: VecDeque<f32>,
+    filtered: VecDeque<f32>,
+    quiet: Vec<f32>,
+    source_frames: u64,
+    emitted: u64,
     remaining: u64,
-    flushed: bool,
+    exhausted: bool,
 }
 
 impl TempoReader {
     fn open(
         path: &Path,
-        offset: u64,
-        fps: (u32, u32),
+        sample_offset: u64,
         speed: f64,
         remaining: u64,
         cancelled: Arc<AtomicBool>,
     ) -> Result<Option<Self>, String> {
-        let Some(reader) = AudioReader::open(path, offset, fps, cancelled)? else {
+        let Some(reader) = AudioReader::open(path, sample_offset, (RATE, 1), cancelled)? else {
             return Ok(None);
-        };
-        let filter = if speed == 1.0 {
-            None
-        } else {
-            let mut graph = ffmpeg::filter::Graph::new();
-            let buffer = ffmpeg::filter::find("abuffer").ok_or("FFmpeg abuffer is unavailable")?;
-            let sink =
-                ffmpeg::filter::find("abuffersink").ok_or("FFmpeg abuffersink is unavailable")?;
-            graph
-                .add(
-                    &buffer,
-                    "in",
-                    "time_base=1/48000:sample_rate=48000:sample_fmt=flt:channel_layout=stereo",
-                )
-                .map_err(|error| error.to_string())?;
-            graph
-                .add(&sink, "out", "")
-                .map_err(|error| error.to_string())?;
-            let mut out = graph.get("out").ok_or("Missing audio filter sink")?;
-            out.set_sample_format(ffmpeg::format::Sample::F32(
-                ffmpeg::format::sample::Type::Packed,
-            ));
-            out.set_channel_layout(ffmpeg::ChannelLayout::STEREO);
-            out.set_sample_rate(RATE);
-            let spec = if speed < 0.5 {
-                format!("atempo=0.5,atempo={}", speed / 0.5)
-            } else if speed > 2.0 {
-                format!("atempo=2,atempo={}", speed / 2.0)
-            } else {
-                format!("atempo={speed}")
-            };
-            graph
-                .output("in", 0)
-                .and_then(|output| output.input("out", 0))
-                .and_then(|input| input.parse(&spec))
-                .map_err(|error| error.to_string())?;
-            graph.validate().map_err(|error| error.to_string())?;
-            Some(graph)
         };
         Ok(Some(Self {
             reader,
-            filter,
+            speed,
+            filter: None,
             pending: VecDeque::new(),
+            filtered: VecDeque::new(),
+            quiet: Vec::new(),
+            source_frames: 0,
+            emitted: 0,
             remaining,
-            flushed: false,
+            exhausted: false,
         }))
+    }
+
+    fn graph(speed: f64) -> Result<ffmpeg::filter::Graph, String> {
+        let mut graph = ffmpeg::filter::Graph::new();
+        let buffer = ffmpeg::filter::find("abuffer").ok_or("FFmpeg abuffer is unavailable")?;
+        let sink =
+            ffmpeg::filter::find("abuffersink").ok_or("FFmpeg abuffersink is unavailable")?;
+        graph
+            .add(
+                &buffer,
+                "in",
+                "time_base=1/48000:sample_rate=48000:sample_fmt=flt:channel_layout=stereo",
+            )
+            .map_err(|error| error.to_string())?;
+        graph
+            .add(&sink, "out", "")
+            .map_err(|error| error.to_string())?;
+        let mut out = graph.get("out").ok_or("Missing audio filter sink")?;
+        out.set_sample_format(ffmpeg::format::Sample::F32(
+            ffmpeg::format::sample::Type::Packed,
+        ));
+        out.set_channel_layout(ffmpeg::ChannelLayout::STEREO);
+        out.set_sample_rate(RATE);
+        let spec = if speed < 0.5 {
+            format!("atempo=0.5,atempo={}", speed / 0.5)
+        } else if speed > 2.0 {
+            format!("atempo=2,atempo={}", speed / 2.0)
+        } else {
+            format!("atempo={speed}")
+        };
+        graph
+            .output("in", 0)
+            .and_then(|output| output.input("out", 0))
+            .and_then(|input| input.parse(&spec))
+            .map_err(|error| error.to_string())?;
+        graph.validate().map_err(|error| error.to_string())?;
+        Ok(graph)
     }
 
     fn read(
@@ -370,15 +383,121 @@ impl TempoReader {
         frames: usize,
         cancelled: &AtomicBool,
     ) -> Result<(), String> {
-        let Some(filter) = &mut self.filter else {
+        if self.speed == 1.0 {
             self.reader.read(output, frames, cancelled)?;
             return Ok(());
+        }
+        while self.pending.len() < frames * CHANNELS
+            && !self.exhausted
+            && !cancelled.load(Ordering::Relaxed)
+        {
+            let mut samples = Vec::new();
+            self.reader.read(
+                &mut samples,
+                self.remaining.min(CHUNK as u64) as usize,
+                cancelled,
+            )?;
+            self.remaining -= (samples.len() / CHANNELS) as u64;
+            if samples.is_empty() {
+                let quiet = std::mem::take(&mut self.quiet);
+                if self.filter.is_some() {
+                    self.push_audio(&quiet)?;
+                    self.finish_audio()?;
+                } else {
+                    self.push_silence(quiet.len() / CHANNELS);
+                }
+                self.exhausted = true;
+                break;
+            }
+            let mut active = Vec::new();
+            for pair in samples.as_chunks::<CHANNELS>().0 {
+                if pair.iter().all(|sample| sample.abs() <= 0.000001) {
+                    self.quiet.extend(pair);
+                    if self.quiet.len() / CHANNELS >= RATE as usize / 100 {
+                        self.push_audio(&active)?;
+                        active.clear();
+                        self.finish_audio()?;
+                        let quiet = std::mem::take(&mut self.quiet);
+                        self.push_silence(quiet.len() / CHANNELS);
+                    }
+                } else {
+                    let quiet = std::mem::take(&mut self.quiet);
+                    if self.filter.is_some() || !active.is_empty() {
+                        active.extend(quiet);
+                    } else {
+                        self.push_silence(quiet.len() / CHANNELS);
+                    }
+                    active.extend(pair);
+                }
+            }
+            self.push_audio(&active)?;
+            if self.filter.is_none() {
+                let quiet = std::mem::take(&mut self.quiet);
+                self.push_silence(quiet.len() / CHANNELS);
+            }
+            // WSOLA may shift a boundary by a window. Keep its tail until a
+            // silent boundary or EOF can be anchored to the source clock.
+            let available = (self.filtered.len() / CHANNELS).saturating_sub(RATE as usize / 2);
+            let target = (self.source_frames as f64 / self.speed).round() as u64;
+            let count = available.min(target.saturating_sub(self.emitted) as usize);
+            self.pending.extend(self.filtered.drain(..count * CHANNELS));
+            self.emitted += count as u64;
+        }
+        let count = (frames * CHANNELS).min(self.pending.len());
+        output.extend(self.pending.drain(..count));
+        Ok(())
+    }
+
+    fn push_silence(&mut self, frames: usize) {
+        self.source_frames += frames as u64;
+        let target = (self.source_frames as f64 / self.speed).round() as u64;
+        let count = target.saturating_sub(self.emitted) as usize;
+        self.pending
+            .resize(self.pending.len() + count * CHANNELS, 0.0);
+        self.emitted = target;
+    }
+
+    fn push_audio(&mut self, samples: &[f32]) -> Result<(), String> {
+        if samples.is_empty() {
+            return Ok(());
+        }
+        if self.filter.is_none() {
+            self.filter = Some(Self::graph(self.speed)?);
+        }
+        self.source_frames += (samples.len() / CHANNELS) as u64;
+        let mut input = ffmpeg::frame::Audio::new(
+            ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
+            samples.len() / CHANNELS,
+            ffmpeg::ChannelLayout::STEREO,
+        );
+        input.set_rate(RATE);
+        for (frame, pair) in input
+            .plane_mut::<(f32, f32)>(0)
+            .iter_mut()
+            .zip(samples.as_chunks::<CHANNELS>().0)
+        {
+            *frame = (pair[0], pair[1]);
+        }
+        self.filter
+            .as_mut()
+            .unwrap()
+            .get("in")
+            .unwrap()
+            .source()
+            .add(&input)
+            .map_err(|error| error.to_string())?;
+        self.drain_filter()
+    }
+
+    fn drain_filter(&mut self) -> Result<(), String> {
+        let Some(filter) = &mut self.filter else {
+            return Ok(());
         };
-        while self.pending.len() < frames * CHANNELS && !cancelled.load(Ordering::Relaxed) {
+        loop {
             let mut decoded = ffmpeg::frame::Audio::empty();
             match filter.get("out").unwrap().sink().frame(&mut decoded) {
                 Ok(()) => {
-                    self.pending.extend(
+                    self.filtered.extend(
                         decoded
                             .plane::<(f32, f32)>(0)
                             .iter()
@@ -387,50 +506,33 @@ impl TempoReader {
                 }
                 Err(ffmpeg::Error::Eof) => break,
                 Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => {
-                    if self.flushed {
-                        break;
-                    }
-                    let mut samples = Vec::new();
-                    let count = self.remaining.min(CHUNK as u64) as usize;
-                    self.reader.read(&mut samples, count, cancelled)?;
-                    self.remaining = self
-                        .remaining
-                        .saturating_sub((samples.len() / CHANNELS) as u64);
-                    if samples.is_empty() {
-                        filter
-                            .get("in")
-                            .unwrap()
-                            .source()
-                            .flush()
-                            .map_err(|error| error.to_string())?;
-                        self.flushed = true;
-                    } else {
-                        let mut input = ffmpeg::frame::Audio::new(
-                            ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
-                            samples.len() / CHANNELS,
-                            ffmpeg::ChannelLayout::STEREO,
-                        );
-                        input.set_rate(RATE);
-                        for (frame, pair) in input
-                            .plane_mut::<(f32, f32)>(0)
-                            .iter_mut()
-                            .zip(samples.as_chunks::<CHANNELS>().0)
-                        {
-                            *frame = (pair[0], pair[1]);
-                        }
-                        filter
-                            .get("in")
-                            .unwrap()
-                            .source()
-                            .add(&input)
-                            .map_err(|error| error.to_string())?;
-                    }
+                    break;
                 }
                 Err(error) => return Err(error.to_string()),
             }
         }
-        let count = (frames * CHANNELS).min(self.pending.len());
-        output.extend(self.pending.drain(..count));
+        Ok(())
+    }
+
+    fn finish_audio(&mut self) -> Result<(), String> {
+        let Some(filter) = &mut self.filter else {
+            return Ok(());
+        };
+        filter
+            .get("in")
+            .unwrap()
+            .source()
+            .flush()
+            .map_err(|error| error.to_string())?;
+        self.drain_filter()?;
+        let target = (self.source_frames as f64 / self.speed).round() as u64;
+        let count = target
+            .checked_sub(self.emitted)
+            .ok_or("Audio tempo exceeded its source span")? as usize;
+        self.filtered.resize(count * CHANNELS, 0.0);
+        self.pending.append(&mut self.filtered);
+        self.emitted = target;
+        self.filter = None;
         Ok(())
     }
 }
@@ -772,6 +874,21 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn finished_queue_drains_samples_pushed_after_an_empty_poll() {
+        let queue = AudioQueue::new();
+        assert_eq!(queue.pop(), None);
+        assert!(!queue.is_done());
+        assert!(queue.push(&[0.25, -0.25], &AtomicBool::new(false)));
+        queue.finish();
+        assert!(queue.is_done());
+        assert!(!queue.is_drained());
+        assert_eq!(queue.pop(), Some(0.25));
+        assert!(!queue.is_drained());
+        assert_eq!(queue.pop(), Some(-0.25));
+        assert!(queue.is_drained());
+    }
+
+    #[test]
     fn sped_up_audio_handles_empty_and_missing_sources() {
         let queue = Arc::new(AudioQueue::new());
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -797,6 +914,67 @@ mod tests {
                 .unwrap_err()
                 .contains("Cannot open audio source")
         );
+    }
+
+    #[test]
+    fn tempo_keeps_transients_anchored_across_silence_and_seeks() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pulses.wav");
+        assert!(
+            std::process::Command::new("ffmpeg")
+                .args([
+                    "-v", "error", "-f", "lavfi", "-i",
+                    "aevalsrc=if(between(mod(t\\,2)\\,0.5\\,0.6)\\,0.5*sin(2*PI*440*t)\\,0):s=48000:d=20",
+                    "-c:a", "pcm_f32le",
+                ])
+                .arg(&path)
+                .status().unwrap().success()
+        );
+        for speed in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] {
+            for start in [0, 27] {
+                let duration = (590.0_f64 / speed).floor() as u64;
+                let plan = Arc::new(AudioPlan {
+                    sources: vec![AudioSource {
+                        speed,
+                        path: path.clone(),
+                        start: 0,
+                        source_start: 7,
+                        duration,
+                        volume: 1.0,
+                    }],
+                    end: duration,
+                    fps: (30, 1),
+                });
+                let samples = play(&plan, start, None);
+                let mut onsets = Vec::new();
+                let mut quiet = RATE as usize;
+                for (index, pair) in samples.as_chunks::<CHANNELS>().0.iter().enumerate() {
+                    if pair[0].abs() > 0.02 {
+                        if quiet >= RATE as usize / 20 {
+                            onsets.push(index as f64 / f64::from(RATE));
+                        }
+                        quiet = 0;
+                    } else {
+                        quiet += 1;
+                    }
+                }
+                let expected: Vec<_> = (0..10)
+                    .map(|i| (0.5 + f64::from(i) * 2.0 - 7.0 / 30.0) / speed - start as f64 / 30.0)
+                    .filter(|time| *time > 0.0)
+                    .collect();
+                assert_eq!(
+                    onsets.len(),
+                    expected.len(),
+                    "{speed}x at {start}: {onsets:?}"
+                );
+                for (onset, expected) in onsets.iter().zip(expected) {
+                    assert!(
+                        (onset - expected).abs() < 1.0 / 30.0,
+                        "{speed}x at {start}: onset {onset}, expected {expected}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1068,7 +1246,7 @@ mod tests {
                         loud += 1;
                     }
                 }
-                None if queue.is_done() => break,
+                None if queue.is_drained() => break,
                 None => std::thread::yield_now(),
             }
         }
@@ -1226,7 +1404,7 @@ mod tests {
         loop {
             let left = buffered.take().or_else(|| queue.pop());
             match left {
-                None if queue.is_done() => break,
+                None if queue.is_drained() => break,
                 None => std::thread::yield_now(),
                 Some(left) => match queue.pop() {
                     Some(right) => {
@@ -1239,7 +1417,7 @@ mod tests {
                     }
                     None => {
                         buffered = Some(left);
-                        if queue.is_done() {
+                        if queue.is_drained() {
                             break;
                         }
                     }
@@ -1428,7 +1606,7 @@ mod tests {
                         cancelled.store(true, Ordering::Relaxed);
                     }
                 }
-                None if queue.is_done() => break,
+                None if queue.is_drained() => break,
                 None => std::thread::yield_now(),
             }
         }

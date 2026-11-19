@@ -478,7 +478,7 @@ impl AudioEncoder {
                     if let Some(right) = queue.pop() {
                         break right;
                     }
-                    if queue.is_done() {
+                    if queue.is_drained() {
                         return Err("Incomplete stereo audio".into());
                     }
                     thread::yield_now();
@@ -488,7 +488,7 @@ impl AudioEncoder {
                 if self.pending.len() == self.encoder.frame_size() as usize * 2 {
                     self.encode(output)?;
                 }
-            } else if queue.is_done() {
+            } else if queue.is_drained() {
                 return Err("Audio ended before the timeline".into());
             } else {
                 thread::yield_now();

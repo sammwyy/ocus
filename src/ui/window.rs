@@ -8,8 +8,8 @@ use super::controls::{
 use super::edits::ClipRef;
 use super::interaction::{Action, DragPayload, MenuState};
 use super::state::{
-    ExportPage, MediaView, SequenceContent, SettingsPage, SourceRange, TitleGesture, ZOOM_SECONDS,
-    media_frames,
+    ExportPage, MediaView, PlaybackMonitor, SequenceContent, SettingsPage, SourceRange,
+    TitleGesture, ZOOM_SECONDS, media_frames,
 };
 use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
 use super::{MediaFilter, Sidebar, UiState};
@@ -878,7 +878,11 @@ fn transport(
                         Some(Box::new(Flex::row().width(4.0))),
                         Some(play_button(
                             playing,
-                            hint("Play / pause source", "Play / pause sequence", "Space / K"),
+                            if program {
+                                Help::new("Play / pause sequence").shortcut("Space / K")
+                            } else {
+                                Help::new("Play / pause source").shortcut("Space")
+                            },
                             can_play || playing,
                             state,
                             toggle,
@@ -2490,19 +2494,10 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             },
             |state, target| {
                 if state.program.position.peek() != target {
-                    if state.program.playing.peek() {
-                        state.pause();
-                    }
-                    state.focus_frame(target);
+                    state.seek(target);
                 }
             },
-            |state| {
-                if state.program.playing.peek() {
-                    state.pause();
-                } else {
-                    state.play();
-                }
-            },
+            |state| state.toggle_playback_monitor(PlaybackMonitor::Program),
         ),
     );
 
@@ -2602,21 +2597,8 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 color: VIDEO,
                 compact: narrow,
             },
-            |state, target| {
-                if state.source.position.peek() != target {
-                    if state.source.playing.peek() {
-                        state.pause_source();
-                    }
-                    state.focus_source_frame(target);
-                }
-            },
-            |state| {
-                if state.source.playing.peek() {
-                    state.pause_source();
-                } else {
-                    state.play_source();
-                }
-            },
+            UiState::seek_source,
+            |state| state.toggle_playback_monitor(PlaybackMonitor::Source),
         ),
     );
 
@@ -4314,14 +4296,14 @@ mod tests {
     #[test]
     fn source_transport_does_not_advertise_sequence_keyboard_shortcuts() {
         let state = UiState::new();
-        let shortcut_count = |painter: &TestPainter| {
+        let shortcut_count = |painter: &TestPainter, shortcut| {
             painter
                 .labels
                 .iter()
-                .filter(|label| *label == "Space / K")
+                .filter(|label| *label == shortcut)
                 .count()
         };
-        let baseline = shortcut_count(&render(&state, 1280.0, 760.0));
+        let baseline = render(&state, 1280.0, 760.0);
         let source = state.tooltip_controller(("Play / pause source", 0));
         source.focus(true);
         let painter = render(&state, 1280.0, 760.0);
@@ -4331,13 +4313,23 @@ mod tests {
                 .iter()
                 .any(|label| label == "Play / pause source")
         );
-        assert_eq!(shortcut_count(&painter), baseline);
+        assert_eq!(
+            shortcut_count(&painter, "Space"),
+            shortcut_count(&baseline, "Space") + 1
+        );
+        assert_eq!(
+            shortcut_count(&painter, "Space / K"),
+            shortcut_count(&baseline, "Space / K")
+        );
         source.focus(false);
         state
             .tooltip_controller(("Play / pause sequence", 0))
             .focus(true);
         let painter = render(&state, 1280.0, 760.0);
-        assert_eq!(shortcut_count(&painter), baseline + 1);
+        assert_eq!(
+            shortcut_count(&painter, "Space / K"),
+            shortcut_count(&baseline, "Space / K") + 1
+        );
     }
 
     #[test]

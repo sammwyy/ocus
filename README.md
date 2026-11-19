@@ -81,8 +81,9 @@ Keyboard shortcuts work whenever a text field is not focused: Ctrl+Z /
 Ctrl+Shift+Z (or Ctrl+Y) undo and redo, Delete or Backspace removes the
 selection (Shift ripple-deletes), Ctrl+C/X/V/D copy, cut, paste at the playhead
 and duplicate, S or Ctrl+K splits at the playhead, Ctrl+A selects all, Esc
-clears the selection or cancels a drag, Space or K plays and pauses, the
-arrows step a frame (Shift: one second, Alt: nudge the selection), Home/End
+clears the selection or cancels a drag, Space plays or pauses the last monitor
+used for playback or seeking (Program by default), K pauses playback or starts
+Program, the arrows step a frame (Shift: one second, Alt: nudge the selection), Home/End
 jump, +/− zoom, T adds a title, and Ctrl+N/O/S/Shift+S/I/E run the file
 actions. Hover or keyboard-focus an icon-only control to see what it does;
 its tooltip includes a shortcut when one is available for that action. Source

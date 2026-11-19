@@ -198,9 +198,19 @@ impl Geometry {
         self.top
     }
 
-    pub(super) fn lane_visible(&self, index: usize) -> bool {
+    pub(super) fn clip_visible(&self, index: usize, start: u64, duration: u64) -> bool {
         let lane = self.lanes[index];
-        lane.y < self.bottom && lane.y + lane.height > self.top
+        lane.y < self.bottom
+            && lane.y + lane.height > self.top
+            && self
+                .clipped_span(self.x(start), self.x(start.saturating_add(duration)))
+                .is_some()
+    }
+
+    fn clipped_span(&self, left: f32, right: f32) -> Option<(f32, f32)> {
+        let left = left.max(self.left);
+        let right = right.min(self.right());
+        (right - left >= 1.0).then_some((left, right))
     }
 
     fn x(&self, frame: u64) -> f32 {
@@ -664,17 +674,17 @@ impl TimelineView {
         strip: f32,
     ) {
         let linked = clip.linked_audio && strip > 0.0;
+        let x = geometry.x(clip.start);
+        let end = geometry.x(clip.start.saturating_add(clip.duration));
+        let Some((left, right)) = geometry.clipped_span(x, end) else {
+            return;
+        };
         let full = Rect {
-            x: geometry.x(clip.start),
+            x,
             y: lane.y + 2.0,
-            width: geometry.x(clip.start.saturating_add(clip.duration)) - geometry.x(clip.start),
+            width: end - x,
             height: lane.height - strip - if linked { 2.0 } else { 4.0 },
         };
-        let left = full.x.max(geometry.left);
-        let right = (full.x + full.width).min(geometry.right());
-        if right - left < 1.0 {
-            return;
-        }
         let body = Rect {
             x: left,
             width: (right - left).max(2.0),
@@ -1482,6 +1492,25 @@ impl Widget for TimelineView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storyboard_visibility_excludes_subpixel_clips_and_hidden_lanes() {
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: HEADER_WIDTH + 100.0,
+            height: 62.0,
+        };
+        let geometry = Geometry::new(rect, &[1.0, 1.0], 100, 1000, 0.0);
+        assert!(!geometry.clip_visible(0, 100, 9));
+        assert!(!geometry.clip_visible(0, 80, 25));
+        assert!(geometry.clip_visible(0, 90, 30));
+        assert!(!geometry.clip_visible(1, 100, 20));
+
+        let scrolled = Geometry::new(rect, &[1.0, 1.0], 100, 1000, 35.0);
+        assert!(!scrolled.clip_visible(0, 100, 20));
+        assert!(scrolled.clip_visible(1, 100, 20));
+    }
 
     #[test]
     fn edge_hit_keeps_narrow_clip_body_movable() {

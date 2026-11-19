@@ -114,46 +114,38 @@ fn storyboard_requests(
     cache: &mut HashMap<StoryboardKey, Storyboard>,
     recent: &mut Vec<StoryboardKey>,
 ) -> Vec<StoryboardKey> {
-    let live: HashSet<_> = keys.iter().map(|(key, _)| key.clone()).collect();
-    cache.retain(|key, _| live.contains(key));
-    recent.retain(|key| cache.contains_key(key));
+    let live: HashSet<_> = keys.iter().map(|(key, _)| key).collect();
+    recent.retain(|key| live.contains(key) && cache.contains_key(key));
     let visible: HashSet<_> = keys
         .iter()
         .filter(|(_, visible)| *visible)
-        .map(|(key, _)| key.clone())
+        .map(|(key, _)| key)
         .collect();
+    // On-screen ranges may overflow the cache; off-screen retention never does.
+    let capacity = MAX_STORYBOARDS.max(visible.len());
     let mut selected = Vec::new();
     let mut seen = HashSet::new();
     for key in keys
         .iter()
         .map(|(key, _)| key)
-        .filter(|key| visible.contains(*key) && cache.contains_key(*key))
-        .chain(
-            keys.iter()
-                .map(|(key, _)| key)
-                .filter(|key| visible.contains(*key)),
-        )
+        .filter(|key| visible.contains(*key))
         .chain(recent.iter().rev())
-        .chain(
-            keys.iter()
-                .map(|(key, _)| key)
-                .filter(|key| cache.contains_key(*key)),
-        )
         .chain(keys.iter().map(|(key, _)| key))
     {
         if seen.insert(key.clone()) {
             selected.push(key.clone());
-            if selected.len() == MAX_STORYBOARDS {
+            if selected.len() == capacity {
                 break;
             }
         }
     }
-    cache.retain(|key, _| selected.contains(key));
-    recent.retain(|key| selected.contains(key) && !visible.contains(key));
-    for key in &selected {
-        if !recent.contains(key) && !visible.contains(key) {
-            recent.insert(0, key.clone());
-        }
+    cache.retain(|key, _| seen.contains(key));
+    recent.retain(|key| seen.contains(key) && !visible.contains(key));
+    for key in selected
+        .iter()
+        .filter(|key| !visible.contains(*key) && !cache.contains_key(*key))
+    {
+        recent.insert(0, key.clone());
     }
     recent.extend(
         selected
@@ -1546,7 +1538,6 @@ impl UiState {
             project.settings().frame_rate.denominator,
         );
         let start = self.timeline_start.peek();
-        let end = start.saturating_add(self.visible_frames());
         let weights: Vec<_> = project
             .tracks()
             .iter()
@@ -1586,9 +1577,7 @@ impl UiState {
                         duration: clip.duration_frames,
                         fps,
                     },
-                    geometry.lane_visible(index)
-                        && clip.start_frame < end
-                        && clip.start_frame.saturating_add(clip.duration_frames) > start,
+                    geometry.clip_visible(index, clip.start_frame, clip.duration_frames),
                 ))
             })
             .collect();
@@ -3255,7 +3244,74 @@ mod tests {
     }
 
     #[test]
+    fn storyboard_loads_every_visible_range_and_trims_overflow_when_hidden() {
+        let mut keys = storyboard_ranges();
+        for (_, visible) in &mut keys {
+            *visible = true;
+        }
+        let mut cache = HashMap::new();
+        let mut recent = Vec::new();
+        let requests = storyboard_requests(&keys, &mut cache, &mut recent);
+        println!("100 visible ranges: {} queued", requests.len());
+        assert!(requests.iter().eq(keys.iter().map(|(key, _)| key)));
+        for key in requests {
+            cache.insert(key, Arc::new(Vec::new()));
+        }
+        assert!(storyboard_requests(&keys, &mut cache, &mut recent).is_empty());
+
+        for (_, visible) in &mut keys[..90] {
+            *visible = false;
+        }
+        assert!(storyboard_requests(&keys, &mut cache, &mut recent).is_empty());
+        assert_eq!(cache.len(), MAX_STORYBOARDS);
+        assert!(keys[90..].iter().all(|(key, _)| cache.contains_key(key)));
+        assert_eq!(recent.len(), MAX_STORYBOARDS);
+        println!("10 visible ranges after zoom: {} retained", cache.len());
+    }
+
+    #[test]
+    fn storyboard_does_not_warm_hidden_ranges_past_the_initial_budget() {
+        let mut keys = storyboard_ranges();
+        for (_, visible) in &mut keys {
+            *visible = false;
+        }
+        keys[90].1 = true;
+        let mut cache = HashMap::new();
+        let mut recent = Vec::new();
+        let requests = storyboard_requests(&keys, &mut cache, &mut recent);
+        cache.insert(keys[90].0.clone(), Arc::new(Vec::new()));
+        keys[90].1 = false;
+        assert_eq!(requests.first(), Some(&keys[90].0));
+        assert_eq!(requests.len(), MAX_STORYBOARDS);
+        let requests = storyboard_requests(&keys, &mut cache, &mut recent);
+        assert!(
+            requests
+                .iter()
+                .eq(keys[..MAX_STORYBOARDS - 1].iter().map(|(key, _)| key))
+        );
+    }
+
+    #[test]
     fn storyboard_viewport_scroll_and_zoom_request_later_clip_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("video.mkv");
+        assert!(
+            std::process::Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=32x18:rate=30:duration=100",
+                    "-c:v",
+                    "ffv1",
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
         let state = UiState::new();
         state.timeline_rect.set(Rect {
             x: 0.0,
@@ -3265,7 +3321,7 @@ mod tests {
         });
         assert!(state.edit(Command::ImportMedia(Media {
             id: 1,
-            path: "video.mp4".into(),
+            path,
             kind: MediaKind::Video,
             duration_us: Some(100_000_000),
             has_audio: false,
@@ -3305,8 +3361,30 @@ mod tests {
         assert!(state.storyboard_requests().is_empty());
         assert_eq!(state.storyboards.borrow().len(), MAX_STORYBOARDS);
         state.zoom_to_fit();
-        assert!(state.storyboard_requests().is_empty());
-        assert_eq!(state.storyboards.borrow().len(), MAX_STORYBOARDS);
+        let requests = state.storyboard_requests();
+        assert_eq!(requests.len(), 100 - MAX_STORYBOARDS);
+        let range = requests
+            .iter()
+            .find(|key| key.source_start == 89 * 30)
+            .unwrap();
+        let frames = storyboard(range, Arc::new(AtomicBool::new(false))).unwrap();
+        assert_eq!(frames.len(), 3);
+        assert!(
+            frames
+                .iter()
+                .all(|frame| (frame.width, frame.height) == (160, 90))
+        );
+        println!(
+            "Zoom to Fit decoded {} real frames for clip 90",
+            frames.len()
+        );
+        for key in requests {
+            state
+                .storyboards
+                .borrow_mut()
+                .insert(key, Arc::new(Vec::new()));
+        }
+        assert_eq!(state.storyboards.borrow().len(), 100);
         state.missing_media.set(HashSet::from([1]));
         assert!(state.storyboard_requests().is_empty());
         assert!(state.storyboards.borrow().is_empty());
@@ -3324,11 +3402,8 @@ mod tests {
         let mut cache = HashMap::new();
         let mut recent = Vec::new();
         let requests = storyboard_requests(&keys, &mut cache, &mut recent);
-        assert_eq!(requests.len(), MAX_STORYBOARDS);
-        assert_eq!(
-            requests.iter().collect::<HashSet<_>>().len(),
-            MAX_STORYBOARDS
-        );
+        assert_eq!(requests.len(), 100);
+        assert_eq!(requests.iter().collect::<HashSet<_>>().len(), 100);
         // A failed decode leaves no cache entry and can be requested again.
         assert_eq!(
             storyboard_requests(&keys, &mut cache, &mut recent),

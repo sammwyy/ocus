@@ -54,6 +54,11 @@ pub(crate) fn split_tracks(
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
+    SetClipLut {
+        track_id: u64,
+        clip_id: u64,
+        path: Option<std::path::PathBuf>,
+    },
     SetTransitionOut {
         track_id: u64,
         clip_id: u64,
@@ -133,6 +138,11 @@ pub enum Command {
         clip_id: u64,
         fade_in_frames: u64,
         fade_out_frames: u64,
+    },
+    SetClipNoiseReduction {
+        track_id: u64,
+        clip_id: u64,
+        enabled: bool,
     },
     SetTitle {
         track_id: u64,
@@ -409,7 +419,9 @@ impl Editor {
             | Command::Trim { track_id, .. }
             | Command::SetClipAudio { track_id, .. }
             | Command::SetClipColor { track_id, .. }
+            | Command::SetClipLut { track_id, .. }
             | Command::SetClipFades { track_id, .. }
+            | Command::SetClipNoiseReduction { track_id, .. }
             | Command::SetTransition { track_id, .. }
             | Command::SetTransitionOut { track_id, .. }
             | Command::SetTitle { track_id, .. } => editable(*track_id),
@@ -558,7 +570,11 @@ impl Editor {
                                 && self.project.media_clip_fits(media, kind, &clip)
                         }),
                 };
-                if !compatible {
+                if !compatible
+                    || (clip.lut.is_some()
+                        && (kind != TrackKind::Video
+                            || !matches!(clip.content, ClipContent::Media { .. })))
+                {
                     return None;
                 }
                 let track = self.project.tracks.iter_mut().find(|t| t.id == track_id)?;
@@ -866,6 +882,51 @@ impl Editor {
                 clip.muted = muted;
                 Some(inverse)
             }
+            Command::SetClipNoiseReduction {
+                track_id,
+                clip_id,
+                enabled,
+            } => {
+                let track = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.id == track_id)?;
+                let clip = track.clips.iter_mut().find(|clip| clip.id == clip_id)?;
+                if !(track.kind == TrackKind::Audio || clip.linked_audio)
+                    || clip.noise_reduction == enabled
+                {
+                    return None;
+                }
+                Some(Command::SetClipNoiseReduction {
+                    track_id,
+                    clip_id,
+                    enabled: std::mem::replace(&mut clip.noise_reduction, enabled),
+                })
+            }
+            Command::SetClipLut {
+                track_id,
+                clip_id,
+                path,
+            } => {
+                let track = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.id == track_id)?;
+                if track.kind != TrackKind::Video {
+                    return None;
+                }
+                let clip = track.clips.iter_mut().find(|clip| clip.id == clip_id)?;
+                if !matches!(clip.content, ClipContent::Media { .. }) || clip.lut == path {
+                    return None;
+                }
+                Some(Command::SetClipLut {
+                    track_id,
+                    clip_id,
+                    path: std::mem::replace(&mut clip.lut, path),
+                })
+            }
             Command::SetTransitionOut {
                 track_id,
                 clip_id,
@@ -1064,6 +1125,7 @@ mod tests {
         use crate::timeline::{Clip, ClipContent, Title};
         let mut editor = Editor::new(Project::new("Locked"));
         let clip = Clip {
+            lut: None,
             color: ColorAdjust::default(),
             transition: None,
             transition_out: None,
@@ -1076,6 +1138,7 @@ mod tests {
             fade_in_frames: 0,
             fade_out_frames: 0,
             muted: false,
+            noise_reduction: false,
             linked_audio: false,
         };
         assert!(editor.apply(Command::InsertClip {
@@ -1259,8 +1322,10 @@ mod tests {
             source_start_frame: 0,
             duration_frames: 30,
             content: ClipContent::Media { media_id: 1 },
+            lut: None,
             volume: 1.0,
             muted: false,
+            noise_reduction: false,
             linked_audio: false,
             color: ColorAdjust::default(),
             transition: None,
@@ -1485,6 +1550,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1495,6 +1561,7 @@ mod tests {
                 fade_in_frames: 0,
                 fade_out_frames: 0,
                 muted: false,
+                noise_reduction: false,
                 transition: None,
                 linked_audio: true,
                 color: Default::default(),
@@ -1552,6 +1619,7 @@ mod tests {
             })));
             let track_id = if kind == MediaKind::Audio { 2 } else { 0 };
             let clip = Clip {
+                lut: None,
                 id: 1,
                 start_frame: 100,
                 source_start_frame: 0,
@@ -1564,6 +1632,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             };
             assert!(editor.apply(Command::InsertClip {
@@ -1630,6 +1699,7 @@ mod tests {
             has_audio: false
         })));
         let clip = Clip {
+            lut: None,
             id: 1,
             start_frame: 40,
             source_start_frame: 20,
@@ -1642,6 +1712,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         };
         assert!(editor.apply(Command::InsertClip {
@@ -1703,6 +1774,7 @@ mod tests {
         use crate::timeline::Title;
         let mut editor = Editor::new(Project::new("Film"));
         let title = Clip {
+            lut: None,
             id: 1,
             start_frame: 0,
             source_start_frame: 0,
@@ -1723,6 +1795,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         };
         assert!(editor.apply(Command::InsertClip {
@@ -1759,6 +1832,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1771,6 +1845,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             },
         }));
@@ -1949,9 +2024,89 @@ mod tests {
     }
 
     #[test]
+    fn clip_luts_validate_round_trip_and_undo() {
+        let mut editor = Editor::new(Project::new("LUT"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 4,
+            path: "image.png".into(),
+            kind: MediaKind::Image,
+            duration_us: None,
+            has_audio: false,
+        })));
+        let clip: Clip = serde_json::from_value(serde_json::json!({
+            "id": 1, "start_frame": 0, "source_start_frame": 0,
+            "duration_frames": 10, "content": {"media": {"media_id": 4}},
+            "volume": 1.0, "muted": false
+        }))
+        .unwrap();
+        assert!(clip.lut.is_none());
+        assert!(!serde_json::to_string(&clip).unwrap().contains("lut"));
+        assert!(editor.apply(Command::InsertClip { track_id: 0, clip }));
+        let set = |track_id, clip_id, path| Command::SetClipLut {
+            track_id,
+            clip_id,
+            path,
+        };
+        let path = Some(std::path::PathBuf::from("look.cube"));
+        assert!(!editor.apply(set(99, 1, path.clone())));
+        assert!(!editor.apply(set(0, 99, path.clone())));
+        assert!(!editor.apply(set(0, 1, None)));
+        assert!(editor.apply(Command::SetTrackLocked {
+            track_id: 0,
+            locked: true
+        }));
+        let locked = editor.project().clone();
+        assert!(!editor.apply(set(0, 1, path.clone())));
+        assert_eq!(editor.project(), &locked);
+        assert!(editor.apply(Command::SetTrackLocked {
+            track_id: 0,
+            locked: false
+        }));
+        assert!(editor.apply(set(0, 1, path.clone())));
+        assert!(!editor.apply(set(0, 1, path.clone())));
+        let json = crate::project::format::to_json(editor.project()).unwrap();
+        assert_eq!(
+            crate::project::format::from_json(&json).unwrap(),
+            *editor.project()
+        );
+        assert!(editor.undo());
+        assert!(editor.project().tracks()[0].clips[0].lut.is_none());
+        assert!(editor.redo());
+        assert_eq!(editor.project().tracks()[0].clips[0].lut, path);
+        assert!(editor.apply(set(0, 1, None)));
+        assert!(editor.undo());
+        assert!(editor.apply(Command::Split {
+            track_id: 0,
+            clip_id: 1,
+            at_frame: 5,
+            new_id: 2
+        }));
+        assert!(
+            editor.project().tracks()[0]
+                .clips
+                .iter()
+                .all(|clip| clip.lut == path)
+        );
+        let mut title = editor.project().tracks()[0].clips[0].clone();
+        title.id = 3;
+        title.content = ClipContent::Title(Title::default());
+        assert!(!editor.apply(Command::InsertClip {
+            track_id: 1,
+            clip: title.clone()
+        }));
+        title.lut = None;
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 1,
+            clip: title
+        }));
+        assert!(!editor.apply(set(1, 3, path)));
+    }
+
+    #[test]
     fn clip_insertion_rejects_invalid_ranges_overlap_and_missing_media() {
         let mut editor = Editor::new(Project::new("Film"));
         let title = Clip {
+            lut: None,
             id: 1,
             start_frame: 10,
             source_start_frame: 0,
@@ -1972,6 +2127,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         };
         let insert =
@@ -2044,6 +2200,7 @@ mod tests {
     fn split_fixture() -> Vec<Track> {
         let mut project = Project::new("Split");
         let clip = Clip {
+            lut: None,
             id: 1,
             start_frame: 10,
             source_start_frame: 40,
@@ -2056,6 +2213,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         };
         project.tracks[0].clips = vec![
@@ -2139,6 +2297,7 @@ mod tests {
     fn split_move_trim_and_ripple_delete_are_atomic_and_undoable() {
         let mut editor = Editor::new(Project::new("Film"));
         let make_clip = |id, start_frame| Clip {
+            lut: None,
             id,
             start_frame,
             source_start_frame: 0,
@@ -2159,6 +2318,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         };
         for (id, start_frame, track_id) in [(1, 0, 0), (2, 30, 0), (3, 30, 1)] {
@@ -2236,6 +2396,7 @@ mod tests {
             assert!(editor.apply(Command::InsertClip {
                 track_id,
                 clip: Clip {
+                    lut: None,
                     id,
                     start_frame,
                     duration_frames,
@@ -2252,6 +2413,7 @@ mod tests {
                     transition_out: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
+                    noise_reduction: false,
                     linked_audio: id == 2,
                 },
             }));
@@ -2297,6 +2459,7 @@ mod tests {
             has_audio: true,
         })));
         let title = |id, start_frame, duration_frames| Clip {
+            lut: None,
             id,
             start_frame,
             source_start_frame: 0,
@@ -2309,6 +2472,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         };
         for (track_id, clip) in [
@@ -2322,6 +2486,7 @@ mod tests {
             (
                 2,
                 Clip {
+                    lut: None,
                     id: 6,
                     start_frame: 0,
                     source_start_frame: 0,
@@ -2334,6 +2499,7 @@ mod tests {
                     transition_out: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
+                    noise_reduction: false,
                     linked_audio: false,
                 },
             ),
@@ -2392,6 +2558,7 @@ mod tests {
             assert!(editor.apply(Command::InsertClip {
                 track_id,
                 clip: Clip {
+                    lut: None,
                     id,
                     start_frame,
                     source_start_frame: 0,
@@ -2404,6 +2571,7 @@ mod tests {
                     transition_out: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
+                    noise_reduction: false,
                     linked_audio: false,
                 },
             }));
@@ -2427,6 +2595,7 @@ mod tests {
             has_audio: true,
         })));
         let clip = Clip {
+            lut: None,
             id: 2,
             start_frame: 0,
             source_start_frame: 0,
@@ -2439,6 +2608,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         };
         assert!(!editor.apply(Command::InsertClip {
@@ -2471,6 +2641,7 @@ mod tests {
         assert!(!editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Clip {
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -2483,6 +2654,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             },
         }));
@@ -2494,6 +2666,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Clip {
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -2506,6 +2679,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             },
         }));
@@ -2532,6 +2706,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Clip {
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -2544,6 +2719,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
             },
         }));

@@ -117,11 +117,11 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 
 ### v0.6: Color and audio
 - [x] Brightness, contrast and saturation
-- [ ] LUT support (.cube)
+- [x] LUT support (.cube)
 - [x] Audio waveforms on the timeline and in the Source monitor
 - [x] Audio fade in and fade out
 - [x] Loudness normalization
-- [ ] Noise reduction
+- [x] Noise reduction
 
 ### v0.7: Subtitles and keyframes
 - [ ] Import SRT files

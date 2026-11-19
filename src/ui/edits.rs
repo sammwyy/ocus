@@ -243,6 +243,7 @@ pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Op
     Some((
         track.id,
         Clip {
+            lut: None,
             id,
             start_frame,
             source_start_frame: 0,
@@ -264,6 +265,7 @@ pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Op
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         },
     ))
@@ -394,6 +396,7 @@ pub(crate) fn insert_media(
         None => track.clips.iter().map(clip_end).max().unwrap_or(0),
     };
     let clip = Clip {
+        lut: None,
         id: next_clip_id(project).ok_or("Clip ID limit reached")?,
         start_frame: start,
         source_start_frame: 0,
@@ -406,6 +409,7 @@ pub(crate) fn insert_media(
         transition_out: None,
         fade_in_frames: 0,
         fade_out_frames: 0,
+        noise_reduction: false,
         linked_audio: media.kind == MediaKind::Video && media.has_audio,
     };
     let end = start.checked_add(duration).ok_or("Clip range overflows")?;
@@ -513,9 +517,14 @@ pub(crate) fn detach_audio(project: &Project, selection: &[ClipRef]) -> Option<P
             continue;
         };
         clip.linked_audio = false;
-        detached.push(Clip { id, ..clip.clone() });
+        detached.push(Clip {
+            id,
+            lut: None,
+            ..clip.clone()
+        });
         clip.fade_in_frames = 0;
         clip.fade_out_frames = 0;
+        clip.noise_reduction = false;
         kept.push((track_id, clip_id));
         id = id.checked_add(1)?;
     }
@@ -597,6 +606,7 @@ pub(crate) fn link_audio(project: &Project, selection: &[ClipRef]) -> Option<Pla
         clip.muted = sound.muted;
         clip.fade_in_frames = sound.fade_in_frames;
         clip.fade_out_frames = sound.fade_out_frames;
+        clip.noise_reduction = sound.noise_reduction;
     }
     Some(Planned {
         tracks,
@@ -612,6 +622,7 @@ mod tests {
 
     fn title(id: u64, start_frame: u64) -> Clip {
         Clip {
+            lut: None,
             id,
             start_frame,
             source_start_frame: 0,
@@ -632,6 +643,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         }
     }
@@ -747,6 +759,43 @@ mod tests {
     }
 
     #[test]
+    fn copied_video_keeps_lut_and_detached_audio_drops_it() {
+        let mut editor = Editor::new(Project::new("LUT copies"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "scene.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(3_000_000),
+            has_audio: true
+        })));
+        let inserted = insert_media(editor.project(), 1, Some((0, 0))).unwrap();
+        assert!(editor.apply(inserted.command));
+        let path = Some(std::path::PathBuf::from("look.cube"));
+        assert!(editor.apply(Command::SetClipLut {
+            track_id: 0,
+            clip_id: 1,
+            path: path.clone()
+        }));
+        let copied = CopiedClip {
+            track_id: 0,
+            track_kind: TrackKind::Video,
+            clip: editor.project().tracks()[0].clips[0].clone(),
+        };
+        let pasted = paste_clips(editor.project(), &[copied], 90).unwrap();
+        assert!(editor.apply(Command::ReplaceTracks(pasted.tracks)));
+        assert!(
+            editor.project().tracks()[0]
+                .clips
+                .iter()
+                .all(|clip| clip.lut == path)
+        );
+        let detached = detach_audio(editor.project(), &[(0, 1)]).unwrap();
+        assert!(editor.apply(Command::ReplaceTracks(detached.tracks)));
+        assert!(editor.project().tracks()[2].clips[0].lut.is_none());
+        assert_eq!(editor.project().tracks()[0].clips[0].lut, path);
+    }
+
+    #[test]
     fn ripple_selection_across_tracks_uses_original_overlapping_ranges() {
         let project = project_with(&[
             (0, title(1, 20)),
@@ -854,6 +903,11 @@ mod tests {
             fade_in_frames: 15,
             fade_out_frames: 15,
         }));
+        assert!(editor.apply(Command::SetClipNoiseReduction {
+            track_id: 1,
+            clip_id: 1,
+            enabled: true,
+        }));
 
         let split = split_clips(editor.project(), &[(1, 1)], 75).unwrap();
         assert!(editor.apply(Command::ReplaceTracks(split)));
@@ -862,6 +916,7 @@ mod tests {
         let rippled = ripple_remove_clips(editor.project(), &[(1, 2)]).unwrap();
         assert!(editor.apply(Command::ReplaceTracks(rippled)));
         let pieces = &editor.project().tracks()[1].clips;
+        assert!(pieces.iter().all(|c| c.noise_reduction));
         assert_eq!(
             pieces
                 .iter()
@@ -886,6 +941,7 @@ mod tests {
                 .iter()
                 .all(|clip| clip.fade_in_frames == 0 && clip.fade_out_frames == 0)
         );
+        assert!(audio.iter().all(|c| c.noise_reduction));
         assert_eq!(
             audio
                 .iter()
@@ -897,7 +953,7 @@ mod tests {
             editor.project().tracks()[1]
                 .clips
                 .iter()
-                .all(|c| !c.linked_audio)
+                .all(|c| !c.linked_audio && !c.noise_reduction)
         );
         assert_eq!(detached.selection.len(), 4);
 
@@ -917,7 +973,7 @@ mod tests {
             editor.project().tracks()[1]
                 .clips
                 .iter()
-                .all(|c| c.linked_audio)
+                .all(|c| c.linked_audio && c.noise_reduction)
         );
     }
 

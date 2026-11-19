@@ -69,7 +69,7 @@ enum DropAction {
         placement: (u64, u64),
     },
     Replace {
-        command: Command,
+        command: Box<Command>,
         selection: Vec<ClipRef>,
     },
     Nothing,
@@ -958,7 +958,7 @@ impl UiState {
                         ),
                         valid: true,
                         action: DropAction::Replace {
-                            command: Command::ReplaceTracks(plan.tracks),
+                            command: Box::new(Command::ReplaceTracks(plan.tracks)),
                             selection: plan.selection,
                         },
                     },
@@ -993,7 +993,7 @@ impl UiState {
                 self.insert_media_at(media_id, Some(placement));
             }
             DropAction::Replace { command, selection } => {
-                if self.edit(command) {
+                if self.edit(*command) {
                     self.select_clips(selection);
                 }
             }
@@ -1883,6 +1883,7 @@ mod tests {
                 clip: Clip {
                     transition_out: None,
                     id: track_id + 1,
+                    lut: None,
                     color: Default::default(),
                     transition: None,
                     start_frame: 0,
@@ -1893,6 +1894,7 @@ mod tests {
                     fade_in_frames: 0,
                     fade_out_frames: 0,
                     muted: false,
+                    noise_reduction: false,
                     linked_audio: false,
                 },
             }));
@@ -1935,6 +1937,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                lut: None,
                 id: 1,
                 start_frame: 45,
                 source_start_frame: 0,
@@ -1947,6 +1950,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: true,
             },
         }));
@@ -2083,6 +2087,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id,
                 clip: Clip {
+                    lut: None,
                     id: clip_id,
                     start_frame: 0,
                     source_start_frame: 0,
@@ -2095,6 +2100,7 @@ mod tests {
                     transition_out: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
+                    noise_reduction: false,
                     linked_audio: false,
                 },
             }));
@@ -2142,6 +2148,7 @@ mod tests {
             has_audio: true,
         })));
         let detached = Clip {
+            lut: None,
             id: 1,
             start_frame: 0,
             source_start_frame: 15,
@@ -2154,6 +2161,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         };
         assert!(state.edit(Command::InsertClip {
@@ -2414,6 +2422,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id,
                 clip: Clip {
+                    lut: None,
                     id,
                     start_frame,
                     source_start_frame: 0,
@@ -2426,6 +2435,7 @@ mod tests {
                     transition_out: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
+                    noise_reduction: false,
                     linked_audio: false,
                 },
             }));

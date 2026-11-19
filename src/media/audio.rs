@@ -292,9 +292,12 @@ struct AudioReader {
     decoder: ffmpeg::decoder::Audio,
     stream_index: usize,
     time_base: ffmpeg::Rational,
-    first_pts: i64,
+    origin_pts: i64,
     skip_until: u64,
     pending: VecDeque<f32>,
+    initial: bool,
+    silence: u64,
+    deferred: Option<Vec<f32>>,
     downmixer: Option<ffmpeg::software::resampling::Context>,
     resampler: Option<ffmpeg::software::resampling::Context>,
     eof: bool,
@@ -321,7 +324,7 @@ impl AudioReader {
         };
         let stream_index = stream.index();
         let time_base = stream.time_base();
-        let first_pts = stream.start_time();
+        let origin_pts = super::format_origin(&input, time_base);
         let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
             .and_then(|context| context.decoder().audio())
             .map_err(|error| error.to_string())?;
@@ -331,7 +334,7 @@ impl AudioReader {
         }
         if offset > 0 {
             let micros = u128::from(offset) * u128::from(fps.1) * 1_000_000 / u128::from(fps.0);
-            if let Ok(timestamp) = i64::try_from(micros)
+            if let Some(timestamp) = super::seek_timestamp(&input, micros)
                 && input.seek(timestamp, ..timestamp).is_ok()
             {
                 decoder.flush();
@@ -364,12 +367,15 @@ impl AudioReader {
             decoder,
             stream_index,
             time_base,
-            first_pts,
+            origin_pts,
             skip_until: u64::try_from(
                 u128::from(offset) * u128::from(fps.1) * u128::from(rate) / u128::from(fps.0),
             )
             .unwrap_or(u64::MAX),
             pending: VecDeque::new(),
+            initial: true,
+            silence: 0,
+            deferred: None,
             downmixer,
             resampler: if rate == RATE {
                 None
@@ -418,6 +424,16 @@ impl AudioReader {
             if cancelled.load(Ordering::Relaxed) || self.exhausted {
                 return Ok(false);
             }
+            if self.silence > 0 {
+                let count = self.silence.min(CHUNK as u64);
+                self.silence -= count;
+                self.append_native(vec![0.0; count as usize * CHANNELS])?;
+                return Ok(true);
+            }
+            if let Some(stereo) = self.deferred.take() {
+                self.append_native(stereo)?;
+                return Ok(true);
+            }
             let mut decoded = ffmpeg::frame::Audio::empty();
             if self.decoder.receive_frame(&mut decoded).is_ok() {
                 let timestamp = decoded.timestamp();
@@ -445,41 +461,28 @@ impl AudioReader {
                         .max(1);
                 }
                 let mut stereo = stereo_samples(&decoded, channels);
-                if let Some(start) = timestamp.map(|pts| self.sample_index(pts)) {
+                let start = timestamp.map(|pts| self.sample_index(pts));
+                if let Some(start) = start {
                     let frames = stereo.len() / CHANNELS;
-                    let skip = self.skip_until.saturating_sub(start).min(frames as u64) as usize;
+                    let skip =
+                        (i128::from(self.skip_until) - start).clamp(0, frames as i128) as usize;
                     stereo.drain(..skip * CHANNELS);
                 }
                 if stereo.is_empty() {
                     continue;
                 }
-                if let Some(resampler) = &mut self.resampler {
-                    let mut input = ffmpeg::frame::Audio::new(
-                        resampler.input().format,
-                        stereo.len() / CHANNELS,
-                        ffmpeg::ChannelLayout::STEREO,
-                    );
-                    input.set_rate(resampler.input().rate);
-                    for (frame, samples) in input
-                        .plane_mut::<(f32, f32)>(0)
-                        .iter_mut()
-                        .zip(stereo.as_chunks::<CHANNELS>().0)
-                    {
-                        *frame = (samples[0], samples[1]);
+                if self.initial {
+                    self.initial = false;
+                    self.silence = start.map_or(0, |start| {
+                        u64::try_from((start - i128::from(self.skip_until)).max(0))
+                            .unwrap_or(u64::MAX)
+                    });
+                    if self.silence > 0 {
+                        self.deferred = Some(stereo);
+                        continue;
                     }
-                    let mut output = ffmpeg::frame::Audio::empty();
-                    resampler
-                        .run(&input, &mut output)
-                        .map_err(|error| error.to_string())?;
-                    self.pending.extend(
-                        output
-                            .plane::<(f32, f32)>(0)
-                            .iter()
-                            .flat_map(|&(left, right)| [left, right]),
-                    );
-                } else {
-                    self.pending.extend(stereo);
                 }
+                self.append_native(stereo)?;
                 return Ok(true);
             }
             if self.eof {
@@ -519,23 +522,46 @@ impl AudioReader {
         }
     }
 
-    /// Source-sample index of a packet timestamp, relative to stream start.
-    fn sample_index(&self, pts: i64) -> u64 {
-        let start = if self.first_pts == i64::MIN {
-            0
+    fn append_native(&mut self, stereo: Vec<f32>) -> Result<(), String> {
+        if let Some(resampler) = &mut self.resampler {
+            let mut input = ffmpeg::frame::Audio::new(
+                resampler.input().format,
+                stereo.len() / CHANNELS,
+                ffmpeg::ChannelLayout::STEREO,
+            );
+            input.set_rate(resampler.input().rate);
+            for (frame, samples) in input
+                .plane_mut::<(f32, f32)>(0)
+                .iter_mut()
+                .zip(stereo.as_chunks::<CHANNELS>().0)
+            {
+                *frame = (samples[0], samples[1]);
+            }
+            let mut output = ffmpeg::frame::Audio::empty();
+            resampler
+                .run(&input, &mut output)
+                .map_err(|error| error.to_string())?;
+            self.pending.extend(
+                output
+                    .plane::<(f32, f32)>(0)
+                    .iter()
+                    .flat_map(|&(left, right)| [left, right]),
+            );
         } else {
-            self.first_pts
-        };
-        let base = i128::from(pts) - i128::from(start);
+            self.pending.extend(stereo);
+        }
+        Ok(())
+    }
+
+    /// Source-sample index relative to the container origin.
+    fn sample_index(&self, pts: i64) -> i128 {
+        let base = i128::from(pts) - i128::from(self.origin_pts);
         let denominator = i128::from(self.time_base.denominator());
-        if base <= 0 || denominator <= 0 {
+        if denominator <= 0 {
             return 0;
         }
-        u64::try_from(
-            base * i128::from(self.time_base.numerator()) * i128::from(self.decoder.rate())
-                / denominator,
-        )
-        .unwrap_or(u64::MAX)
+        base * i128::from(self.time_base.numerator()) * i128::from(self.decoder.rate())
+            / denominator
     }
 }
 
@@ -1154,6 +1180,83 @@ mod tests {
         }
         worker.join().unwrap().unwrap();
         heard
+    }
+
+    #[test]
+    fn late_audio_keeps_its_container_offset() {
+        for rate in [48_000, 44_100] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("late.mp4");
+            let generated = std::process::Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=black:s=32x32:r=30:d=4",
+                    "-itsoffset",
+                    "0.5",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                ])
+                .arg(format!(
+                    "aevalsrc=if(between(t\\,0.5\\,0.6)\\,0.8*sin(2*PI*1000*t)\\,0):s={rate}:d=3.5"
+                ))
+                .args(["-c:v", "mpeg4", "-c:a", "aac", "-output_ts_offset", "30"])
+                .arg(&path)
+                .status();
+            let status = match generated {
+                Ok(status) => status,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(error) => panic!("{error}"),
+            };
+            assert!(status.success());
+            ffmpeg::init().unwrap();
+            let reader = AudioReader::open(&path, 0, (30, 1), Arc::new(AtomicBool::new(false)))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                reader.sample_index(reader.origin_pts - i64::from(rate)),
+                -i128::from(rate)
+            );
+            let plan = Arc::new(AudioPlan {
+                sources: vec![AudioSource {
+                    path,
+                    start: 0,
+                    source_start: 0,
+                    duration: 120,
+                    volume: 1.0,
+                }],
+                end: 120,
+                fps: (30, 1),
+            });
+            for start in [0, 9, 15, 30, 45] {
+                let samples = play(&plan, start, None);
+                assert_eq!(
+                    samples.len(),
+                    (120 - start) as usize * RATE as usize / 30 * CHANNELS
+                );
+                if start == 45 {
+                    assert!(samples.iter().all(|sample| sample.abs() < 0.03));
+                    continue;
+                }
+                let onset = samples
+                    .as_chunks::<CHANNELS>()
+                    .0
+                    .iter()
+                    .position(|frame| frame[0].abs() > 0.03)
+                    .unwrap() as f64
+                    / f64::from(RATE);
+                let expected = 1.0 - start as f64 / 30.0;
+                assert!(
+                    (onset - expected).abs() <= 0.025,
+                    "rate={rate}, start={start}: beep at {onset}, expected {expected}"
+                );
+            }
+        }
     }
 
     fn mixing_plan(root: &Path) -> Arc<AudioPlan> {

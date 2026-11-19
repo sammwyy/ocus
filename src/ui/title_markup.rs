@@ -1,6 +1,58 @@
 use crate::timeline::Title;
 use creamui::Color;
 
+pub(crate) fn animated(title: &Title, motion: crate::timeline::TitleMotion) -> (Title, Vec<Run>) {
+    let mut runs = parse(title);
+    let count: usize = runs.iter().map(|run| run.text.chars().count()).sum();
+    let mut remaining = (count as f32 * motion.reveal).floor() as usize;
+    for run in &mut runs {
+        let length = run.text.chars().count().min(remaining);
+        run.text = run.text.chars().take(length).collect();
+        remaining -= length;
+        run.color.a = (f32::from(run.color.a) * motion.opacity).round() as u8;
+    }
+    let mut title = title.clone();
+    title.y += motion.y_offset;
+    title.font_size *= motion.scale;
+    if let Some(color) = &mut title.background {
+        color[3] = (f32::from(color[3]) * motion.opacity).round() as u8;
+    }
+    (title, runs)
+}
+
+#[test]
+fn animated_markup_reveals_rendered_unicode_characters_and_fades_all_styles() {
+    let title = Title {
+        text: "<color=red>é🙂</color> **ok**".into(),
+        parse_html: true,
+        parse_markdown: true,
+        background: Some([0, 0, 0, 200]),
+        ..Title::default()
+    };
+    let (resolved, runs) = animated(
+        &title,
+        crate::timeline::TitleMotion {
+            opacity: 0.5,
+            y_offset: 0.05,
+            scale: 0.6,
+            reveal: 0.4,
+        },
+    );
+    assert_eq!(
+        runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+        "é🙂"
+    );
+    assert!(runs.iter().all(|run| run.color.a == 128));
+    assert_eq!(resolved.background.unwrap()[3], 100);
+    assert_eq!(resolved.y, 0.55);
+    assert_eq!(resolved.font_size, title.font_size * 0.6);
+    let empty = animated(
+        &Title::default(),
+        crate::timeline::TitleAnimation::Typewriter.resolve(0, 1, (30, 1)),
+    );
+    assert!(empty.1.iter().all(|run| run.text.is_empty()));
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Run {
     pub text: String,

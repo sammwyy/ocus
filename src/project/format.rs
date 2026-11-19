@@ -268,6 +268,7 @@ mod tests {
             source_start_frame: 0,
             duration_frames: 48,
             content: ClipContent::Title(Title {
+                animation: crate::timeline::TitleAnimation::Fade,
                 text: "<b>Hello</b> **world**".into(),
                 font_family: "Sans".into(),
                 font_size: 48.0,

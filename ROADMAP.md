@@ -173,7 +173,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [x] Chroma key (green screen)
 - [ ] Simple masks
 - [x] Video stabilization
-- [ ] Animated title templates
+- [x] Animated title templates
 
 **Automation**
 - [x] Local automatic subtitles (Whisper)

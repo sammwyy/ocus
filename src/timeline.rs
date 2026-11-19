@@ -656,6 +656,8 @@ impl ColorAdjust {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Title {
+    #[serde(default, skip_serializing_if = "TitleAnimation::is_none")]
+    pub animation: TitleAnimation,
     pub text: String,
     pub font_family: String,
     pub font_size: f32,
@@ -676,6 +678,104 @@ pub struct Title {
     pub parse_markdown: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleAnimation {
+    #[default]
+    None,
+    Fade,
+    SlideUp,
+    Pop,
+    Typewriter,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TitleMotion {
+    pub opacity: f32,
+    pub y_offset: f32,
+    pub scale: f32,
+    pub reveal: f32,
+}
+
+impl TitleAnimation {
+    pub fn is_none(&self) -> bool {
+        *self == Self::None
+    }
+
+    pub fn resolve(self, offset: u64, duration: u64, fps: (u32, u32)) -> TitleMotion {
+        let mut motion = TitleMotion {
+            opacity: 1.0,
+            y_offset: 0.0,
+            scale: 1.0,
+            reveal: 1.0,
+        };
+        if self.is_none() {
+            return motion;
+        }
+        let rate = f64::from(fps.0) / f64::from(fps.1.max(1));
+        let ramp = (rate * 0.5).min(duration as f64 / 3.0).max(1.0);
+        let intro = Easing::EASE_OUT.evaluate((offset as f64 / ramp).clamp(0.0, 1.0)) as f32;
+        let outro = 1.0
+            - Easing::EASE_IN.evaluate(
+                (1.0 - duration.saturating_sub(offset.saturating_add(1)) as f64 / ramp)
+                    .clamp(0.0, 1.0),
+            ) as f32;
+        motion.opacity = if self == Self::Typewriter {
+            outro
+        } else {
+            intro * outro
+        };
+        match self {
+            Self::SlideUp => motion.y_offset = 0.05 * (1.0 - intro),
+            Self::Pop => motion.scale = 0.6 + 0.4 * intro,
+            Self::Typewriter => {
+                motion.reveal = (offset as f64 / rate.min(duration as f64 * 0.4).max(1.0))
+                    .clamp(0.0, 1.0) as f32
+            }
+            _ => {}
+        }
+        motion
+    }
+}
+
+pub const TITLE_TEMPLATES: [(&str, TitleAnimation); 4] = [
+    ("Centered fade", TitleAnimation::Fade),
+    ("Lower third", TitleAnimation::SlideUp),
+    ("Big pop", TitleAnimation::Pop),
+    ("Typewriter", TitleAnimation::Typewriter),
+];
+
+impl Title {
+    pub fn apply_template(&mut self, animation: TitleAnimation) {
+        let mut style = Self {
+            text: self.text.clone(),
+            parse_html: self.parse_html,
+            parse_markdown: self.parse_markdown,
+            animation,
+            ..Self::default()
+        };
+        match animation {
+            TitleAnimation::SlideUp => {
+                style.font_size = 44.0;
+                style.y = 0.85;
+                style.bold = false;
+                style.background = Some([16, 16, 20, 180]);
+            }
+            TitleAnimation::Pop => {
+                style.font_size = 100.0;
+                style.outline = true;
+            }
+            TitleAnimation::Typewriter => {
+                style.font_family = "Consolas, Menlo, DejaVu Sans Mono, Liberation Mono".into();
+                style.font_size = 52.0;
+                style.bold = false;
+            }
+            _ => {}
+        }
+        *self = style;
+    }
+}
+
 fn default_bold() -> bool {
     true
 }
@@ -683,6 +783,7 @@ fn default_bold() -> bool {
 impl Default for Title {
     fn default() -> Self {
         Self {
+            animation: TitleAnimation::None,
             text: String::new(),
             font_family: "Sans".into(),
             font_size: 64.0,
@@ -749,6 +850,88 @@ mod playback_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn title_animation_timing_and_compatibility() {
+        use super::*;
+        let title = Title::default();
+        let json = serde_json::to_string(&title).unwrap();
+        assert!(!json.contains("animation"));
+        assert_eq!(serde_json::from_str::<Title>(&json).unwrap(), title);
+        for animation in [
+            TitleAnimation::None,
+            TitleAnimation::Fade,
+            TitleAnimation::SlideUp,
+            TitleAnimation::Pop,
+            TitleAnimation::Typewriter,
+        ] {
+            let title = Title {
+                animation,
+                ..title.clone()
+            };
+            assert_eq!(
+                serde_json::from_str::<Title>(&serde_json::to_string(&title).unwrap()).unwrap(),
+                title
+            );
+            let start = animation.resolve(0, 120, (30, 1));
+            let mid = animation.resolve(60, 120, (30, 1));
+            let end = animation.resolve(119, 120, (30, 1));
+            assert_eq!(
+                mid,
+                TitleMotion {
+                    opacity: 1.0,
+                    y_offset: 0.0,
+                    scale: 1.0,
+                    reveal: 1.0
+                }
+            );
+            if animation != TitleAnimation::None {
+                assert_eq!(end.opacity, 0.0);
+                if animation != TitleAnimation::Typewriter {
+                    assert_eq!(start.opacity, 0.0);
+                }
+            }
+            assert_eq!(
+                start.y_offset,
+                if animation == TitleAnimation::SlideUp {
+                    0.05
+                } else {
+                    0.0
+                }
+            );
+            assert_eq!(
+                start.scale,
+                if animation == TitleAnimation::Pop {
+                    0.6
+                } else {
+                    1.0
+                }
+            );
+            assert_eq!(
+                start.reveal,
+                if animation == TitleAnimation::Typewriter {
+                    0.0
+                } else {
+                    1.0
+                }
+            );
+            for duration in [0, 1, 2, 6] {
+                for offset in 0..=duration {
+                    let value = animation.resolve(offset, duration, (30, 1));
+                    assert!((0.0..=1.0).contains(&value.opacity));
+                    assert!((0.0..=1.0).contains(&value.reveal));
+                }
+            }
+        }
+        assert_eq!(TitleAnimation::Fade.resolve(2, 6, (30, 1)).opacity, 1.0);
+        assert!((TitleAnimation::Typewriter.resolve(6, 30, (30, 1)).reveal - 0.5).abs() < 1e-6);
+        assert!(
+            (TitleAnimation::Pop.resolve(7, 120, (30, 1)).scale
+                - (0.6 + 0.4 * Easing::EASE_OUT.evaluate(7.0 / 15.0) as f32))
+                .abs()
+                < 1e-6
+        );
+    }
+
     #[test]
     fn easing_math_and_compatibility() {
         use super::*;

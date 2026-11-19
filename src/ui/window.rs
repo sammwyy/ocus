@@ -1859,13 +1859,32 @@ impl Widget for ProgramCanvas {
         }
         let scale = width / self.resolution.0.max(1) as f32;
         painter.push_clip_rounded(bounds, 0.0);
-        for (_, title) in &self.titles {
+        for (key, title) in &self.titles {
             if self.picture {
                 continue;
             }
+            let editor = self.state.editor.borrow();
+            let motion = editor
+                .project()
+                .tracks()
+                .iter()
+                .flat_map(|track| &track.clips)
+                .find(|clip| clip.id == key.1)
+                .map(|clip| {
+                    title.animation.resolve(
+                        self.state
+                            .program
+                            .position
+                            .get()
+                            .saturating_sub(clip.start_frame),
+                        clip.duration_frames,
+                        self.state.frame_rate(),
+                    )
+                })
+                .unwrap_or_else(|| title.animation.resolve(0, 0, self.state.frame_rate()));
+            let (title, runs) = title_markup::animated(title, motion);
             let size = (title.font_size * scale).max(1.0).min(height * 2.0);
             let family = title_fonts::family_stack(&title.font_family);
-            let runs = title_markup::parse(title);
             let lines: Vec<Vec<_>> = {
                 let mut lines = vec![Vec::new()];
                 for run in runs {
@@ -3162,6 +3181,79 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     ),
                 ],
             ));
+            if !subtitles {
+                let mut animation_buttons = Vec::new();
+                for (label, animation, help) in [
+                    (
+                        "None",
+                        crate::timeline::TitleAnimation::None,
+                        "Keep the title still and fully visible",
+                    ),
+                    (
+                        "Fade",
+                        crate::timeline::TitleAnimation::Fade,
+                        "Fade the title in and out",
+                    ),
+                    (
+                        "Slide up",
+                        crate::timeline::TitleAnimation::SlideUp,
+                        "Raise the title gently as it appears",
+                    ),
+                    (
+                        "Pop",
+                        crate::timeline::TitleAnimation::Pop,
+                        "Grow the title as it fades in",
+                    ),
+                    (
+                        "Typewriter",
+                        crate::timeline::TitleAnimation::Typewriter,
+                        "Reveal the title one character at a time",
+                    ),
+                ] {
+                    animation_buttons.push(with_help(
+                        chip(label, title.animation == animation, state, move |state| {
+                            change_title(state, |title| title.animation = animation)
+                        }),
+                        Help::new(help),
+                        state,
+                    ));
+                }
+                let mut templates = Vec::new();
+                for (label, animation) in crate::timeline::TITLE_TEMPLATES {
+                    templates.push(with_help(
+                        secondary_button(None, label, true, state, move |state| {
+                            change_title(state, |title| title.apply_template(animation))
+                        }),
+                        Help::new(match animation {
+                            crate::timeline::TitleAnimation::Fade => {
+                                "Apply a centered white title with a gentle fade"
+                            }
+                            crate::timeline::TitleAnimation::SlideUp => {
+                                "Apply a lower third with a dark translucent box"
+                            }
+                            crate::timeline::TitleAnimation::Pop => {
+                                "Apply a large bold outlined title that pops in"
+                            }
+                            _ => "Apply a monospace title with a character reveal",
+                        }),
+                        state,
+                    ));
+                }
+                rows.push(section(
+                    "Title animation",
+                    vec![
+                        text("Animation", muted(), 11.0),
+                        Box::new(
+                            Grid::new()
+                                .columns(3)
+                                .gap(4.0)
+                                .with_children(animation_buttons),
+                        ),
+                        text("Template", muted(), 11.0),
+                        Box::new(Grid::new().columns(2).gap(4.0).with_children(templates)),
+                    ],
+                ));
+            }
         }
         if track_kind == TrackKind::Video && matches!(clip.content, ClipContent::Media { .. }) {
             rows.push(section(
@@ -7844,6 +7936,33 @@ mod tests {
                 drag_at(text.x + text.width / 2.0, frame.y - 8.0);
                 assert!(state.title_gesture.borrow().is_none());
             }
+        }
+    }
+
+    #[test]
+    fn applying_title_template_is_one_undoable_edit() {
+        let state = UiState::new();
+        assert!(state.add_title());
+        change_title(&state, |title| {
+            title.text = "<b>Hello</b> **world**".into();
+            title.parse_html = true;
+            title.parse_markdown = true;
+        });
+        let original = selected_clip(&state).unwrap().1.content;
+        for (_, animation) in crate::timeline::TITLE_TEMPLATES {
+            change_title(&state, |title| title.apply_template(animation));
+            let applied = selected_clip(&state).unwrap().1.content;
+            let ClipContent::Title(title) = &applied else {
+                panic!()
+            };
+            assert_eq!(title.animation, animation);
+            assert_eq!(title.text, "<b>Hello</b> **world**");
+            assert!(title.parse_html && title.parse_markdown);
+            state.undo();
+            assert_eq!(selected_clip(&state).unwrap().1.content, original);
+            state.redo();
+            assert_eq!(selected_clip(&state).unwrap().1.content, applied);
+            state.undo();
         }
     }
 

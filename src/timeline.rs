@@ -7,6 +7,12 @@ pub struct Track {
     pub clips: Vec<Clip>,
 }
 
+/// A point in the sequence the editor can jump and snap to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Marker {
+    pub frame: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrackKind {

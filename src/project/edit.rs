@@ -1,7 +1,7 @@
 use super::Project;
 use super::export_settings::LastExport;
 use crate::media::{Media, MediaKind};
-use crate::timeline::{Clip, ClipContent, Title, Track, TrackKind};
+use crate::timeline::{Clip, ClipContent, Marker, Title, Track, TrackKind};
 use std::collections::HashSet;
 
 pub(crate) fn split_tracks(
@@ -97,6 +97,8 @@ pub enum Command {
     },
     RippleDeleteSelection(Vec<(u64, u64)>),
     ReplaceTracks(Vec<Track>),
+    AddMarker(u64),
+    RemoveMarker(u64),
 }
 
 fn ripple_delete(project: &Project, selection: &[(u64, u64)]) -> Option<Vec<Track>> {
@@ -530,6 +532,24 @@ impl Editor {
                 let index = self.project.media.iter().position(|m| m.id == id)?;
                 Some(Command::ImportMedia(self.project.media.remove(index)))
             }
+            Command::AddMarker(frame) => {
+                let index = self
+                    .project
+                    .markers
+                    .binary_search_by_key(&frame, |marker| marker.frame)
+                    .err()?;
+                self.project.markers.insert(index, Marker { frame });
+                Some(Command::RemoveMarker(frame))
+            }
+            Command::RemoveMarker(frame) => {
+                let index = self
+                    .project
+                    .markers
+                    .binary_search_by_key(&frame, |marker| marker.frame)
+                    .ok()?;
+                self.project.markers.remove(index);
+                Some(Command::AddMarker(frame))
+            }
             Command::ReplaceTracks(tracks) => {
                 if self.project.tracks == tracks {
                     return None;
@@ -737,6 +757,34 @@ mod tests {
         assert!(editor.is_dirty());
         assert!(editor.redo());
         assert!(editor.is_dirty());
+    }
+
+    #[test]
+    fn markers_stay_sorted_unique_and_undoable() {
+        let mut editor = Editor::new(Project::new("Untitled"));
+        assert!(editor.apply(Command::AddMarker(90)));
+        assert!(editor.apply(Command::AddMarker(30)));
+        assert!(!editor.apply(Command::AddMarker(30)));
+        assert!(!editor.apply(Command::RemoveMarker(60)));
+        let frames = |editor: &Editor| {
+            editor
+                .project()
+                .markers()
+                .iter()
+                .map(|marker| marker.frame)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(frames(&editor), [30, 90]);
+        assert!(editor.apply(Command::RemoveMarker(90)));
+        assert_eq!(frames(&editor), [30]);
+        assert!(editor.undo());
+        assert_eq!(frames(&editor), [30, 90]);
+        assert!(editor.undo());
+        assert!(editor.undo());
+        assert!(frames(&editor).is_empty());
+        assert!(!editor.is_dirty());
+        assert!(editor.redo());
+        assert_eq!(frames(&editor), [90]);
     }
 
     #[test]

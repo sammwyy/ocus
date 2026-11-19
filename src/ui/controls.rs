@@ -657,7 +657,7 @@ impl Help {
     }
 }
 
-fn with_help(widget: BoxedWidget, help: Help, state: &UiState) -> BoxedWidget {
+pub(super) fn with_help(widget: BoxedWidget, help: Help, state: &UiState) -> BoxedWidget {
     let controller = state.tooltip_controller((help.label, help.instance));
     controller.set_viewport(state.tooltip_viewport.get());
     let layout = widget.style().layout;
@@ -895,6 +895,7 @@ pub(super) struct Thumb {
     pub width: Option<f32>,
     pub height: f32,
     pub badge: Option<String>,
+    pub placeholder: Option<&'static str>,
 }
 
 impl Widget for Thumb {
@@ -940,12 +941,27 @@ impl Widget for Thumb {
                 kind_glyph(self.kind),
                 Rect {
                     x: rect.x + (rect.width - side) / 2.0,
-                    y: rect.y + (rect.height - side) / 2.0,
+                    y: rect.y + (rect.height - side) / 2.0
+                        - if self.placeholder.is_some() { 7.0 } else { 0.0 },
                     width: side,
                     height: side,
                 },
                 color.mix(STAGE, 0.25),
             );
+            if let Some(label) = self.placeholder {
+                painter.fill_text(
+                    Rect {
+                        x: rect.x,
+                        y: rect.y + rect.height - 15.0,
+                        width: rect.width,
+                        height: 14.0,
+                    },
+                    label,
+                    muted(),
+                    9.0,
+                    TextAlign::Center,
+                );
+            }
         }
         painter.fill_rect(
             Rect {
@@ -960,7 +976,11 @@ impl Widget for Thumb {
             let width = badge.chars().count() as f32 * 6.0 + 10.0;
             let pill = Rect {
                 x: rect.x + rect.width - width - 4.0,
-                y: rect.y + rect.height - 20.0,
+                y: if self.placeholder.is_some() {
+                    rect.y + 4.0
+                } else {
+                    rect.y + rect.height - 20.0
+                },
                 width,
                 height: 15.0,
             };

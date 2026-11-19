@@ -131,6 +131,10 @@ CreamUI's built-in Blue, Cyan, Green, Pink, Purple, and Orange accent presets;
 Orange is the initial custom accent. Preferences are saved independently of
 project files in `Ocus/settings.toml` under the platform configuration
 directory (XDG config on Linux, AppData on Windows).
+Regenerable media-bin thumbnails and timeline storyboard frames live under
+`thumbnails/` and `frames/` in the platform `Ocus` cache directory
+(`~/.cache/ocus` on Linux), bounded to 512 MiB in total. This directory can
+be deleted safely; missing entries are decoded again in the background.
 
 **Export** (disabled while the timeline is empty) opens a settings dialog with
 built-in presets for the original project, 1080p, 720p, vertical 9:16, square,
@@ -171,7 +175,10 @@ drawn above it), transparent
 still images and all title overlays, plus AAC stereo audio from audio tracks and
 linked clip sound. Titles honor font, size, position, color, transparency,
 bold/italic, outline (scaled with text size) and enabled HTML/Markdown styling.
-Cuts, trims, gaps (black video/silent audio), per-clip volume and mute are honored. Audio-only
+Cuts, trims, gaps (black video/silent audio), per-clip volume and mute are honored.
+The Inspector's **Normalize loudness** measures the trimmed clip using EBU R128
+and sets undoable volume toward −14 LUFS, limited to −1 dB true peak and 200% gain.
+Silent clips are unchanged; mute is preserved. Audio-only
 timelines export with black video. Export runs in the background, shows
 progress, can be cancelled, and publishes a completed file atomically.
 Available H.264 and AAC encoders are required in FFmpeg for the default MP4.

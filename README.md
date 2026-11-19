@@ -62,8 +62,12 @@ and ripple-deleting the middle keeps picture and sound 1:1. **Detach audio**
 (inspector or right-click) moves that sound to an audio track that is free for
 the same range, creating a new one if needed, and **Link audio** folds a
 matching pair back together. Clip volume and mute are editable, saved, and
-honored during preview playback and export. Previously saved references without probe
-metadata can be re-imported.
+honored during preview playback and export. Select an audio clip or a video
+clip with linked sound, then enable **Audio → Noise reduction** in the
+Inspector to reduce background noise in speech. The setting is saved per
+clip and applies to the Program monitor and export. Source playback and
+waveforms still show the original audio. Previously saved references without
+probe metadata can be re-imported.
 
 Select a video or audio clip and use **Inspector → Speed** to choose 0.25x,
 0.5x, 1x, 1.5x, 2x or 4x. Slower clips become longer and faster clips shorter,

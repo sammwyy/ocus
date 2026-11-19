@@ -10,6 +10,7 @@ creamui = { git = "https://github.com/sammwyy/creamui.git", rev = "335824c350b4e
 directories = "=5.0.1"
 ebur128 = "0.1.11"
 ffmpeg-next = { version = "=7.1.0", default-features = false, features = ["format", "codec", "filter", "software-scaling", "software-resampling"] }
+nnnoiseless = { version = "=0.5.2", default-features = false }
 rfd = "=0.17.2"
 rodio = { version = "=0.22.2", default-features = false, features = ["playback"] }
 serde = { version = "1", features = ["derive"] }

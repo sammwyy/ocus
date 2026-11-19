@@ -1895,6 +1895,7 @@ mod tests {
                     fade_in_frames: 0,
                     fade_out_frames: 0,
                     muted: false,
+                    noise_reduction: false,
                     linked_audio: false,
                 },
             }));
@@ -1951,6 +1952,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: true,
             },
         }));
@@ -2101,6 +2103,7 @@ mod tests {
                     transition_out: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
+                    noise_reduction: false,
                     linked_audio: false,
                 },
             }));
@@ -2162,6 +2165,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            noise_reduction: false,
             linked_audio: false,
         };
         assert!(state.edit(Command::InsertClip {
@@ -2436,6 +2440,7 @@ mod tests {
                     transition_out: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
+                    noise_reduction: false,
                     linked_audio: false,
                 },
             }));

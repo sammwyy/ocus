@@ -125,6 +125,127 @@ pub struct Clip {
     pub keyframes: Vec<Keyframe>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum Easing {
+    #[default]
+    Linear,
+    Hold,
+    Curve {
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+    },
+}
+
+impl Easing {
+    pub const EASE_IN: Self = Self::Curve {
+        x1: 0.42,
+        y1: 0.0,
+        x2: 1.0,
+        y2: 1.0,
+    };
+    pub const EASE_OUT: Self = Self::Curve {
+        x1: 0.0,
+        y1: 0.0,
+        x2: 0.58,
+        y2: 1.0,
+    };
+    pub const EASE_IN_OUT: Self = Self::Curve {
+        x1: 0.42,
+        y1: 0.0,
+        x2: 0.58,
+        y2: 1.0,
+    };
+
+    pub fn is_linear(&self) -> bool {
+        *self == Self::Linear
+    }
+
+    pub fn valid(self) -> bool {
+        match self {
+            Self::Curve { x1, y1, x2, y2 } => {
+                x1 <= x2
+                    && y1 <= y2
+                    && [x1, y1, x2, y2]
+                        .iter()
+                        .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+            }
+            _ => true,
+        }
+    }
+
+    fn coordinate(s: f64, a: f64, b: f64) -> f64 {
+        3.0 * (1.0 - s).powi(2) * s * a + 3.0 * (1.0 - s) * s * s * b + s.powi(3)
+    }
+
+    fn parameter(t: f64, x1: f64, x2: f64) -> f64 {
+        let (mut low, mut high) = (0.0, 1.0);
+        for _ in 0..60 {
+            let middle = (low + high) / 2.0;
+            if Self::coordinate(middle, x1, x2) < t {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        (low + high) / 2.0
+    }
+
+    pub fn evaluate(self, t: f64) -> f64 {
+        if t <= 0.0 {
+            return 0.0;
+        }
+        if t >= 1.0 {
+            return 1.0;
+        }
+        match self {
+            Self::Linear => t,
+            Self::Hold => 0.0,
+            Self::Curve { x1, y1, x2, y2 } => Self::coordinate(Self::parameter(t, x1, x2), y1, y2),
+        }
+    }
+
+    pub fn split(self, t: f64) -> (Self, Self) {
+        if t <= 0.0 {
+            return (Self::Linear, self);
+        }
+        if t >= 1.0 {
+            return (self, Self::Linear);
+        }
+        let Self::Curve { x1, y1, x2, y2 } = self else {
+            return (self, self);
+        };
+        let s = Self::parameter(t, x1, x2);
+        let mix = |a: [f64; 2], b: [f64; 2]| [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s];
+        let a = mix([0.0, 0.0], [x1, y1]);
+        let b = mix([x1, y1], [x2, y2]);
+        let c = mix([x2, y2], [1.0, 1.0]);
+        let d = mix(a, b);
+        let e = mix(b, c);
+        let p = mix(d, e);
+        let normalized = |a: [f64; 2], b: [f64; 2], start: [f64; 2], end: [f64; 2]| {
+            let w = end[0] - start[0];
+            let h = end[1] - start[1];
+            if h == 0.0 || w == 0.0 {
+                return Self::Linear;
+            }
+            Self::Curve {
+                x1: (a[0] - start[0]) / w,
+                y1: (a[1] - start[1]) / h,
+                x2: (b[0] - start[0]) / w,
+                y2: (b[1] - start[1]) / h,
+            }
+        };
+        let pieces = (
+            normalized(a, d, [0.0, 0.0], p),
+            normalized(e, c, p, [1.0, 1.0]),
+        );
+        debug_assert!(pieces.0.valid() && pieces.1.valid());
+        pieces
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Keyframe {
     /// Offset from the clip's timeline start, independent of media playback mode.
@@ -134,6 +255,8 @@ pub struct Keyframe {
     pub y: f32,
     pub rotation: f32,
     pub opacity: f32,
+    #[serde(default, skip_serializing_if = "Easing::is_linear")]
+    pub easing: Easing,
 }
 
 impl Keyframe {
@@ -145,11 +268,12 @@ impl Keyframe {
             y: transform.y,
             rotation: transform.rotation,
             opacity: transform.opacity,
+            easing: Easing::Linear,
         }
     }
 
     pub fn valid(&self) -> bool {
-        self.apply(Transform::default()).valid()
+        self.apply(Transform::default()).valid() && self.easing.valid()
     }
 
     fn apply(&self, base: Transform) -> Transform {
@@ -181,7 +305,10 @@ pub fn evaluate_transform(base: Transform, keyframes: &[Keyframe], frame: u64) -
     for pair in keyframes.windows(2) {
         let [left, right] = pair else { unreachable!() };
         if frame <= right.frame {
-            let t = (frame - left.frame) as f32 / (right.frame - left.frame) as f32;
+            let t = left
+                .easing
+                .evaluate((frame - left.frame) as f64 / (right.frame - left.frame) as f64)
+                as f32;
             let lerp = |a: f32, b: f32| a + (b - a) * t;
             return Transform {
                 scale: lerp(left.scale, right.scale),
@@ -286,10 +413,27 @@ impl Clip {
         }
         let mut keys = Vec::new();
         if offset > 0 {
-            keys.push(Keyframe::new(
+            let mut boundary = Keyframe::new(
                 0,
                 evaluate_transform(self.transform, &self.keyframes, offset as u64),
-            ));
+            );
+            if let Some(left) = self
+                .keyframes
+                .iter()
+                .rfind(|key| i128::from(key.frame) <= offset)
+            {
+                boundary.easing = left.easing;
+                if let Some(right) = self
+                    .keyframes
+                    .iter()
+                    .find(|key| i128::from(key.frame) > offset)
+                {
+                    let t = (offset - i128::from(left.frame)) as f64
+                        / (right.frame - left.frame) as f64;
+                    boundary.easing = left.easing.split(t).1;
+                }
+            }
+            keys.push(boundary);
         }
         keys.extend(self.keyframes.iter().filter_map(|key| {
             let frame = i128::from(key.frame) - offset;
@@ -518,6 +662,195 @@ mod playback_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn easing_math_and_compatibility() {
+        use super::*;
+        for easing in [
+            Easing::Linear,
+            Easing::Hold,
+            Easing::EASE_IN,
+            Easing::EASE_OUT,
+            Easing::EASE_IN_OUT,
+        ] {
+            assert_eq!(easing.evaluate(0.0), 0.0);
+            assert_eq!(easing.evaluate(1.0), 1.0);
+            for i in 0..100 {
+                assert!(
+                    easing.evaluate(i as f64 / 100.0) <= easing.evaluate((i + 1) as f64 / 100.0)
+                );
+            }
+        }
+        assert!((Easing::EASE_IN.evaluate(0.5) - 0.3153568).abs() < 1e-6);
+        assert!((Easing::EASE_OUT.evaluate(0.5) - 0.6846432).abs() < 1e-6);
+        assert!((Easing::EASE_IN_OUT.evaluate(0.5) - 0.5).abs() < 1e-12);
+        let old = r#"{"frame":0,"scale":1.0,"x":0.0,"y":0.0,"rotation":0.0,"opacity":1.0}"#;
+        let key: Keyframe = serde_json::from_str(old).unwrap();
+        assert_eq!(serde_json::to_string(&key).unwrap(), old);
+        for easing in [
+            Easing::Curve {
+                x1: 1.0 / 3.0,
+                y1: 1.0,
+                x2: 2.0 / 3.0,
+                y2: 0.0,
+            },
+            Easing::Curve {
+                x1: 0.8,
+                y1: 0.0,
+                x2: 0.2,
+                y2: 1.0,
+            },
+        ] {
+            assert!(!valid_keyframes(&[Keyframe { easing, ..key }]));
+        }
+        for easing in [
+            Easing::Hold,
+            Easing::EASE_IN,
+            Easing::EASE_OUT,
+            Easing::EASE_IN_OUT,
+        ] {
+            let eased = Keyframe { easing, ..key };
+            assert_eq!(
+                serde_json::from_str::<Keyframe>(&serde_json::to_string(&eased).unwrap()).unwrap(),
+                eased
+            );
+        }
+        for value in [-0.01, 1.01, f64::NAN, f64::INFINITY] {
+            for easing in [
+                Easing::Curve {
+                    x1: value,
+                    y1: 0.0,
+                    x2: 1.0,
+                    y2: 1.0,
+                },
+                Easing::Curve {
+                    x1: 0.0,
+                    y1: value,
+                    x2: 1.0,
+                    y2: 1.0,
+                },
+                Easing::Curve {
+                    x1: 0.0,
+                    y1: 0.0,
+                    x2: value,
+                    y2: 1.0,
+                },
+                Easing::Curve {
+                    x1: 0.0,
+                    y1: 0.0,
+                    x2: 1.0,
+                    y2: value,
+                },
+            ] {
+                assert!(!valid_keyframes(&[Keyframe { easing, ..key }]));
+            }
+        }
+        let hold = Keyframe {
+            easing: Easing::Hold,
+            ..key
+        };
+        let end = Keyframe::new(
+            60,
+            Transform {
+                x: 1.0,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            evaluate_transform(Default::default(), &[hold, end], 59).x,
+            0.0
+        );
+        assert_eq!(
+            evaluate_transform(Default::default(), &[hold, end], 60).x,
+            1.0
+        );
+        assert_eq!(
+            evaluate_transform(Default::default(), &[], 10),
+            Transform::default()
+        );
+    }
+
+    #[test]
+    fn subdivided_ranges_preserve_every_property_at_every_frame() {
+        use super::*;
+        let mut clip: Clip = serde_json::from_value(serde_json::json!({
+            "id":1,"start_frame":0,"source_start_frame":0,"duration_frames":61,
+            "content":{"media":{"media_id":1}},"volume":1.0,"muted":false
+        }))
+        .unwrap();
+        let mut easings = vec![
+            Easing::Linear,
+            Easing::Hold,
+            Easing::EASE_IN,
+            Easing::EASE_OUT,
+            Easing::EASE_IN_OUT,
+        ];
+        let mut seed = 0x5eed_u64;
+        let mut random = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (seed >> 32) as f64 / u32::MAX as f64
+        };
+        for _ in 0..16 {
+            let (a, b, c, d) = (random(), random(), random(), random());
+            easings.push(Easing::Curve {
+                x1: a.min(b),
+                x2: a.max(b),
+                y1: c.min(d),
+                y2: c.max(d),
+            });
+        }
+        for easing in easings {
+            clip.keyframes = vec![
+                Keyframe {
+                    easing,
+                    ..Keyframe::new(0, Transform::default())
+                },
+                Keyframe::new(
+                    60,
+                    Transform {
+                        x: 0.8,
+                        y: -0.5,
+                        scale: 2.0,
+                        rotation: 90.0,
+                        opacity: 0.2,
+                        ..Default::default()
+                    },
+                ),
+            ];
+            for split in [1, 7, 15, 30, 49, 59] {
+                let mut right = clip.clone();
+                right.start_frame = split;
+                right.keyframes = clip.keyframes_for_range(i128::from(split));
+                let mut left = clip.clone();
+                left.duration_frames = split;
+                let (first, second) = easing.split(split as f64 / 60.0);
+                assert!(first.valid() && second.valid());
+                let boundary = Keyframe::new(split, clip.transform_at(split));
+                left.keyframes[0].easing = first;
+                left.keyframes[1] = boundary;
+                for frame in 0..=60 {
+                    let expected = clip.transform_at(frame);
+                    let actual = if frame < split {
+                        left.transform_at(frame)
+                    } else {
+                        right.transform_at(frame)
+                    };
+                    for (a, b) in [
+                        (actual.x, expected.x),
+                        (actual.y, expected.y),
+                        (actual.scale, expected.scale),
+                        (actual.rotation, expected.rotation),
+                        (actual.opacity, expected.opacity),
+                    ] {
+                        assert!(
+                            (a - b).abs() < 2e-5,
+                            "{easing:?} split {split} frame {frame}: {a} != {b}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn animation_advances_for_reverse_and_freeze_and_survives_ranges() {
         use super::*;

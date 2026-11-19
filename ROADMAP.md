@@ -150,7 +150,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 ## v1.0.0: First stable release
 
 **Editing**
-- [ ] Full keyframe support with easing curves
+- [x] Full keyframe support with easing curves
 - [ ] Chroma key (green screen)
 - [ ] Simple masks
 - [ ] Video stabilization

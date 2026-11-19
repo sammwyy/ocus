@@ -691,8 +691,38 @@ fn upsert_keyframe(
     keyframe: crate::timeline::Keyframe,
 ) {
     match keyframes.binary_search_by_key(&keyframe.frame, |key| key.frame) {
-        Ok(index) => keyframes[index] = keyframe,
+        Ok(index) => {
+            keyframes[index] = crate::timeline::Keyframe {
+                easing: keyframes[index].easing,
+                ..keyframe
+            }
+        }
         Err(index) => keyframes.insert(index, keyframe),
+    }
+}
+
+fn easing_segment(clip: &Clip, position: u64) -> Option<usize> {
+    let frame = keyframe_offset(clip, position)?;
+    clip.keyframes
+        .windows(2)
+        .position(|pair| pair[0].frame <= frame && frame < pair[1].frame)
+}
+
+fn set_keyframe_easing(state: &UiState, easing: crate::timeline::Easing) {
+    let Some((track_id, clip)) = selected_clip(state) else {
+        return;
+    };
+    let Some(index) = easing_segment(&clip, state.program.position.get()) else {
+        return;
+    };
+    let mut keyframes = clip.keyframes.clone();
+    keyframes[index].easing = easing;
+    if state.edit(Command::SetClipKeyframes {
+        track_id,
+        clip_id: clip.id,
+        keyframes,
+    }) {
+        state.request_preview();
     }
 }
 
@@ -966,6 +996,46 @@ fn transform_rows(state: &UiState, transform: Transform, inner: f32) -> Vec<Boxe
     ));
     keys = keys.child(navigation(true));
     rows.push(Box::new(keys) as BoxedWidget);
+    if let Some((clip, index)) = selected
+        .as_ref()
+        .and_then(|clip| easing_segment(clip, position).map(|index| (clip, index)))
+    {
+        use crate::timeline::Easing;
+        let choices = [
+            ("Linear", Easing::Linear),
+            ("Ease in", Easing::EASE_IN),
+            ("Ease out", Easing::EASE_OUT),
+            ("Ease in-out", Easing::EASE_IN_OUT),
+            ("Hold", Easing::Hold),
+        ];
+        let current = clip.keyframes[index].easing;
+        rows.push(text(
+            if choices.iter().any(|(_, easing)| *easing == current) {
+                "Easing"
+            } else {
+                "Easing · Custom"
+            },
+            muted(),
+            11.0,
+        ));
+        for pair in choices.chunks(3) {
+            let mut row = Flex::row().gap(4.0);
+            for &(label, easing) in pair {
+                row = row.child(with_help(
+                    export_choice(label, current == easing, 86.0, state, move |state| {
+                        set_keyframe_easing(state, easing)
+                    }),
+                    Help::new(match easing {
+                        Easing::Linear => "Move at a steady speed to the next keyframe.",
+                        Easing::Hold => "Keep this value until the next keyframe.",
+                        _ => "Smoothly change speed toward the next keyframe.",
+                    }),
+                    state,
+                ));
+            }
+            rows.push(Box::new(row));
+        }
+    }
     for field in fields {
         let animated = !field.label.starts_with("Crop");
         let mut current = transform;
@@ -3479,7 +3549,7 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                             .keyframes
                             .iter()
                             .filter(|key| key.frame < clip.duration_frames)
-                            .map(|key| clip.start_frame + key.frame)
+                            .map(|key| (clip.start_frame + key.frame, key.easing))
                             .collect(),
                         transition_frames,
                         playback: clip.playback,
@@ -8256,6 +8326,18 @@ mod tests {
         let animated = selected_clip(&state).unwrap().1;
         assert_eq!(animated.keyframes.len(), 2);
         assert_eq!(animated.transform_at(5).x, 0.25);
+        state.program.position.set(5);
+        set_keyframe_easing(&state, crate::timeline::Easing::EASE_IN);
+        assert_eq!(
+            selected_clip(&state).unwrap().1.keyframes[0].easing,
+            crate::timeline::Easing::EASE_IN
+        );
+        state.undo();
+        assert_eq!(
+            selected_clip(&state).unwrap().1.keyframes,
+            animated.keyframes
+        );
+        state.program.position.set(10);
         creamui::reactive::with_context_scope(|| {
             creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
                 creamui::Theme::dark(),

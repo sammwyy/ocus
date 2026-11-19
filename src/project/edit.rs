@@ -1464,6 +1464,12 @@ impl Editor {
                         last,
                         clip.transform_at(clip.start_frame + last),
                     );
+                    if let Some(index) = clip.keyframes.iter().rposition(|key| key.frame < last) {
+                        let left = clip.keyframes[index];
+                        let right = clip.keyframes[index + 1];
+                        let t = (last - left.frame) as f64 / (right.frame - left.frame) as f64;
+                        clip.keyframes[index].easing = left.easing.split(t).0;
+                    }
                     clip.keyframes.retain(|key| key.frame < last);
                     clip.keyframes.push(boundary);
                 }
@@ -4187,6 +4193,15 @@ mod tests {
             }],
             vec![Keyframe {
                 scale: f32::NAN,
+                ..first
+            }],
+            vec![Keyframe {
+                easing: crate::timeline::Easing::Curve {
+                    x1: -0.1,
+                    y1: 0.0,
+                    x2: 1.0,
+                    y2: 1.0,
+                },
                 ..first
             }],
         ] {

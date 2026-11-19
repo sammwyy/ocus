@@ -4,7 +4,7 @@ $install = Join-Path $env:LOCALAPPDATA 'Ocus-installer-smoke'
 if (Test-Path $install) { throw "Refusing to replace $install" }
 $installers = @(Get-ChildItem $Packages -Filter '*setup.exe')
 if ($installers.Count -ne 1) { throw 'Expected exactly one NSIS installer' }
-$shortcut = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs/Ocus.lnk'
+$shortcut = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs/Ocus/Ocus.lnk'
 if (Test-Path $shortcut) { throw "Refusing to replace $shortcut" }
 try {
     $process = Start-Process $installers[0].FullName -ArgumentList '/S', "/D=$install" -Wait -PassThru

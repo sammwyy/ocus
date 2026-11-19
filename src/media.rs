@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub mod audio;
 pub mod cache;
 pub mod composite;
+pub mod hardware;
 pub mod lut;
 pub mod preview;
 
@@ -182,6 +183,7 @@ pub struct Thumbnail {
 
 fn rgba_scaler(
     decoder: &ffmpeg::decoder::Video,
+    format: ffmpeg::format::Pixel,
     width: u32,
     height: u32,
 ) -> Result<ffmpeg::software::scaling::Context, String> {
@@ -189,7 +191,7 @@ fn rgba_scaler(
     use ffmpeg::ffi;
 
     let mut scaler = ffmpeg::software::scaling::Context::get(
-        decoder.format(),
+        format,
         decoder.width(),
         decoder.height(),
         ffmpeg::format::Pixel::RGBA,
@@ -275,7 +277,7 @@ pub fn thumbnail(path: &Path) -> Result<Thumbnail, String> {
         .min(1.0);
     let width = (square.0 as f32 * scale).round().max(1.0) as u32;
     let height = (square.1 as f32 * scale).round().max(1.0) as u32;
-    let mut scaler = rgba_scaler(&decoder, width, height)?;
+    let mut scaler = rgba_scaler(&decoder, decoder.format(), width, height)?;
     for (stream, packet) in input.packets() {
         if stream.index() != index {
             continue;

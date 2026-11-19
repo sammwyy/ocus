@@ -1,6 +1,6 @@
 use super::preview::{FrameImage, FrameSource, VideoLayers, blend};
 use crate::project::Project;
-use crate::timeline::{ClipContent, Title, TrackKind, Transition, TransitionKind};
+use crate::timeline::{ClipContent, ColorAdjust, Title, TrackKind, Transition, TransitionKind};
 use crate::ui::{title_fonts, title_markup};
 use creamui::fonts::{FontWeight, HorizontalAlign, LayoutSettings, cached_layout, resolve};
 use std::collections::{HashMap, HashSet};
@@ -8,6 +8,31 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use swash::scale::{Render, ScaleContext, Source, image::Image};
 use swash::zeno::{Format, Join, Stroke};
+
+fn adjust_color(image: Arc<FrameImage>, color: ColorAdjust) -> Arc<FrameImage> {
+    if color.neutral() {
+        return image;
+    }
+    let table: [f32; 256] = std::array::from_fn(|value| {
+        (((value as f32 / 255.0 - 0.5) * color.contrast + 0.5 + color.brightness) * 255.0)
+            .clamp(0.0, 255.0)
+    });
+    let mut adjusted = (*image).clone();
+    for pixel in adjusted.pixels.as_chunks_mut::<4>().0 {
+        let rgb = [
+            table[pixel[0] as usize],
+            table[pixel[1] as usize],
+            table[pixel[2] as usize],
+        ];
+        let luma = rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+        for channel in 0..3 {
+            pixel[channel] = (luma + (rgb[channel] - luma) * color.saturation)
+                .round()
+                .clamp(0.0, 255.0) as u8;
+        }
+    }
+    Arc::new(adjusted)
+}
 
 #[derive(Clone)]
 pub struct VisualPlan {
@@ -51,7 +76,7 @@ impl VisualPlan {
         let tracks = project
             .tracks()
             .iter()
-            .filter(|track| track.kind == TrackKind::Video)
+            .filter(|track| track.kind == TrackKind::Video && !track.hidden)
             .map(|track| {
                 track
                     .clips
@@ -62,6 +87,7 @@ impl VisualPlan {
                                 project.media().iter().find(|media| media.id == *media_id)?;
                             Some(VisualClip::Media(FrameSource {
                                 speed: clip.speed,
+                                color: clip.color,
                                 clip_id: clip.id,
                                 path: media.path.clone(),
                                 kind: media.kind,
@@ -171,7 +197,10 @@ impl Compositor {
                     {
                         visible = true;
                         active.push(source.clip_id);
-                        let image = self.layers.layer_at(source, position, cancelled)?;
+                        let image = adjust_color(
+                            self.layers.layer_at(source, position, cancelled)?,
+                            source.color,
+                        );
                         let opaque = image.width == self.width
                             && image.height == self.height
                             && image.pixels.len() == pixels.len()
@@ -242,7 +271,10 @@ impl Compositor {
         match clip {
             VisualClip::Media(source) => {
                 active.push(source.clip_id);
-                let image = self.layers.layer_at(source, position, cancelled)?;
+                let image = adjust_color(
+                    self.layers.layer_at(source, position, cancelled)?,
+                    source.color,
+                );
                 for (dest, src) in pixels
                     .as_chunks_mut::<4>()
                     .0
@@ -553,7 +585,146 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    #[test]
+    fn color_adjust_maps_pixels() {
+        let image = Arc::new(FrameImage {
+            width: 1,
+            height: 1,
+            pixels: vec![100, 150, 200, 73],
+        });
+        assert!(Arc::ptr_eq(
+            &image,
+            &adjust_color(image.clone(), ColorAdjust::default())
+        ));
+        let grey = adjust_color(
+            image.clone(),
+            ColorAdjust {
+                saturation: 0.0,
+                ..Default::default()
+            },
+        );
+        assert_eq!(grey.pixels, vec![143, 143, 143, 73]);
+        let bright = adjust_color(
+            image.clone(),
+            ColorAdjust {
+                brightness: 0.2,
+                ..Default::default()
+            },
+        );
+        assert_eq!(bright.pixels, vec![151, 201, 251, 73]);
+        let flat = adjust_color(
+            image,
+            ColorAdjust {
+                contrast: 0.0,
+                ..Default::default()
+            },
+        );
+        assert_eq!(flat.pixels, vec![128, 128, 128, 73]);
+    }
+
+    #[test]
+    fn adjusted_clip_changes_composed_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("color.tga");
+        let mut tga = vec![0; 18];
+        tga[2] = 2;
+        tga[12..14].copy_from_slice(&2u16.to_le_bytes());
+        tga[14..16].copy_from_slice(&2u16.to_le_bytes());
+        tga[16] = 32;
+        tga[17] = 40;
+        tga.extend([200, 150, 100, 255].repeat(4));
+        std::fs::write(&path, tga).unwrap();
+        let plan = |color| VisualPlan {
+            resolution: (2, 2),
+            transitions: HashMap::new(),
+            tracks: vec![vec![VisualClip::Media(FrameSource {
+                color,
+                speed: 1.0,
+                clip_id: 1,
+                path: path.clone(),
+                kind: crate::media::MediaKind::Image,
+                start: 0,
+                source_start: 0,
+                duration: 30,
+            })]],
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let raw = Compositor::new(plan(Default::default()), 2, 2, (30, 1))
+            .frame(0, &cancelled)
+            .unwrap()
+            .unwrap();
+        let grey = Compositor::new(
+            plan(ColorAdjust {
+                saturation: 0.0,
+                ..Default::default()
+            }),
+            2,
+            2,
+            (30, 1),
+        )
+        .frame(0, &cancelled)
+        .unwrap()
+        .unwrap();
+        assert_ne!(raw.pixels, grey.pixels);
+        assert_eq!(grey.pixels, [143, 143, 143, 255].repeat(4));
+        for kind in [
+            TransitionKind::Fade,
+            TransitionKind::Dissolve,
+            TransitionKind::Slide,
+        ] {
+            let mut transition_plan = plan(ColorAdjust {
+                saturation: 0.0,
+                ..Default::default()
+            });
+            transition_plan.transitions.insert(
+                1,
+                Transition {
+                    kind,
+                    duration_frames: 2,
+                },
+            );
+            let frame = Compositor::new(transition_plan, 2, 2, (30, 1))
+                .frame(0, &cancelled)
+                .unwrap()
+                .unwrap();
+            assert!(
+                frame.pixels.as_chunks::<4>().0.iter().all(|pixel| {
+                    pixel[0] == pixel[1] && pixel[1] == pixel[2] && pixel[3] == 255
+                })
+            );
+            assert!(
+                frame
+                    .pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| pixel[0] > 0)
+            );
+        }
+    }
     static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn hidden_video_tracks_do_not_contribute_titles_or_decode_missing_media() {
+        let mut value = serde_json::to_value(Project::new("Hidden")).unwrap();
+        value["media"] = serde_json::json!([{"id":1,"path":"must-not-open.png","kind":"image","has_audio":false}]);
+        value["tracks"][0]["clips"] = serde_json::json!([{"id":1,"start_frame":0,"source_start_frame":0,"duration_frames":30,"content":{"media":{"media_id":1}},"volume":1.0,"muted":false}]);
+        value["tracks"][1]["clips"] = serde_json::json!([{"id":2,"start_frame":0,"source_start_frame":0,"duration_frames":30,"content":{"title":Title::default()},"volume":1.0,"muted":false}]);
+        value["tracks"][0]["hidden"] = true.into();
+        value["tracks"][1]["hidden"] = true.into();
+        let project: Project = serde_json::from_value(value.clone()).unwrap();
+        let plan = VisualPlan::from_project(&project);
+        assert!(plan.tracks.is_empty());
+        assert!(
+            Compositor::new(plan, 160, 90, (30, 1))
+                .frame(0, &Arc::new(AtomicBool::new(false)))
+                .unwrap()
+                .is_none()
+        );
+        value["tracks"][1]["hidden"] = false.into();
+        let project: Project = serde_json::from_value(value).unwrap();
+        assert_eq!(VisualPlan::from_project(&project).tracks.len(), 1);
+    }
 
     #[test]
     fn adjacent_video_continues_after_out_and_holds_at_source_eof() {
@@ -615,6 +786,7 @@ mod tests {
                     speed: 1.0,
                     clip_id: 1,
                     path: video,
+                    color: Default::default(),
                     kind: MediaKind::Video,
                     start: 0,
                     source_start: 0,
@@ -624,6 +796,7 @@ mod tests {
                     speed: 1.0,
                     clip_id: 2,
                     path: still,
+                    color: Default::default(),
                     kind: MediaKind::Image,
                     start: 2,
                     source_start: 0,
@@ -700,6 +873,7 @@ mod tests {
                 speed: 1.0,
                 clip_id: id,
                 path,
+                color: Default::default(),
                 kind: MediaKind::Image,
                 start,
                 source_start: 0,
@@ -897,6 +1071,7 @@ mod tests {
             resolution: (1920, 1080),
             tracks: vec![vec![VisualClip::Media(FrameSource {
                 speed: 1.0,
+                color: Default::default(),
                 clip_id: 1,
                 path,
                 kind: MediaKind::Image,
@@ -946,6 +1121,7 @@ mod tests {
                 resolution: (1920, 1080),
                 tracks: vec![vec![VisualClip::Media(FrameSource {
                     speed: 1.0,
+                    color: Default::default(),
                     clip_id: 1,
                     path,
                     kind: MediaKind::Video,
@@ -1039,6 +1215,7 @@ mod tests {
         let source = |id, path| {
             VisualClip::Media(FrameSource {
                 speed: 1.0,
+                color: Default::default(),
                 clip_id: id,
                 path,
                 kind: MediaKind::Image,
@@ -1225,6 +1402,7 @@ mod tests {
         let source = |id, path| {
             VisualClip::Media(FrameSource {
                 speed: 1.0,
+                color: Default::default(),
                 clip_id: id,
                 path,
                 kind: MediaKind::Image,

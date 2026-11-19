@@ -22,7 +22,9 @@ use crate::media::{Media, MediaKind};
 use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, VideoCodec};
 use crate::project::{Command, Project};
 use crate::settings::ThemeMode;
-use crate::timeline::{Clip, ClipContent, Title, Track, TrackKind, Transition, TransitionKind};
+use crate::timeline::{
+    Clip, ClipContent, ColorAdjust, Title, Track, TrackKind, Transition, TransitionKind,
+};
 use creamui::core::layout::{Dimension, Style};
 use creamui::core::{Painter, Point, Rect, TextAlign, Widget};
 use creamui::fonts::{FontWeight, HorizontalAlign, LayoutSettings, cached_layout, resolve};
@@ -465,6 +467,140 @@ fn set_clip_audio(state: &UiState, change: impl FnOnce(&Clip) -> (f32, bool)) {
     }
 }
 
+fn set_clip_color(state: &UiState, change: impl FnOnce(&mut ColorAdjust)) {
+    if let Some((track_id, clip)) = selected_clip(state) {
+        let mut color = clip.color;
+        change(&mut color);
+        state.edit(Command::SetClipColor {
+            track_id,
+            clip_id: clip.id,
+            color,
+        });
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ColorProperty {
+    Brightness,
+    Contrast,
+    Saturation,
+}
+
+impl ColorProperty {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Brightness => "Brightness",
+            Self::Contrast => "Contrast",
+            Self::Saturation => "Saturation",
+        }
+    }
+
+    fn range(self) -> (f32, f32) {
+        match self {
+            Self::Brightness => (-1.0, 1.0),
+            Self::Contrast | Self::Saturation => (0.0, 2.0),
+        }
+    }
+
+    fn steps_per_unit(self) -> f32 {
+        match self {
+            Self::Brightness => 20.0,
+            Self::Contrast | Self::Saturation => 10.0,
+        }
+    }
+
+    fn get(self, color: ColorAdjust) -> f32 {
+        match self {
+            Self::Brightness => color.brightness,
+            Self::Contrast => color.contrast,
+            Self::Saturation => color.saturation,
+        }
+    }
+
+    fn set(self, color: &mut ColorAdjust, value: f32) {
+        match self {
+            Self::Brightness => color.brightness = value,
+            Self::Contrast => color.contrast = value,
+            Self::Saturation => color.saturation = value,
+        }
+    }
+
+    fn format(self, value: f32) -> String {
+        match self {
+            Self::Brightness => format!("{:+.0}", value * 100.0),
+            Self::Contrast | Self::Saturation => format!("{:.0}%", value * 100.0),
+        }
+    }
+
+    fn help(self, increase: bool) -> &'static str {
+        match (self, increase) {
+            (Self::Brightness, false) => "Decrease brightness",
+            (Self::Brightness, true) => "Increase brightness",
+            (Self::Contrast, false) => "Decrease contrast",
+            (Self::Contrast, true) => "Increase contrast",
+            (Self::Saturation, false) => "Decrease saturation",
+            (Self::Saturation, true) => "Increase saturation",
+        }
+    }
+
+    fn step(self, color: &mut ColorAdjust, increase: bool) {
+        let scale = self.steps_per_unit();
+        let (min, max) = self.range();
+        let ticks = (self.get(*color) * scale).round() + if increase { 1.0 } else { -1.0 };
+        self.set(color, (ticks / scale).clamp(min, max));
+    }
+}
+
+fn color_control(
+    state: &UiState,
+    inner: f32,
+    property: ColorProperty,
+    color: ColorAdjust,
+) -> BoxedWidget {
+    let value = property.get(color);
+    let (min, max) = property.range();
+    let mut row = Flex::row()
+        .gap(6.0)
+        .align(Align::Center)
+        .child(Box::new(Flex::row().width(68.0).child(text(
+            property.label(),
+            muted(),
+            11.0,
+        ))))
+        .child(Box::new(
+            Flex::row()
+                .width((inner - 184.0).max(8.0))
+                .height(6.0)
+                .background(surface())
+                .corner_radius(3.0)
+                .child(Box::new(
+                    Flex::row()
+                        .width(((inner - 184.0).max(8.0) * (value - min) / (max - min)).max(0.0))
+                        .height(6.0)
+                        .background(accent())
+                        .corner_radius(3.0),
+                )),
+        ))
+        .child(Box::new(Flex::row().width(38.0).child(text(
+            property.format(value),
+            text_color(),
+            11.0,
+        ))))
+        .child(spacer());
+    for increase in [false, true] {
+        row = row.child(sized_icon_button(
+            if increase { Glyph::Plus } else { Glyph::Minus },
+            Help::new(property.help(increase)),
+            24.0,
+            if increase { value < max } else { value > min },
+            false,
+            state,
+            move |s| set_clip_color(s, |color| property.step(color, increase)),
+        ));
+    }
+    Box::new(row)
+}
+
 fn change_clip_fade(state: &UiState, incoming: bool, increase: bool) {
     if let Some((track_id, clip)) = selected_clip(state) {
         let fps = state.frame_rate();
@@ -590,7 +726,7 @@ fn track_labels(project: &Project) -> Vec<(u64, String)> {
                 audio += 1;
                 format!("A{audio}")
             };
-            (track.id, label)
+            (track.id, track.display_name(&label))
         })
         .collect()
 }
@@ -733,6 +869,9 @@ fn program_layers<'a>(
     let mut lost_picture = None;
     let mut lost_sound = None;
     for track in project.tracks() {
+        if track.hidden {
+            continue;
+        }
         for clip in &track.clips {
             if clip.start_frame > frame || frame - clip.start_frame >= clip.duration_frames {
                 continue;
@@ -1852,7 +1991,7 @@ fn compatible_destinations(tracks: &[Track], track_id: u64, clip: &Clip) -> Vec<
     };
     tracks
         .iter()
-        .filter(|track| track.id != track_id && track.kind == source.kind)
+        .filter(|track| !track.locked && track.id != track_id && track.kind == source.kind)
         .map(|track| {
             let occupied = track.clips.iter().any(|other| {
                 clip.start_frame < other.start_frame.saturating_add(other.duration_frames)
@@ -2054,6 +2193,26 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     title_toggle(state, "Parse Markdown", title.parse_markdown, |title| {
                         title.parse_markdown = !title.parse_markdown
                     }),
+                ],
+            ));
+        }
+        if track_kind == TrackKind::Video
+            && media.is_some_and(|media| media.kind != MediaKind::Audio)
+        {
+            rows.push(section(
+                "Color",
+                vec![
+                    color_control(state, inner, ColorProperty::Brightness, clip.color),
+                    color_control(state, inner, ColorProperty::Contrast, clip.color),
+                    color_control(state, inner, ColorProperty::Saturation, clip.color),
+                    inline(secondary_button(
+                        None,
+                        "Reset color",
+                        !clip.color.neutral(),
+                        state,
+                        |s| set_clip_color(s, |color| *color = Default::default()),
+                    )),
+                    text("Color affects playback and export.", faint(), 10.0),
                 ],
             ));
         }
@@ -2504,12 +2663,20 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
             track_id: track.id,
             kind: track.kind,
             label: label.clone(),
-            removable: project
+            locked: track.locked,
+            hidden: track.hidden,
+            base: project
                 .tracks()
                 .iter()
-                .filter(|other| other.kind == track.kind)
-                .count()
-                > 1,
+                .find(|other| other.kind == TrackKind::Video)
+                .is_some_and(|other| other.id == track.id),
+            removable: !track.locked
+                && project
+                    .tracks()
+                    .iter()
+                    .filter(|other| other.kind == track.kind)
+                    .count()
+                    > 1,
             clips: track
                 .clips
                 .iter()
@@ -3022,6 +3189,11 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
     );
 
     let lanes = timeline_lanes(state, project, fps);
+    for lane in &lanes {
+        for help in lane.toggle_help() {
+            help.register(state);
+        }
+    }
     let zoom = state.timeline_zoom.get();
     let span = state.visible_frames();
     let selected = !selection.is_empty();
@@ -3359,10 +3531,88 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 settings_modal(state, viewport)
             } else {
                 Box::new(Flex::row().size(0.0, 0.0)) as BoxedWidget
+            })
+            .child(if state.rename_track.get().is_some() {
+                rename_track_modal(state, viewport)
+            } else {
+                Box::new(Flex::row().size(0.0, 0.0)) as BoxedWidget
             }),
     );
     state.finish_tooltips();
     content
+}
+
+fn rename_track_modal(state: &UiState, viewport: Size) -> BoxedWidget {
+    let width = 380.0_f32.min((viewport.width - 24.0).max(200.0));
+    let height = 210.0;
+    let valid = crate::timeline::Track::valid_name(state.track_name.value().trim());
+    let submit = state.clone();
+    let close = state.clone();
+    Box::new(Layer {
+        style: Layer::at(0.0, 0.0, viewport.width, viewport.height),
+        on_click: Some(Rc::new(move || close.rename_track.set(None))),
+        children: vec![
+            Box::new(
+                Flex::row()
+                    .size(viewport.width, viewport.height)
+                    .background(Color::rgba(0, 0, 0, 180)),
+            ),
+            Box::new(Layer {
+                style: Layer::at(
+                    (viewport.width - width) / 2.0,
+                    (viewport.height - height) / 2.0,
+                    width,
+                    height,
+                ),
+                on_click: Some(Rc::new(|| {})),
+                children: vec![Box::new(
+                    Flex::column()
+                        .size(width, height)
+                        .padding(20.0)
+                        .gap(12.0)
+                        .background(panel_raised())
+                        .border(border(), 1.0)
+                        .corner_radius(12.0)
+                        .child(heading("Rename track", text_color(), 18.0))
+                        .child(text(
+                            "Up to 32 characters. Leave blank for V1 / A1.",
+                            muted(),
+                            11.0,
+                        ))
+                        .child(Box::new(
+                            TextInput::controlled(&state.track_name)
+                                .width(width - 40.0)
+                                .height(32.0)
+                                .on_submit(move || submit.apply_track_rename()),
+                        ))
+                        .child(text(
+                            if valid {
+                                ""
+                            } else {
+                                "Use 32 characters or fewer, without control characters."
+                            },
+                            TITLE,
+                            10.0,
+                        ))
+                        .child(Box::new(
+                            Flex::row()
+                                .gap(8.0)
+                                .child(spacer())
+                                .child(secondary_button(None, "Cancel", true, state, |s| {
+                                    s.rename_track.set(None)
+                                }))
+                                .child(secondary_button(
+                                    None,
+                                    "Rename",
+                                    valid,
+                                    state,
+                                    UiState::apply_track_rename,
+                                )),
+                        )),
+                )],
+            }),
+        ],
+    })
 }
 
 fn export_field(
@@ -4480,6 +4730,7 @@ mod tests {
             volume: 1.0,
             muted: false,
             speed: 1.0,
+            color: Default::default(),
             transition: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
@@ -4500,6 +4751,9 @@ mod tests {
         .map(|(id, kind)| Track {
             id: id as u64,
             kind,
+            name: String::new(),
+            locked: false,
+            hidden: false,
             clips: Vec::new(),
         })
         .collect::<Vec<_>>();
@@ -4526,6 +4780,9 @@ mod tests {
         let mut tracks = vec![Track {
             id: 0,
             kind: TrackKind::Video,
+            name: String::new(),
+            locked: false,
+            hidden: false,
             clips: Vec::new(),
         }];
         for (index, (start, duration)) in [(0, 10), (30, 10), (9, 2), (29, 2), (15, 5), (0, 40)]
@@ -4535,6 +4792,9 @@ mod tests {
             tracks.push(Track {
                 id: index as u64 + 1,
                 kind: TrackKind::Video,
+                name: String::new(),
+                locked: false,
+                hidden: false,
                 clips: vec![destination_clip(start, duration)],
             });
         }
@@ -4591,6 +4851,103 @@ mod tests {
             Renderer::new().render(build(state, viewport), viewport, &mut painter);
         });
         painter
+    }
+
+    #[test]
+    fn inspector_color_controls_for_video_media_only() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/color.png".into(),
+            kind: MediaKind::Image,
+            duration_us: None,
+            has_audio: false
+        })));
+        let mut clip = destination_clip(0, 30);
+        clip.content = ClipContent::Media { media_id: 1 };
+        let id = clip.id;
+        assert!(state.edit(Command::InsertClip { track_id: 0, clip }));
+        state.select_clip(Some((0, id)));
+        let painter = render(&state, 1280.0, 1600.0);
+        for label in [
+            "COLOR",
+            "Brightness",
+            "Contrast",
+            "Saturation",
+            "Reset color",
+            "Color affects playback and export.",
+        ] {
+            assert!(painter.labels.iter().any(|text| text == label), "{label}");
+        }
+        set_clip_color(&state, |color| {
+            color.brightness = 0.2;
+            color.contrast = 1.3;
+            color.saturation = 0.0;
+        });
+        let painter = render(&state, 1280.0, 1600.0);
+        for label in ["+20", "130%", "0%"] {
+            assert!(painter.labels.iter().any(|text| text == label), "{label}");
+        }
+        state.select_clip(None);
+        assert!(
+            !render(&state, 1280.0, 900.0)
+                .labels
+                .iter()
+                .any(|text| text == "Reset color")
+        );
+        assert!(state.add_title());
+        assert!(
+            !render(&state, 1280.0, 900.0)
+                .labels
+                .iter()
+                .any(|text| text == "Reset color")
+        );
+    }
+
+    #[test]
+    fn color_property_steps_snap_to_grid_and_reach_limits() {
+        for property in [
+            ColorProperty::Brightness,
+            ColorProperty::Contrast,
+            ColorProperty::Saturation,
+        ] {
+            let mut color = ColorAdjust::default();
+            let (min, max) = property.range();
+            let scale = property.steps_per_unit();
+            property.set(&mut color, min);
+            for tick in 1..=((max - min) * scale) as u32 {
+                property.step(&mut color, true);
+                assert_eq!(property.get(color), (min * scale + tick as f32) / scale);
+            }
+            property.step(&mut color, true);
+            assert_eq!(property.get(color), max);
+            for tick in 1..=((max - min) * scale) as u32 {
+                property.step(&mut color, false);
+                assert_eq!(property.get(color), (max * scale - tick as f32) / scale);
+            }
+            property.step(&mut color, false);
+            assert_eq!(property.get(color), min);
+            property.set(&mut color, 0.123);
+            property.step(&mut color, true);
+            assert_eq!(
+                property.get(color),
+                if matches!(property, ColorProperty::Brightness) {
+                    0.15
+                } else {
+                    0.2
+                }
+            );
+            property.set(&mut color, 0.123);
+            property.step(&mut color, false);
+            assert_eq!(
+                property.get(color),
+                if matches!(property, ColorProperty::Brightness) {
+                    0.05
+                } else {
+                    0.0
+                }
+            );
+        }
     }
 
     #[test]
@@ -4976,6 +5333,58 @@ mod tests {
             assert!(painter.labels.iter().any(|label| label == "Undo"));
             assert!(scene.hit_test(point).is_none());
         });
+    }
+
+    #[test]
+    fn track_toggle_hover_help_survives_window_rebuilds() {
+        for (width, height) in [(1280.0, 760.0), (2560.0, 1856.0)] {
+            let state = UiState::new();
+            for (track_id, hidden, locked, label) in [
+                (0, false, false, "Lock track"),
+                (0, false, true, "Unlock track"),
+                (0, false, false, "Hide track"),
+                (0, true, false, "Show track"),
+                (2, false, false, "Mute track"),
+                (2, true, false, "Unmute track"),
+            ] {
+                state.edit(Command::SetTrackHidden { track_id, hidden });
+                state.edit(Command::SetTrackLocked { track_id, locked });
+                render(&state, width, height);
+                let help = state.tooltip_controller((label, track_id));
+                creamui::reactive::with_context_scope(|| {
+                    creamui::reactive::provide_context(creamui::ThemeProvider::new(
+                        creamui::Theme::dark(),
+                    ));
+                    let viewport = Size { width, height };
+                    let mut painter = TestPainter::default();
+                    let scene =
+                        Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+                    let caption = if track_id == 0 { "V1" } else { "A1" };
+                    let header = painter
+                        .bounds
+                        .iter()
+                        .find(|(text, _)| text == caption)
+                        .unwrap()
+                        .1;
+                    let point = Point {
+                        x: state.timeline_rect.get().x
+                            + if matches!(label, "Lock track" | "Unlock track") {
+                                111.0
+                            } else {
+                                137.0
+                            },
+                        y: header.y + 9.0,
+                    };
+                    scene.hover_hit_test(point).unwrap().1(true);
+                });
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                render(&state, width, height);
+                let painter = render(&state, width, height);
+                assert!(help.visible(), "{label} at {width}×{height}");
+                assert!(painter.labels.iter().any(|text| text == label));
+                help.hover(false);
+            }
+        }
     }
 
     #[test]
@@ -5879,16 +6288,117 @@ mod tests {
         }
     }
 
+    #[test]
+    fn locked_lanes_refuse_pointer_and_marquee_selection() {
+        let state = UiState::new();
+        state.timeline_rect.set(TIMELINE);
+        assert!(state.add_title());
+        assert!(state.edit(Command::SetTrackLocked {
+            track_id: 0,
+            locked: true
+        }));
+        assert!(state.selected.peek().is_empty());
+        let timeline = view(&state);
+        press(&timeline, at(30.0), 50.0);
+        drag_to(&timeline, at(45.0), 50.0);
+        release(&timeline);
+        assert!(state.selected.peek().is_empty());
+        state.select_all();
+        assert!(state.selected.peek().is_empty());
+        assert!(state.editor.borrow().project().tracks()[0].locked);
+        assert_eq!(
+            state.editor.borrow().project().tracks()[0].clips[0].duration_frames,
+            90
+        );
+    }
+
+    #[test]
+    fn header_double_click_uses_local_coordinates_to_open_rename() {
+        let state = UiState::new();
+        state.timeline_rect.set(Rect {
+            x: 200.0,
+            y: 400.0,
+            ..TIMELINE
+        });
+        let timeline = view(&state);
+        let double_click = timeline.on_double_click_at().unwrap();
+        double_click(Point { x: 110.0, y: 45.0 });
+        assert!(state.rename_track.peek().is_none());
+        double_click(Point { x: 20.0, y: 45.0 });
+        assert_eq!(state.rename_track.peek(), Some(0));
+        state.track_name.set_value("x".repeat(33));
+        state.apply_track_rename();
+        assert_eq!(state.rename_track.peek(), Some(0));
+        assert!(state.editor.borrow().project().tracks()[0].name.is_empty());
+        state.track_name.set_value(" Picture ");
+        state.apply_track_rename();
+        assert!(state.rename_track.peek().is_none());
+        assert_eq!(state.editor.borrow().project().tracks()[0].name, "Picture");
+        state.undo();
+        assert!(state.editor.borrow().project().tracks()[0].name.is_empty());
+    }
+
+    #[test]
+    fn track_headers_ellipsize_names_and_keep_controls_in_bounds() {
+        let state = UiState::new();
+        assert!(state.edit(Command::RenameTrack {
+            track_id: 0,
+            name: "A very long but valid track name".into()
+        }));
+        for width in [680.0, 1000.0, 1280.0] {
+            let painter = render(&state, width, 760.0);
+            let (label, name) = painter
+                .bounds
+                .iter()
+                .find(|(label, _)| label.starts_with("A very"))
+                .unwrap();
+            assert!(label.ends_with('…'));
+            assert!(run_width(label, 12.0, "system-ui", true) <= name.width);
+            assert!(name.width <= super::super::timeline_view::HEADER_WIDTH - 100.0);
+            assert!(painter.labels.iter().any(|label| label == "BASE"));
+            creamui::reactive::with_context_scope(|| {
+                creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
+                    creamui::Theme::dark(),
+                ));
+                let mut timeline = view(&state);
+                let children = timeline.children();
+                assert_eq!(children.len(), 4);
+                for child in children {
+                    let layout = child.style().layout;
+                    assert_eq!(layout.size.width, Dimension::Length(50.0));
+                    let creamui::core::layout::LengthPercentageAuto::Length(x) = layout.inset.left
+                    else {
+                        panic!("header controls need an absolute x position");
+                    };
+                    assert!(x >= name.x);
+                    assert!(x + 50.0 <= super::super::timeline_view::HEADER_WIDTH - 30.0);
+                }
+            });
+        }
+        assert!(state.edit(Command::RenameTrack {
+            track_id: 0,
+            name: "W".repeat(32)
+        }));
+        let painter = render(&state, 680.0, 760.0);
+        let (label, name) = painter
+            .bounds
+            .iter()
+            .find(|(label, _)| label.starts_with("WW"))
+            .unwrap();
+        assert!(label.ends_with('…'));
+        assert!(run_width(label, 12.0, "system-ui", true) <= name.width);
+    }
+
     const TIMELINE: Rect = Rect {
         x: 0.0,
         y: 0.0,
-        width: 1128.0,
+        width: 1184.0,
         height: 240.0,
     };
 
     /// The timeline x for `frame` with a 1000 px wide, 300 frame view.
     fn at(frame: f32) -> f32 {
-        128.0 + frame * 1000.0 / 300.0
+        super::super::timeline_view::HEADER_WIDTH + frame * 1000.0 / 300.0
     }
 
     fn press(view: &TimelineView, x: f32, y: f32) {
@@ -6103,6 +6613,7 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 speed: 1.0,
+                color: Default::default(),
                 transition: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
@@ -6130,6 +6641,9 @@ mod tests {
                 track_id: 0,
                 kind: TrackKind::Video,
                 label: "V1".into(),
+                locked: false,
+                hidden: false,
+                base: true,
                 removable: false,
                 clips: vec![LaneClip {
                     transition_frames: 0,

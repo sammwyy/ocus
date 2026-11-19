@@ -1070,7 +1070,6 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
-                noise_reduction: false,
                 color: Default::default(),
                 lut: None,
                 transition_out: None,

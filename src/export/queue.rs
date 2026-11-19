@@ -270,7 +270,6 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
-                noise_reduction: false,
                 id: 1,
                 start_frame: 0,
                 duration_frames: 8,

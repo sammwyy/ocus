@@ -572,6 +572,48 @@ fn set_clip_transform(state: &UiState, change: impl FnOnce(&mut Transform)) {
     }
 }
 
+fn picture_in_picture_section(state: &UiState, current: Transform, editable: bool) -> BoxedWidget {
+    const SCALE: f32 = 0.30;
+    const MARGIN: f32 = 0.04;
+    let offset = (1.0 - SCALE) / 2.0 - MARGIN;
+    let corners = [
+        ("Top left", -offset, -offset),
+        ("Top right", offset, -offset),
+        ("Bottom left", -offset, offset),
+        ("Bottom right", offset, offset),
+    ];
+    section(
+        "Picture-in-picture",
+        vec![
+            text("Replaces the current transform.", muted(), 11.0),
+            Box::new(
+                Grid::new().columns(2).gap(6.0).with_children(
+                    corners
+                        .into_iter()
+                        .map(|(label, x, y)| {
+                            let preset = Transform {
+                                scale: SCALE,
+                                x,
+                                y,
+                                ..Transform::default()
+                            };
+                            secondary_button(
+                                None,
+                                label,
+                                editable && current != preset,
+                                state,
+                                move |s| {
+                                    set_clip_transform(s, |transform| *transform = preset);
+                                },
+                            )
+                        })
+                        .collect(),
+                ),
+            ),
+        ],
+    )
+}
+
 #[derive(Clone, Copy)]
 struct TransformField {
     label: &'static str,
@@ -2323,11 +2365,8 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         subtitle = "Selection";
         rows.extend(selection_rows(state, project, inner));
     } else if let Some((track_id, clip)) = selected_clip(state) {
-        let track_kind = project
-            .tracks()
-            .iter()
-            .find(|track| track.id == track_id)
-            .map_or(TrackKind::Video, |track| track.kind);
+        let track = project.tracks().iter().find(|track| track.id == track_id);
+        let track_kind = track.map_or(TrackKind::Video, |track| track.kind);
         let media = match clip.content {
             ClipContent::Media { media_id } => {
                 project.media().iter().find(|media| media.id == media_id)
@@ -2554,6 +2593,11 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     )),
                     text("Color affects playback and export.", faint(), 10.0),
                 ],
+            ));
+            rows.push(picture_in_picture_section(
+                state,
+                clip.transform,
+                !busy && track.is_some_and(|track| !track.locked),
             ));
         }
         if (track_kind == TrackKind::Audio || clip.linked_audio) && media.is_some() {
@@ -7275,6 +7319,12 @@ mod tests {
                 .iter()
                 .any(|l| l == "TRANSFORM")
         );
+        assert!(
+            !render(&state, 1280.0, 1000.0)
+                .labels
+                .iter()
+                .any(|l| l == "PICTURE-IN-PICTURE")
+        );
         let title = selected_clip(&state).unwrap();
         assert!(!state.edit(Command::SetClipTransform {
             track_id: title.0,
@@ -7321,6 +7371,13 @@ mod tests {
                     .any(|l| l == "TRANSFORM"),
                 kind == MediaKind::Video
             );
+            assert_eq!(
+                render(&state, 1280.0, 1950.0)
+                    .labels
+                    .iter()
+                    .any(|l| l == "PICTURE-IN-PICTURE"),
+                kind == MediaKind::Video
+            );
             if kind == MediaKind::Audio {
                 assert!(!state.edit(Command::SetClipTransform {
                     track_id,
@@ -7332,6 +7389,102 @@ mod tests {
                 }));
             }
         }
+    }
+
+    #[test]
+    fn picture_in_picture_presets_compose_in_each_corner_and_are_undoable() {
+        use crate::media::composite::{Compositor, VisualPlan};
+        use std::sync::atomic::AtomicBool;
+
+        let state = UiState::new();
+        let fixture = tempfile::tempdir().unwrap();
+        let previous = Transform {
+            rotation: 90.0,
+            crop_left: 0.25,
+            opacity: 0.5,
+            ..Transform::default()
+        };
+        for (track_id, rgb) in [(0, [255, 0, 0]), (1, [0, 255, 0])] {
+            let id = track_id + 1;
+            let path = fixture.path().join(format!("{id}.ppm"));
+            let mut ppm = b"P6\n100 50\n255\n".to_vec();
+            ppm.extend(rgb.repeat(100 * 50));
+            std::fs::write(&path, ppm).unwrap();
+            assert!(state.edit(Command::ImportMedia(Media {
+                id,
+                path,
+                kind: MediaKind::Image,
+                duration_us: None,
+                has_audio: false,
+            })));
+            assert!(state.edit(Command::InsertClip {
+                track_id,
+                clip: Clip {
+                    id,
+                    content: ClipContent::Media { media_id: id },
+                    transform: if track_id == 1 {
+                        previous
+                    } else {
+                        Transform::default()
+                    },
+                    ..destination_clip(0, 30)
+                },
+            }));
+        }
+        state.select_clip(Some((1, 2)));
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
+                creamui::Theme::dark(),
+            ));
+            for (label, x, y) in [
+                ("Top left", 4, 2),
+                ("Top right", 66, 2),
+                ("Bottom left", 4, 33),
+                ("Bottom right", 66, 33),
+            ] {
+                let mut painter = TestPainter::default();
+                let scene = Renderer::new().render(
+                    inspector(&state, state.editor.borrow().project(), 220.0, false),
+                    Size {
+                        width: 220.0,
+                        height: 1600.0,
+                    },
+                    &mut painter,
+                );
+                assert!(painter.labels.iter().any(|l| l == "PICTURE-IN-PICTURE"));
+                let (_, button) = painter.bounds.iter().find(|(l, _)| l == label).unwrap();
+                assert!(button.x >= 0.0 && button.x + button.width <= 220.0);
+                scene
+                    .hit_test(Point {
+                        x: button.x + button.width / 2.0,
+                        y: button.y + button.height / 2.0,
+                    })
+                    .unwrap()();
+
+                let transform = selected_clip(&state).unwrap().1.transform;
+                assert_eq!(transform.scale, 0.3);
+                let plan = VisualPlan::from_project(state.editor.borrow().project());
+                let frame = Compositor::new(plan, 100, 50, (30, 1))
+                    .frame(0, &Arc::new(AtomicBool::new(false)))
+                    .unwrap()
+                    .unwrap();
+                for (index, pixel) in frame.pixels.as_chunks::<4>().0.iter().enumerate() {
+                    let overlay = (x..x + 30).contains(&(index % 100))
+                        && (y..y + 15).contains(&(index / 100));
+                    let expected = if overlay {
+                        [0, 255, 0, 255]
+                    } else {
+                        [255, 0, 0, 255]
+                    };
+                    assert_eq!(*pixel, expected, "{label}, pixel {index}");
+                }
+                state.run(Action::Undo);
+                assert_eq!(selected_clip(&state).unwrap().1.transform, previous);
+                state.run(Action::Redo);
+                assert_eq!(selected_clip(&state).unwrap().1.transform, transform);
+                state.run(Action::Undo);
+            }
+        });
     }
 
     #[test]

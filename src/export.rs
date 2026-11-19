@@ -557,8 +557,12 @@ impl AudioEncoder {
                 }
             }
         } else {
-            for (dest, sample) in frame.plane_mut::<f32>(0).iter_mut().zip(&self.pending) {
-                *dest = *sample;
+            for (dest, sample) in frame
+                .plane_mut::<(f32, f32)>(0)
+                .iter_mut()
+                .zip(self.pending.as_chunks::<2>().0)
+            {
+                *dest = (sample[0], sample[1]);
             }
         }
         self.encoder
@@ -1214,6 +1218,161 @@ mod tests {
         assert!(bright);
         fs::remove_file(target).unwrap();
         fs::remove_dir(dir).unwrap();
+    }
+
+    fn decoded_stereo(path: &std::path::Path) -> Vec<(f32, f32)> {
+        let mut input = ffmpeg::format::input(path).unwrap();
+        let stream = input.streams().best(ffmpeg::media::Type::Audio).unwrap();
+        let index = stream.index();
+        let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+            .unwrap()
+            .decoder()
+            .audio()
+            .unwrap();
+        let mut samples = Vec::new();
+        let mut collect = |decoder: &mut ffmpeg::decoder::Audio| {
+            let mut frame = ffmpeg::frame::Audio::empty();
+            while decoder.receive_frame(&mut frame).is_ok() {
+                assert_eq!(frame.channels(), 2);
+                if frame.is_planar() {
+                    let (left, right) = (frame.plane::<f32>(0), frame.plane::<f32>(1));
+                    samples.extend(left.iter().copied().zip(right.iter().copied()));
+                } else {
+                    samples.extend_from_slice(frame.plane::<(f32, f32)>(0));
+                }
+            }
+        };
+        for (packet_stream, packet) in input.packets() {
+            if packet_stream.index() == index {
+                decoder.send_packet(&packet).unwrap();
+                collect(&mut decoder);
+            }
+        }
+        decoder.send_eof().unwrap();
+        collect(&mut decoder);
+        samples
+    }
+
+    #[test]
+    fn opus_export_keeps_every_stereo_sample_like_aac() {
+        use crate::project::export_settings::{AudioCodec, Container, ExportSettings, VideoCodec};
+        ffmpeg::init().unwrap();
+        if ffmpeg::encoder::find(ffmpeg::codec::Id::VP9).is_none()
+            || ffmpeg::encoder::find(ffmpeg::codec::Id::OPUS).is_none()
+        {
+            return;
+        }
+        let dir = export_test_base().join(format!(
+            "ocus-opus-stereo-{}-{}",
+            std::process::id(),
+            NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        let source = dir.join("tone.wav");
+        let rate = 48_000_u32;
+        let mut wav = b"RIFF".to_vec();
+        wav.extend((rate * 4 + 36).to_le_bytes());
+        wav.extend(b"WAVEfmt ");
+        wav.extend(16_u32.to_le_bytes());
+        wav.extend(1_u16.to_le_bytes());
+        wav.extend(2_u16.to_le_bytes());
+        wav.extend(rate.to_le_bytes());
+        wav.extend((rate * 4).to_le_bytes());
+        wav.extend(4_u16.to_le_bytes());
+        wav.extend(16_u16.to_le_bytes());
+        wav.extend(b"data");
+        wav.extend((rate * 4).to_le_bytes());
+        for n in 0..rate {
+            let t = f64::from(n) / f64::from(rate);
+            for hz in [440.0, 660.0] {
+                let sample = 8_000.0 * (std::f64::consts::TAU * hz * t).sin();
+                wav.extend((sample.round() as i16).to_le_bytes());
+            }
+        }
+        fs::write(&source, wav).unwrap();
+        let mut editor = Editor::new(Project::new("Opus stereo"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: source,
+            kind: MediaKind::Audio,
+            duration_us: Some(1_000_000),
+            has_audio: true,
+        })));
+        let track_id = editor
+            .project()
+            .tracks()
+            .iter()
+            .find(|track| track.kind == TrackKind::Audio)
+            .unwrap()
+            .id;
+        assert!(editor.apply(Command::InsertClip {
+            track_id,
+            clip: Clip {
+                id: 1,
+                start_frame: 0,
+                source_start_frame: 0,
+                duration_frames: 30,
+                content: ClipContent::Media { media_id: 1 },
+                volume: 1.0,
+                muted: false,
+                linked_audio: false,
+            },
+        }));
+        let mut settings = ExportSettings::for_project(
+            96,
+            54,
+            crate::project::FrameRate {
+                numerator: 24,
+                denominator: 1,
+            },
+        );
+        let expected_rms = 8_000.0 / 32_768.0 / std::f32::consts::SQRT_2;
+        for (container, video_codec, audio_codec, name) in [
+            (
+                Container::Matroska,
+                VideoCodec::H264,
+                AudioCodec::Aac,
+                "aac.mkv",
+            ),
+            (
+                Container::WebM,
+                VideoCodec::Vp9,
+                AudioCodec::Opus,
+                "opus.webm",
+            ),
+        ] {
+            settings.container = container;
+            settings.video_codec = video_codec;
+            settings.audio_codec = audio_codec;
+            let target = dir.join(name);
+            render_with_settings(
+                editor.project(),
+                &target,
+                &settings,
+                Arc::new(ExportControl::default()),
+            )
+            .unwrap();
+            let samples = decoded_stereo(&target);
+            assert!(samples.len() >= 47_000, "{name}: {} samples", samples.len());
+            for (start, window) in samples[4_800..43_200]
+                .as_chunks::<480>()
+                .0
+                .iter()
+                .enumerate()
+            {
+                let rms = |channel: fn(&(f32, f32)) -> f32| {
+                    (window.iter().map(|s| channel(s).powi(2)).sum::<f32>() / window.len() as f32)
+                        .sqrt()
+                };
+                for (label, rms) in [("left", rms(|s| s.0)), ("right", rms(|s| s.1))] {
+                    assert!(
+                        (rms / expected_rms - 1.0).abs() < 0.2,
+                        "{name} {label} RMS {rms:.4} vs {expected_rms:.4} in window {start}"
+                    );
+                }
+            }
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

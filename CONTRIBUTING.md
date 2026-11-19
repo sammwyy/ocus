@@ -36,6 +36,16 @@ run headlessly but still link FFmpeg. Add dependencies with `cargo add`, commit
 `Cargo.lock`, and enable only the features an implemented workflow uses.
 Use the committed GitHub revision of CreamUI, not a sibling checkout.
 
+## Performance benchmarks
+
+Run `cargo bench --locked --bench performance` locally (requires the native
+dependencies above and the FFmpeg CLI for a generated two-second 1080p fixture).
+The benchmark itself uses Ocus library APIs, with no display or GPU required.
+Median timings and pass/fail budgets are written to `target/benchmarks/results.md`
+and raw `results.csv`; a missed budget exits non-zero. CI runs this exact command
+on every PR and push to main. See the [CI budgets](ROADMAP.md#performance-targets)
+for coverage and limitations. `cargo test --all-targets` skips benchmark timing.
+
 ## Review boundaries
 
 - A UI control must perform its stated action; do not expose an inactive

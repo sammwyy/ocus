@@ -87,6 +87,13 @@ The media bin offers search, a segmented
 All/video/audio/still filter with per-type counts, grid and list views, and files can also be dropped onto it to import
 them. Each source has a one-click insert action that adds a clip on a video or
 audio track using the probed duration (still images default to three seconds).
+To make a **picture-in-picture**, overlap a video or still clip on V2 with a
+background clip on V1. Select the overlay, then choose a corner under
+**Picture-in-picture** in the Inspector. The preset replaces the clip's
+transform with a 30% scale and a corner position. Fine-tune it under
+**Transform**, or undo once to restore the previous settings. The Program
+monitor and export use the same placement.
+
 A video with sound becomes one clip whose audio is linked to the picture:
 the timeline draws it as an attached audio band under the video, and every
 split, move, trim, delete or ripple applies to both, so cutting a clip in three

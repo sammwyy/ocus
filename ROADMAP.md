@@ -111,7 +111,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [x] Speed control from 0.25x to 4x
 - [ ] Reverse clip and freeze frame
 - [x] Transforms: scale, position, rotation, crop, opacity
-- [ ] Picture-in-picture
+- [x] Picture-in-picture
 - [x] Snapping and timeline zoom
 - [x] Timeline markers
 

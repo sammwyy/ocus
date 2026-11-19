@@ -1058,6 +1058,7 @@ mod tests {
                 transform: crate::timeline::Transform::default(),
                 noise_reduction: false,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 transition_out: None,
@@ -1270,6 +1271,7 @@ mod tests {
                 playback: crate::timeline::Playback::Forward,
                 color: Default::default(),
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 transition_out: None,
@@ -1373,6 +1375,7 @@ mod tests {
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -1536,6 +1539,7 @@ mod tests {
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -1695,6 +1699,7 @@ mod tests {
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -1824,6 +1829,7 @@ mod tests {
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 id: 3,
@@ -1902,6 +1908,7 @@ mod tests {
         layered[0].clips = vec![Clip {
             playback: crate::timeline::Playback::Forward,
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             id: 4,
@@ -1926,6 +1933,7 @@ mod tests {
         layered[1].clips = vec![Clip {
             playback: crate::timeline::Playback::Forward,
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             id: 5,
@@ -1957,6 +1965,7 @@ mod tests {
             clips: vec![Clip {
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 id: 6,
@@ -2082,6 +2091,7 @@ mod tests {
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -2170,6 +2180,7 @@ mod tests {
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -2350,6 +2361,7 @@ mod tests {
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -2485,6 +2497,7 @@ mod tests {
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,

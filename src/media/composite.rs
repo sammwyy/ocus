@@ -13,6 +13,53 @@ use std::sync::atomic::AtomicBool;
 use swash::scale::{Render, ScaleContext, Source, image::Image};
 use swash::zeno::{Format, Join, Stroke};
 
+fn mask_coverage(ellipse: bool, x: f32, y: f32, rx: f32, ry: f32, feather: f32) -> f32 {
+    if rx <= 0.0 || ry <= 0.0 {
+        return 0.0;
+    }
+    let distance = if ellipse {
+        (1.0 - ((x / rx).powi(2) + (y / ry).powi(2)).sqrt()) * rx.min(ry)
+    } else {
+        (rx - x.abs()).min(ry - y.abs())
+    };
+    let edge = (feather * 2.0 * rx.min(ry)).max(1.0);
+    let t = (distance / edge + 0.5).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+pub(super) fn apply_mask(
+    image: Arc<FrameImage>,
+    mask: Option<crate::timeline::Mask>,
+) -> Arc<FrameImage> {
+    let Some(mask) = mask else {
+        return image;
+    };
+    let mut image = Arc::unwrap_or_clone(image);
+    let (left, top, width, height) = image.picture;
+    let cx = left as f32 + width as f32 * mask.center_x;
+    let cy = top as f32 + height as f32 * mask.center_y;
+    let rx = width as f32 * mask.width * 0.5;
+    let ry = height as f32 * mask.height * 0.5;
+    let ellipse = mask.shape == crate::timeline::MaskShape::Ellipse;
+    for (y, row) in image
+        .pixels
+        .chunks_exact_mut(image.width as usize * 4)
+        .enumerate()
+    {
+        let dy = y as f32 + 0.5 - cy;
+        for (x, pixel) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let coverage = mask_coverage(ellipse, x as f32 + 0.5 - cx, dy, rx, ry, mask.feather);
+            let coverage = if mask.invert {
+                1.0 - coverage
+            } else {
+                coverage
+            };
+            pixel[3] = (pixel[3] as f32 * coverage).round() as u8;
+        }
+    }
+    Arc::new(image)
+}
+
 pub(super) fn adjust_color(image: Arc<FrameImage>, color: ColorAdjust) -> Arc<FrameImage> {
     if color.neutral() {
         return image;
@@ -114,6 +161,7 @@ impl VisualPlan {
                                 speed: clip.speed,
                                 playback: clip.playback,
                                 effect: clip.effect.clone(),
+                                mask: clip.mask.as_deref().copied(),
                                 lut: clip.lut.clone(),
                                 chroma_key: clip.chroma_key,
                                 color: clip.color,
@@ -202,6 +250,19 @@ impl VisualPlan {
             ))
         } else {
             None
+        }
+    }
+
+    pub(crate) fn replace_mask(&mut self, clip_id: u64, mask: Option<crate::timeline::Mask>) {
+        for track in &mut self.tracks {
+            for clip in track {
+                if let VisualClip::Media(source) = clip
+                    && source.clip_id == clip_id
+                {
+                    source.mask = mask;
+                    return;
+                }
+            }
         }
     }
 
@@ -313,6 +374,7 @@ impl Compositor {
                             position.saturating_sub(source.start) as f32 * self.fps.1 as f32
                                 / self.fps.0 as f32,
                         );
+                        let image = apply_mask(image, source.mask);
                         let transform = source.transform_at(position);
                         let opaque = transform.is_identity()
                             && image.width == self.width
@@ -417,6 +479,7 @@ impl Compositor {
                     position.saturating_sub(source.start) as f32 * self.fps.1 as f32
                         / self.fps.0 as f32,
                 );
+                let image = apply_mask(image, source.mask);
                 let transform = source.transform_at(position);
                 if !transform.is_identity() {
                     draw_transformed(pixels, self.width, self.height, &image, transform);
@@ -1179,6 +1242,7 @@ mod tests {
                 speed: 1.0,
                 playback: Default::default(),
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: key,
                 clip_id: id,
@@ -1268,6 +1332,7 @@ mod tests {
             duration: 3,
             color: Default::default(),
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             transform: Transform {
@@ -1297,6 +1362,182 @@ mod tests {
                     assert_eq!(pixel, &[0, 0, 0, 255]);
                 } else {
                     assert_eq!(pixel, &fitted.pixels[index * 4..index * 4 + 4]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mask_pixel_coverage() {
+        assert_eq!(mask_coverage(false, 0.0, 0.0, 30.0, 20.0, 0.0), 1.0);
+        assert_eq!(mask_coverage(false, 31.0, 0.0, 30.0, 20.0, 0.0), 0.0);
+        assert_eq!(mask_coverage(true, 25.0, 15.0, 30.0, 20.0, 0.0), 0.0);
+        assert_eq!(mask_coverage(true, 0.0, 0.0, 30.0, 20.0, 0.1), 1.0);
+        let inner = mask_coverage(false, 27.0, 0.0, 30.0, 20.0, 0.2);
+        let edge = mask_coverage(false, 30.0, 0.0, 30.0, 20.0, 0.2);
+        let outer = mask_coverage(false, 33.0, 0.0, 30.0, 20.0, 0.2);
+        assert!(inner > edge && edge > outer && outer > 0.0);
+    }
+
+    #[test]
+    fn masks_multiply_alpha_and_invert() {
+        use crate::timeline::{Mask, MaskShape};
+        let image = Arc::new(FrameImage {
+            picture: (2, 0, 8, 8),
+            width: 12,
+            height: 8,
+            pixels: [200, 100, 50, 128].repeat(96),
+        });
+        assert!(Arc::ptr_eq(&image, &apply_mask(image.clone(), None)));
+        for shape in [MaskShape::Rectangle, MaskShape::Ellipse] {
+            let mask = Mask {
+                shape,
+                width: 0.5,
+                height: 0.5,
+                feather: 0.0,
+                ..Default::default()
+            };
+            let normal = apply_mask(image.clone(), Some(mask));
+            let inverted = apply_mask(
+                image.clone(),
+                Some(Mask {
+                    invert: true,
+                    ..mask
+                }),
+            );
+            assert_eq!(normal.pixels[(4 * 12 + 6) * 4 + 3], 128);
+            assert_eq!(normal.pixels[(4 * 12 + 2) * 4 + 3], 0);
+            for (a, b) in normal
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(inverted.pixels.as_chunks::<4>().0.iter())
+            {
+                assert!((i16::from(a[3]) + i16::from(b[3]) - 128).abs() <= 1);
+                assert_eq!(&a[..3], &[200, 100, 50]);
+            }
+        }
+        let empty = apply_mask(
+            image,
+            Some(Mask {
+                width: 0.0,
+                ..Default::default()
+            }),
+        );
+        assert!(
+            empty
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[3] == 0)
+        );
+    }
+
+    #[test]
+    fn masks_follow_transform_in_plain_and_transition_layers() {
+        use crate::timeline::{Mask, MaskShape};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mask.tga");
+        let mut tga = vec![0; 18];
+        tga[2] = 2;
+        tga[12..14].copy_from_slice(&32u16.to_le_bytes());
+        tga[14..16].copy_from_slice(&32u16.to_le_bytes());
+        tga[16] = 32;
+        tga[17] = 40;
+        tga.extend([0, 255, 0, 255, 0, 0, 240, 255].repeat(512));
+        fs::write(&path, tga).unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        for chroma_key in [None, Some(crate::timeline::ChromaKey::default())] {
+            for shape in [MaskShape::Rectangle, MaskShape::Ellipse] {
+                for invert in [false, true] {
+                    for feather in [0.0, 0.3] {
+                        let source = FrameSource {
+                            effect: None,
+                            stabilization: None,
+                            clip_id: 1,
+                            path: path.clone(),
+                            kind: MediaKind::Image,
+                            start: 0,
+                            source_start: 0,
+                            duration: 10,
+                            speed: 1.0,
+                            playback: Playback::Forward,
+                            lut: None,
+                            chroma_key,
+                            color: Default::default(),
+                            mask: Some(Mask {
+                                shape,
+                                invert,
+                                feather,
+                                ..Default::default()
+                            }),
+                            keyframes: Vec::new(),
+                            transform: Transform {
+                                scale: 0.75,
+                                x: 0.1,
+                                rotation: 25.0,
+                                crop_bottom: 0.15,
+                                opacity: 0.8,
+                                ..Default::default()
+                            },
+                        };
+                        let image = VideoLayers::new((30, 1), (32, 32))
+                            .layer_at(&source, 0, &cancelled)
+                            .unwrap();
+                        let masked =
+                            apply_mask(apply_chroma_key(image, source.chroma_key), source.mask);
+                        let mut expected = [0, 0, 0, 255].repeat(1024);
+                        reference_draw_transformed(
+                            &mut expected,
+                            32,
+                            32,
+                            &masked,
+                            source.transform,
+                        );
+                        assert!(expected.as_chunks::<4>().0.iter().any(|pixel| pixel[0] > 0));
+                        for transition in [false, true] {
+                            let plan = VisualPlan {
+                                resolution: (32, 32),
+                                tracks: vec![vec![VisualClip::Media(source.clone())]],
+                                transitions_out: HashMap::new(),
+                                transitions: if transition {
+                                    HashMap::from([(
+                                        1,
+                                        Transition {
+                                            kind: TransitionKind::Dissolve,
+                                            duration_frames: 3,
+                                            direction: Default::default(),
+                                        },
+                                    )])
+                                } else {
+                                    HashMap::new()
+                                },
+                            };
+                            let frame = Compositor::new(plan, 32, 32, (30, 1))
+                                .frame(0, &cancelled)
+                                .unwrap()
+                                .unwrap();
+                            for (actual, expected) in frame
+                                .pixels
+                                .as_chunks::<4>()
+                                .0
+                                .iter()
+                                .zip(expected.as_chunks::<4>().0.iter())
+                            {
+                                for channel in 0..3 {
+                                    let value = if transition {
+                                        (f32::from(expected[channel]) * 0.25).round() as u8
+                                    } else {
+                                        expected[channel]
+                                    };
+                                    assert!(actual[channel].abs_diff(value) <= 1);
+                                }
+                                assert_eq!(actual[3], 255);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1361,6 +1602,7 @@ mod tests {
                 color,
                 speed: 1.0,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 clip_id: 1,
@@ -1468,6 +1710,7 @@ mod tests {
                 playback: crate::timeline::Playback::Forward,
                 color,
                 effect: None,
+                mask: None,
                 lut: Some(lut_path),
                 chroma_key: None,
                 speed: 1.0,
@@ -1538,6 +1781,7 @@ mod tests {
         let lut_path = dir.path().join("curve.cube");
         fs::write(&lut_path, "LUT_1D_SIZE 3\n0 0 0\n0.25 0.25 0.25\n1 1 1\n").unwrap();
         let source = FrameSource {
+            mask: None,
             stabilization: None,
             effect: Some(Effect {
                 shader,
@@ -1780,6 +2024,7 @@ mod tests {
             duration: 11,
             color: Default::default(),
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             transform: Transform::default(),
@@ -2142,6 +2387,7 @@ mod tests {
                 playback: crate::timeline::Playback::Forward,
                 clip_id,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 path,
@@ -2264,6 +2510,7 @@ mod tests {
             speed: 1.0,
             playback: crate::timeline::Playback::Forward,
             effect: None,
+            mask: None,
             lut: Some(lut_path.clone()),
             chroma_key: None,
             clip_id: 1,
@@ -2354,6 +2601,7 @@ mod tests {
         let source = FrameSource {
             playback: crate::timeline::Playback::Forward,
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             speed: 1.0,
@@ -2460,6 +2708,7 @@ mod tests {
                 color: Default::default(),
                 speed: 1.0,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 clip_id: id,
@@ -2763,6 +3012,7 @@ mod tests {
                     speed: 1.0,
                     playback: crate::timeline::Playback::Forward,
                     effect: None,
+                    mask: None,
                     lut: None,
                     chroma_key: None,
                     clip_id: 1,
@@ -2780,6 +3030,7 @@ mod tests {
                     speed: 1.0,
                     playback: crate::timeline::Playback::Forward,
                     effect: None,
+                    mask: None,
                     lut: None,
                     chroma_key: None,
                     clip_id: 2,
@@ -3110,6 +3361,7 @@ mod tests {
                 playback: Playback::Forward,
                 clip_id,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 path,
@@ -3193,6 +3445,7 @@ mod tests {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 clip_id: id,
@@ -3407,6 +3660,7 @@ mod tests {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 color: Default::default(),
@@ -3465,6 +3719,7 @@ mod tests {
                     speed: 1.0,
                     playback: crate::timeline::Playback::Forward,
                     effect: None,
+                    mask: None,
                     lut: None,
                     chroma_key: None,
                     color: Default::default(),
@@ -3570,6 +3825,7 @@ mod tests {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 color: Default::default(),
@@ -3793,6 +4049,7 @@ mod tests {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 color: Default::default(),

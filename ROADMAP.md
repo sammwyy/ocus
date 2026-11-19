@@ -171,7 +171,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 **Editing**
 - [x] Full keyframe support with easing curves
 - [x] Chroma key (green screen)
-- [ ] Simple masks
+- [x] Simple masks
 - [x] Video stabilization
 - [x] Animated title templates
 

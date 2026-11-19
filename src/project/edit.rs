@@ -68,6 +68,11 @@ pub enum Command {
         clip_id: u64,
         effect: Option<crate::timeline::Effect>,
     },
+    SetClipMask {
+        track_id: u64,
+        clip_id: u64,
+        mask: Option<crate::timeline::Mask>,
+    },
     SetClipKeyframes {
         track_id: u64,
         clip_id: u64,
@@ -510,6 +515,7 @@ mod playback_tests {
                 transform: crate::timeline::Transform::default(),
                 noise_reduction: false,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 transition_out: None,
@@ -554,6 +560,7 @@ mod playback_tests {
                     transform: crate::timeline::Transform::default(),
                     noise_reduction: false,
                     effect: None,
+                    mask: None,
                     lut: None,
                     chroma_key: None,
                     transition_out: None,
@@ -777,6 +784,7 @@ mod playback_tests {
             transform: crate::timeline::Transform::default(),
             noise_reduction: false,
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             transition_out: None,
@@ -866,6 +874,7 @@ impl Editor {
             | Command::SetClipSpeed { track_id, .. }
             | Command::SetClipAudio { track_id, .. }
             | Command::SetClipColor { track_id, .. }
+            | Command::SetClipMask { track_id, .. }
             | Command::SetPlayback { track_id, .. }
             | Command::SetClipTransform { track_id, .. }
             | Command::SetClipKeyframes { track_id, .. }
@@ -1039,6 +1048,7 @@ impl Editor {
                     || (!clip.keyframes.is_empty()
                         && !matches!(clip.content, ClipContent::Media { .. }))
                     || !clip.color.valid()
+                    || clip.mask.as_deref().is_some_and(|mask| !mask.valid())
                     || !clip.volume.is_finite()
                     || !(0.0..=2.0).contains(&clip.volume)
                     || !clip.valid_fades()
@@ -1078,6 +1088,9 @@ impl Editor {
                     }
                 };
                 if !compatible
+                    || (clip.mask.is_some()
+                        && (kind != TrackKind::Video
+                            || !matches!(clip.content, ClipContent::Media { .. })))
                     || clip.chroma_key.is_some_and(|key| {
                         !key.valid()
                             || kind != TrackKind::Video
@@ -1392,6 +1405,32 @@ impl Editor {
                 };
                 clip.transform = transform;
                 Some(inverse)
+            }
+            Command::SetClipMask {
+                track_id,
+                clip_id,
+                mask,
+            } => {
+                if mask.is_some_and(|mask| !mask.valid()) {
+                    return None;
+                }
+                let track = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.id == track_id && track.kind == TrackKind::Video)?;
+                let clip = track.clips.iter_mut().find(|clip| clip.id == clip_id)?;
+                if !matches!(clip.content, ClipContent::Media { .. })
+                    || clip.mask.as_deref().copied() == mask
+                {
+                    return None;
+                }
+                let old = std::mem::replace(&mut clip.mask, mask.map(Box::new));
+                Some(Command::SetClipMask {
+                    track_id,
+                    clip_id,
+                    mask: old.map(|mask| *mask),
+                })
             }
             Command::SetClipColor {
                 track_id,
@@ -1996,6 +2035,7 @@ mod tests {
             speed: 1.0,
             playback: Playback::Forward,
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             color: ColorAdjust::default(),
@@ -2668,6 +2708,91 @@ mod tests {
     }
 
     #[test]
+    fn clip_mask_roundtrip_validation_undo_redo_and_split() {
+        use crate::timeline::Mask;
+        let mut editor = Editor::new(Project::new("Masks"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "/mask.png".into(),
+            kind: MediaKind::Image,
+            duration_us: None,
+            has_audio: false
+        })));
+        let clip: Clip = serde_json::from_value(serde_json::json!({
+            "id": 1, "start_frame": 0, "source_start_frame": 0,
+            "duration_frames": 30, "content": {"media": {"media_id": 1}},
+            "volume": 1.0, "muted": false
+        }))
+        .unwrap();
+        assert_eq!(clip.mask, None);
+        assert!(!serde_json::to_string(&clip).unwrap().contains("mask"));
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 0,
+            clip: Box::new(clip),
+        }));
+        let command = |mask| Command::SetClipMask {
+            track_id: 0,
+            clip_id: 1,
+            mask,
+        };
+        assert!(!editor.apply(command(None)));
+        for invalid in [
+            Mask {
+                width: -0.1,
+                ..Default::default()
+            },
+            Mask {
+                center_x: f32::NAN,
+                ..Default::default()
+            },
+            Mask {
+                feather: 1.1,
+                ..Default::default()
+            },
+        ] {
+            assert!(!editor.apply(command(Some(invalid))));
+        }
+        assert!(editor.apply(command(Some(Mask::default()))));
+        let saved = crate::project::format::to_json(editor.project()).unwrap();
+        assert_eq!(
+            crate::project::format::from_json(&saved).unwrap(),
+            *editor.project()
+        );
+        assert!(editor.undo());
+        assert_eq!(editor.project().tracks()[0].clips[0].mask, None);
+        assert!(editor.redo());
+        assert_eq!(
+            editor.project().tracks()[0].clips[0]
+                .mask
+                .as_deref()
+                .copied(),
+            Some(Mask::default())
+        );
+        assert!(editor.apply(Command::Split {
+            track_id: 0,
+            clip_id: 1,
+            at_frame: 15,
+            new_id: 2
+        }));
+        assert!(
+            editor.project().tracks()[0]
+                .clips
+                .iter()
+                .all(|clip| clip.mask.as_deref().copied() == Some(Mask::default()))
+        );
+        assert!(editor.apply(Command::SetTrackLocked {
+            track_id: 0,
+            locked: true
+        }));
+        assert!(!editor.apply(command(None)));
+        assert!(!editor.apply(Command::SetClipMask {
+            track_id: 999,
+            clip_id: 1,
+            mask: None
+        }));
+    }
+
+    #[test]
     fn clip_color_validation_undo_and_serialization() {
         let mut editor = Editor::new(Project::new("Color"));
         assert!(editor.apply(Command::ImportMedia(Media {
@@ -2686,6 +2811,7 @@ mod tests {
             content: ClipContent::Media { media_id: 1 },
             speed: 1.0,
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             volume: 1.0,
@@ -2921,6 +3047,7 @@ mod tests {
                 speed: 1.0,
                 playback: Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -2996,6 +3123,7 @@ mod tests {
             let clip = Clip {
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -3084,6 +3212,7 @@ mod tests {
         let clip = Clip {
             playback: crate::timeline::Playback::Forward,
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             id: 1,
@@ -3167,6 +3296,7 @@ mod tests {
         let title = Clip {
             playback: crate::timeline::Playback::Forward,
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             id: 1,
@@ -3233,6 +3363,7 @@ mod tests {
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -3705,6 +3836,7 @@ mod tests {
         let title = Clip {
             playback: crate::timeline::Playback::Forward,
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             id: 1,
@@ -3813,6 +3945,7 @@ mod tests {
         let clip = Clip {
             playback: crate::timeline::Playback::Forward,
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             id: 1,
@@ -3918,6 +4051,7 @@ mod tests {
         let make_clip = |id, start_frame| Clip {
             playback: crate::timeline::Playback::Forward,
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             id,
@@ -4024,6 +4158,7 @@ mod tests {
                 clip: Box::new(Clip {
                     playback: crate::timeline::Playback::Forward,
                     effect: None,
+                    mask: None,
                     lut: None,
                     chroma_key: None,
                     id,
@@ -4094,6 +4229,7 @@ mod tests {
         let title = |id, start_frame, duration_frames| Clip {
             playback: crate::timeline::Playback::Forward,
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             id,
@@ -4128,6 +4264,7 @@ mod tests {
                 Clip {
                     playback: crate::timeline::Playback::Forward,
                     effect: None,
+                    mask: None,
                     lut: None,
                     chroma_key: None,
                     id: 6,
@@ -4210,6 +4347,7 @@ mod tests {
                 clip: Box::new(Clip {
                     playback: crate::timeline::Playback::Forward,
                     effect: None,
+                    mask: None,
                     lut: None,
                     chroma_key: None,
                     id,
@@ -4254,6 +4392,7 @@ mod tests {
         let clip = Clip {
             playback: crate::timeline::Playback::Forward,
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             id: 2,
@@ -4307,6 +4446,7 @@ mod tests {
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -4339,6 +4479,7 @@ mod tests {
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -4386,6 +4527,7 @@ mod tests {
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -4491,6 +4633,7 @@ mod tests {
             playback: crate::timeline::Playback::Forward,
             noise_reduction: false,
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             transition_out: None,

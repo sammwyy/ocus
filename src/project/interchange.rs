@@ -297,6 +297,7 @@ impl Sequence {
                     stabilization: None,
                     keyframes: Vec::new(),
                     effect: None,
+                    mask: None,
                     lut: None,
                     chroma_key: None,
                     transition: None,

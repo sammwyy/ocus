@@ -151,6 +151,11 @@ pub(super) fn clip_storyboard_key(
             .effect
             .as_ref()
             .and_then(|value| serde_json::to_string(value).ok()),
+        mask: clip
+            .mask
+            .as_deref()
+            .copied()
+            .map(crate::timeline::Mask::bits),
         lut: clip.lut.clone(),
         chroma_key: clip.chroma_key,
         playback: clip.playback,
@@ -392,6 +397,7 @@ pub(crate) struct UiState {
     pub trim_draft: Signal<Option<Command>>,
     pub stabilization_drag: Signal<Option<(u64, u64, crate::timeline::Stabilization)>>,
     pub stabilization_analyzing: Signal<bool>,
+    pub mask_drag: Signal<Option<(u64, u64, usize, crate::timeline::Mask)>>,
     pub trim_hover: Signal<bool>,
     pub marquee: Signal<Option<Rect>>,
     pub timeline_rect: Rc<Cell<Rect>>,
@@ -570,6 +576,7 @@ impl UiState {
             trim_draft: Signal::new(None),
             stabilization_drag: Signal::new(None),
             stabilization_analyzing: Signal::new(false),
+            mask_drag: Signal::new(None),
             trim_hover: Signal::new(false),
             marquee: Signal::new(None),
             timeline_rect: Rc::new(Cell::new(Rect::default())),
@@ -1247,6 +1254,7 @@ impl UiState {
             chroma_key: None,
             stabilization: None,
             effect: None,
+            mask: None,
             playback: crate::timeline::Playback::Forward,
             lut: None,
             color: Default::default(),
@@ -1728,6 +1736,13 @@ impl UiState {
         }
     }
 
+    pub(super) fn cancel_mask_drag(&self) {
+        if self.mask_drag.peek().is_some() {
+            self.mask_drag.set(None);
+            self.request_preview();
+        }
+    }
+
     pub(super) fn preview_chroma_drag(&self, pointer: Point) {
         let Some(gesture) = *self.chroma_gesture.borrow() else {
             return;
@@ -1786,6 +1801,7 @@ impl UiState {
             return;
         }
         self.clear_title_gesture();
+        self.cancel_mask_drag();
         self.title_picker.set_open(false);
         self.selected.set(selection);
         let primary = self.primary_clip();
@@ -1922,6 +1938,7 @@ impl UiState {
     /// so the rest of the sequence still previews.
     fn program_plan(&self) -> (PreviewPlan, AudioPlan) {
         let missing = self.missing_media.peek();
+        let mask_drag = self.mask_drag.peek();
         let editor = self.editor.borrow();
         let project = editor.project();
         let mut sources = Vec::new();
@@ -1945,6 +1962,14 @@ impl UiState {
                         speed: clip.speed,
                         playback: clip.playback,
                         effect: clip.effect.clone(),
+                        mask: match mask_drag {
+                            Some((track_id, clip_id, _, mask))
+                                if track_id == track.id && clip_id == clip.id =>
+                            {
+                                Some(mask)
+                            }
+                            _ => clip.mask.as_deref().copied(),
+                        },
                         lut: clip.lut.clone(),
                         chroma_key: clip.chroma_key,
                         color: clip.color,
@@ -1974,6 +1999,11 @@ impl UiState {
         let mut visual = VisualPlan::without_media(project, &missing);
         if let Some(((.., clip_id), amount)) = self.effect_drag.peek() {
             visual.set_effect_amount(clip_id, amount);
+        }
+        if let Some((_, clip_id, _, _)) = mask_drag
+            && let Some(source) = sources.iter().find(|source| source.clip_id == clip_id)
+        {
+            visual.replace_mask(clip_id, source.mask);
         }
         if let Some(((.., clip_id), title)) = self.title_preview.peek() {
             visual.replace_title(clip_id, title);
@@ -2028,6 +2058,7 @@ impl UiState {
                     speed: 1.0,
                     playback: range.playback,
                     effect: None,
+                    mask: None,
                     lut: None,
                     chroma_key: None,
                     color: Default::default(),
@@ -5231,6 +5262,7 @@ mod tests {
                             crate::timeline::Transform::default(),
                         ),
                         effect: None,
+                        mask: None,
                         lut: None,
                         chroma_key: None,
                         color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
@@ -5375,6 +5407,7 @@ mod tests {
                 clip: Box::new(Clip {
                     playback: crate::timeline::Playback::Forward,
                     effect: None,
+                    mask: None,
                     lut: None,
                     chroma_key: None,
                     id: index,
@@ -5470,6 +5503,78 @@ mod tests {
         assert!(storyboard_requests(&[], &mut cache, &mut recent).is_empty());
         assert!(cache.is_empty());
         assert!(recent.is_empty());
+    }
+
+    #[test]
+    fn program_plan_previews_mask_draft_and_escape_restores_saved_mask() {
+        use crate::media::composite::Compositor;
+        use crate::timeline::Mask;
+        use crate::ui::interaction::Action;
+        use std::sync::atomic::AtomicBool;
+
+        let state = UiState::new();
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("mask.ppm");
+        let mut ppm = b"P6\n32 32\n255\n".to_vec();
+        ppm.extend([255, 255, 255].repeat(32 * 32));
+        std::fs::write(&path, ppm).unwrap();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path,
+            kind: MediaKind::Image,
+            duration_us: None,
+            has_audio: false,
+        })));
+        state.insert_media_at(1, Some((0, 0))).unwrap();
+        let (_, clip_id) = state.primary_clip().unwrap();
+        let saved = Mask::default();
+        assert!(state.edit(Command::SetClipMask {
+            track_id: 0,
+            clip_id,
+            mask: Some(saved),
+        }));
+        let render = || {
+            let plan = state.program_plan().0;
+            Compositor::new(plan.visual.unwrap(), 32, 32, plan.fps)
+                .frame(0, &Arc::new(AtomicBool::new(false)))
+                .unwrap()
+                .unwrap()
+                .pixels
+                .clone()
+        };
+        let baseline = render();
+        let revision = state.revision.peek();
+        for draft in [
+            Mask {
+                width: 0.2,
+                ..saved
+            },
+            Mask {
+                feather: 0.8,
+                ..saved
+            },
+        ] {
+            state.mask_drag.set(Some((99, clip_id, 2, draft)));
+            assert_eq!(state.program_plan().0.sources[0].mask, Some(saved));
+            assert_eq!(render(), baseline);
+            state.mask_drag.set(Some((0, clip_id, 2, draft)));
+            assert_eq!(state.program_plan().0.sources[0].mask, Some(draft));
+            assert_ne!(render(), baseline);
+            assert_eq!(
+                state.editor.borrow().project().tracks()[0].clips[0]
+                    .mask
+                    .as_deref()
+                    .copied(),
+                Some(saved)
+            );
+            state.run(Action::Escape);
+            assert!(state.mask_drag.peek().is_none());
+            assert_eq!(state.program_plan().0.sources[0].mask, Some(saved));
+            assert_eq!(render(), baseline);
+            assert_eq!(state.revision.peek(), revision);
+        }
+        state.undo();
+        assert_eq!(state.program_plan().0.sources[0].mask, None);
     }
 
     #[test]
@@ -6261,6 +6366,7 @@ mod tests {
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 id: 0,

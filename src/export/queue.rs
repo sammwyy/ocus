@@ -281,6 +281,7 @@ mod tests {
                 muted: false,
                 color: Default::default(),
                 effect: None,
+                mask: None,
                 lut: None,
                 chroma_key: None,
                 transition: None,

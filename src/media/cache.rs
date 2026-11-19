@@ -70,6 +70,12 @@ fn storyboard_selected(
     use_proxies: bool,
 ) -> Result<Vec<FrameImage>, String> {
     let mut params = Vec::from(b"storyboard:160x90".as_slice());
+    if let Some(mask) = request.mask {
+        params.extend(b":mask:");
+        for value in mask {
+            params.extend(value.to_le_bytes());
+        }
+    }
     if use_proxies && super::proxy::ready(&request.path).is_some() {
         params.extend(b":proxy:v1");
     }
@@ -296,6 +302,7 @@ mod tests {
         StoryboardKey {
             transform_bits: StoryboardKey::transform_bits(crate::timeline::Transform::default()),
             effect: None,
+            mask: None,
             lut: None,
             chroma_key: None,
             color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),

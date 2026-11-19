@@ -119,6 +119,8 @@ pub struct Clip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effect: Option<Effect>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<Box<Mask>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lut: Option<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chroma_key: Option<crate::timeline::ChromaKey>,
@@ -190,6 +192,80 @@ impl Stabilization {
                 .checked_add(self.analysis.motion.len() as u64)
                 .is_some()
             && self.analysis.motion.iter().flatten().all(|v| v.is_finite())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum MaskShape {
+    Rectangle,
+    Ellipse,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Mask {
+    pub shape: MaskShape,
+    pub center_x: f32,
+    pub center_y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub feather: f32,
+    pub invert: bool,
+}
+
+impl Default for Mask {
+    fn default() -> Self {
+        Self {
+            shape: MaskShape::Ellipse,
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.6,
+            height: 0.6,
+            feather: 0.1,
+            invert: false,
+        }
+    }
+}
+
+impl Mask {
+    pub fn bits(self) -> [u32; 8] {
+        [
+            self.shape as u32,
+            self.center_x.to_bits(),
+            self.center_y.to_bits(),
+            self.width.to_bits(),
+            self.height.to_bits(),
+            self.feather.to_bits(),
+            self.invert as u32,
+            0,
+        ]
+    }
+
+    pub fn from_bits(bits: [u32; 8]) -> Self {
+        Self {
+            shape: if bits[0] == 0 {
+                MaskShape::Rectangle
+            } else {
+                MaskShape::Ellipse
+            },
+            center_x: f32::from_bits(bits[1]),
+            center_y: f32::from_bits(bits[2]),
+            width: f32::from_bits(bits[3]),
+            height: f32::from_bits(bits[4]),
+            feather: f32::from_bits(bits[5]),
+            invert: bits[6] != 0,
+        }
+    }
+
+    pub fn valid(self) -> bool {
+        [
+            self.center_x,
+            self.center_y,
+            self.width,
+            self.height,
+            self.feather,
+        ]
+        .iter()
+        .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
     }
 }
 

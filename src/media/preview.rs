@@ -267,7 +267,7 @@ struct FrameReader {
     rotation: super::Rotation,
     stream_index: usize,
     time_base: ffmpeg::Rational,
-    first_pts: i64,
+    origin_pts: i64,
     fps: (u32, u32),
     output: (u32, u32),
     fallback: u64,
@@ -302,7 +302,7 @@ impl FrameReader {
             .ok_or("Preview source has no video")?;
         let stream_index = stream.index();
         let time_base = stream.time_base();
-        let first_pts = stream.start_time();
+        let origin_pts = super::format_origin(&input, time_base);
         let rotation = super::Rotation::from_stream(&stream);
         let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
             .and_then(|context| context.decoder().video())
@@ -330,7 +330,7 @@ impl FrameReader {
             rotation,
             stream_index,
             time_base,
-            first_pts,
+            origin_pts,
             fps,
             output,
             fallback: 0,
@@ -403,17 +403,15 @@ impl FrameReader {
             }
             let mut decoded = ffmpeg::frame::Video::empty();
             if self.decoder.receive_frame(&mut decoded).is_ok() {
+                if decoded.timestamp().is_some_and(|pts| pts < self.origin_pts) {
+                    continue;
+                }
                 let fallback = self.fallback;
                 self.fallback = self.fallback.saturating_add(1);
                 let position = decoded
                     .timestamp()
                     .and_then(|pts| {
-                        let start = if self.first_pts == i64::MIN {
-                            0
-                        } else {
-                            self.first_pts
-                        };
-                        let base = i128::from(pts) - i128::from(start);
+                        let base = i128::from(pts) - i128::from(self.origin_pts);
                         let denominator =
                             i128::from(self.time_base.denominator()) * i128::from(self.fps.1);
                         (base >= 0 && denominator > 0)
@@ -885,6 +883,48 @@ mod tests {
         assert_eq!(frames.first(), Some(&0));
         assert_eq!(frames.last(), Some(&29));
         assert!(started.elapsed() < Duration::from_secs(2), "{frames:?}");
+    }
+
+    #[test]
+    fn late_video_keeps_its_container_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("late.mp4");
+        let generated = Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-itsoffset", "0.5", "-f", "lavfi", "-i",
+                "color=c=black:s=32x32:r=30:d=3.5,drawbox=color=white:t=fill:enable='between(t,1,1.099)'",
+                "-f", "lavfi", "-i", "aevalsrc=if(between(t\\,1.5\\,1.6)\\,0.8*sin(2*PI*1000*t)\\,0):s=48000:d=4",
+                "-c:v", "mpeg4", "-vsync", "0", "-c:a", "aac", "-output_ts_offset", "30"])
+            .arg(&path).status();
+        let status = match generated {
+            Ok(status) => status,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => panic!("{error}"),
+        };
+        assert!(status.success());
+        ffmpeg::init().unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let source = FrameSource {
+            clip_id: 1,
+            path,
+            kind: MediaKind::Video,
+            start: 0,
+            source_start: 0,
+            duration: 120,
+        };
+        let mut reader =
+            FrameReader::open(&source, 0, (30, 1), (32, 32), cancelled.clone()).unwrap();
+        let flashes: Vec<_> = (0..120)
+            .filter(|&position| reader.frame_at(position, &cancelled).unwrap().pixels[0] > 200)
+            .collect();
+        assert_eq!(flashes, [45, 46, 47]);
+        for (target, white) in [(30, false), (45, true)] {
+            let mut reader =
+                FrameReader::open(&source, target, (30, 1), (32, 32), cancelled.clone()).unwrap();
+            assert_eq!(
+                reader.frame_at(target, &cancelled).unwrap().pixels[0] > 200,
+                white
+            );
+        }
     }
 
     #[test]

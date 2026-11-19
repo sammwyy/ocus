@@ -22,11 +22,33 @@ pub struct Clip {
     pub duration_frames: u64,
     pub content: ClipContent,
     pub volume: f32,
+    #[serde(default, skip_serializing_if = "zero")]
+    pub fade_in_frames: u64,
+    #[serde(default, skip_serializing_if = "zero")]
+    pub fade_out_frames: u64,
     pub muted: bool,
     /// A video clip that also carries its source's audio. The audio is cut,
     /// moved and trimmed with the picture; `volume` and `muted` apply to it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub linked_audio: bool,
+}
+
+fn zero(value: &u64) -> bool {
+    *value == 0
+}
+
+impl Clip {
+    pub(crate) fn clamp_fades(&mut self) {
+        self.fade_in_frames = self.fade_in_frames.min(self.duration_frames);
+        self.fade_out_frames = self
+            .fade_out_frames
+            .min(self.duration_frames - self.fade_in_frames);
+    }
+
+    pub(crate) fn valid_fades(&self) -> bool {
+        self.fade_in_frames <= self.duration_frames
+            && self.fade_out_frames <= self.duration_frames - self.fade_in_frames
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -119,7 +119,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [ ] Brightness, contrast and saturation
 - [ ] LUT support (.cube)
 - [ ] Audio waveforms on the timeline
-- [ ] Audio fade in and fade out
+- [x] Audio fade in and fade out
 - [ ] Loudness normalization
 - [ ] Noise reduction
 

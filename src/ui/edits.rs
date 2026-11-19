@@ -249,6 +249,8 @@ pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Op
             }),
             volume: 1.0,
             muted: false,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             linked_audio: false,
         },
     ))
@@ -379,6 +381,8 @@ pub(crate) fn insert_media(
         content: ClipContent::Media { media_id },
         volume: 1.0,
         muted: false,
+        fade_in_frames: 0,
+        fade_out_frames: 0,
         linked_audio: media.kind == MediaKind::Video && media.has_audio,
     };
     let end = start.checked_add(duration).ok_or("Clip range overflows")?;
@@ -477,6 +481,8 @@ pub(crate) fn detach_audio(project: &Project, selection: &[ClipRef]) -> Option<P
         };
         clip.linked_audio = false;
         detached.push(Clip { id, ..clip.clone() });
+        clip.fade_in_frames = 0;
+        clip.fade_out_frames = 0;
         kept.push((track_id, clip_id));
         id = id.checked_add(1)?;
     }
@@ -555,6 +561,8 @@ pub(crate) fn link_audio(project: &Project, selection: &[ClipRef]) -> Option<Pla
         clip.linked_audio = true;
         clip.volume = sound.volume;
         clip.muted = sound.muted;
+        clip.fade_in_frames = sound.fade_in_frames;
+        clip.fade_out_frames = sound.fade_out_frames;
     }
     Some(Planned {
         tracks,
@@ -585,6 +593,8 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             linked_audio: false,
         }
     }
@@ -759,6 +769,12 @@ mod tests {
             volume: 0.5,
             muted: false,
         }));
+        assert!(editor.apply(Command::SetClipFades {
+            track_id: 1,
+            clip_id: 1,
+            fade_in_frames: 15,
+            fade_out_frames: 15,
+        }));
 
         let split = split_clips(editor.project(), &[(1, 1)], 75).unwrap();
         assert!(editor.apply(Command::ReplaceTracks(split)));
@@ -783,6 +799,14 @@ mod tests {
         let detached = detach_audio(editor.project(), &[(1, 1), (1, 3)]).unwrap();
         assert!(editor.apply(Command::ReplaceTracks(detached.tracks)));
         let audio = &editor.project().tracks()[2].clips;
+        assert_eq!((audio[0].fade_in_frames, audio[0].fade_out_frames), (15, 0));
+        assert_eq!((audio[1].fade_in_frames, audio[1].fade_out_frames), (0, 15));
+        assert!(
+            editor.project().tracks()[1]
+                .clips
+                .iter()
+                .all(|clip| clip.fade_in_frames == 0 && clip.fade_out_frames == 0)
+        );
         assert_eq!(
             audio
                 .iter()
@@ -801,6 +825,15 @@ mod tests {
         let relinked = link_audio(editor.project(), &detached.selection).unwrap();
         assert!(editor.apply(Command::ReplaceTracks(relinked.tracks)));
         assert!(editor.project().tracks()[2].clips.is_empty());
+        let picture = &editor.project().tracks()[1].clips;
+        assert_eq!(
+            (picture[0].fade_in_frames, picture[0].fade_out_frames),
+            (15, 0)
+        );
+        assert_eq!(
+            (picture[1].fade_in_frames, picture[1].fade_out_frames),
+            (0, 15)
+        );
         assert!(
             editor.project().tracks()[1]
                 .clips

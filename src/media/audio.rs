@@ -1577,6 +1577,7 @@ mod tests {
                 noise_reduction: false,
                 linked_audio: false,
                 color: Default::default(),
+                lut: None,
             },
         }));
         let dry_plan = Arc::new(AudioPlan::from_project(editor.project()));

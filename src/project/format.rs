@@ -75,6 +75,8 @@ mod tests {
             content: ClipContent::Media { media_id: 4 },
             volume: 1.0,
             muted: false,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
         }]);
@@ -98,6 +100,8 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
         }]);
@@ -187,6 +191,8 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 1.0,
             muted: false,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
         })
@@ -270,6 +276,8 @@ mod tests {
             content: ClipContent::Media { media_id: 8 },
             volume: 1.0,
             muted: false,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
         };

@@ -1299,6 +1299,8 @@ impl UiState {
                 .iter()
                 .filter(|range| range.kind != MediaKind::Image)
                 .map(|range| AudioSource {
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
                     path: range.path.clone(),
                     start: 0,
                     source_start: range.source_start,
@@ -3174,6 +3176,8 @@ mod tests {
         );
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 path,
                 start: clip.start_frame,
                 source_start: clip.source_start_frame,
@@ -3499,6 +3503,8 @@ mod tests {
                     content: ClipContent::Media { media_id: 1 },
                     volume: 1.0,
                     muted: false,
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
                     noise_reduction: false,
                     linked_audio: false,
                 }
@@ -4369,6 +4375,8 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: true,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
             }

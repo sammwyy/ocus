@@ -138,9 +138,10 @@ the default remains right for old projects. Each transition is clamped to
 the clip length; if their combined lengths exceed it, both are capped at
 half the clip length, rounded down, leaving any middle frame unaffected.
 Stored durations are not changed by this render-time clamp.
-The optional field remains compatible with version 1 projects. The Inspector
-offers transition choices and quarter-second duration steps; the timeline
-marks the effective transition range with a ramp at the clip start.
+The optional fields remain compatible with version 1 projects. The Inspector
+offers independent In and Out choices, quarter-second duration steps, and
+slide edges; the timeline marks their effective ranges with mirrored ramps
+at the clip's start and end.
 
 ## Where new work belongs
 

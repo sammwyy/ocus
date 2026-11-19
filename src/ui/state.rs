@@ -46,6 +46,7 @@ pub(crate) enum ExportPage {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsPage {
     Appearance,
+    Performance,
     About,
 }
 
@@ -275,6 +276,8 @@ pub(crate) struct UiState {
     pub preview_available: Signal<bool>,
     pub project_path: Signal<Option<PathBuf>>,
     pub title_text: TextController,
+    pub rename_track: Signal<Option<u64>>,
+    pub track_name: TextController,
     pub title_duration: TextController,
     title_duration_synced: Rc<RefCell<String>>,
     pub title_font: TextController,
@@ -412,6 +415,7 @@ impl UiState {
         let settings = settings::path()
             .and_then(|path| settings::load(&path).ok())
             .unwrap_or_default();
+        crate::media::hardware::set_enabled(settings.hardware_acceleration);
         let export_directory =
             settings::export_directory(settings.last_export_directory.as_deref());
         Self {
@@ -435,6 +439,8 @@ impl UiState {
             preview_available: Signal::new(false),
             project_path: Signal::new(None),
             title_text: TextController::default(),
+            rename_track: Signal::new(None),
+            track_name: TextController::default(),
             title_duration: TextController::default(),
             title_duration_synced: Rc::new(RefCell::new(String::new())),
             title_font: TextController::default(),
@@ -690,6 +696,7 @@ impl UiState {
             return;
         }
         self.settings.set(settings.clone());
+        crate::media::hardware::set_enabled(settings.hardware_acceleration);
         if settings.theme != ThemeMode::System
             && let Some(window) = self.window.borrow().as_ref()
         {
@@ -733,6 +740,12 @@ impl UiState {
     pub fn set_accent(&self, id: &str) {
         let mut settings = self.settings.peek();
         settings.accent = Some(id.to_owned());
+        self.update_settings(settings);
+    }
+
+    pub fn toggle_hardware_acceleration(&self) {
+        let mut settings = self.settings.peek();
+        settings.hardware_acceleration = !settings.hardware_acceleration;
         self.update_settings(settings);
     }
 
@@ -784,6 +797,7 @@ impl UiState {
             .project()
             .tracks()
             .iter()
+            .filter(|track| !track.locked)
             .flat_map(|track| track.clips.iter().map(|clip| (track.id, clip.id)))
             .collect();
         let selection = self.selected.peek();
@@ -909,6 +923,32 @@ impl UiState {
                 .set("Edit rejected: check range, track and clip".into());
         }
         changed
+    }
+
+    pub fn begin_track_rename(&self, track_id: u64) {
+        let name = self
+            .editor
+            .borrow()
+            .project()
+            .tracks()
+            .iter()
+            .find(|track| track.id == track_id)
+            .map(|track| track.name.clone());
+        if let Some(name) = name {
+            self.track_name.set_value(name);
+            self.rename_track.set(Some(track_id));
+        }
+    }
+
+    pub fn apply_track_rename(&self) {
+        if let Some(track_id) = self.rename_track.peek() {
+            let name = self.track_name.value().trim().to_owned();
+            if !crate::timeline::Track::valid_name(&name) {
+                return;
+            }
+            self.edit(Command::RenameTrack { track_id, name });
+            self.rename_track.set(None);
+        }
     }
 
     fn refresh_missing_media(&self) {
@@ -1262,6 +1302,13 @@ impl UiState {
 
     /// Replaces the clip selection; the last entry becomes the primary clip.
     pub fn select_clips(&self, mut selection: Vec<ClipRef>) {
+        selection.retain(|(track_id, clip_id)| {
+            self.editor.borrow().project().tracks().iter().any(|track| {
+                track.id == *track_id
+                    && !track.locked
+                    && track.clips.iter().any(|clip| clip.id == *clip_id)
+            })
+        });
         let mut seen = HashSet::new();
         selection.reverse();
         selection.retain(|clip| seen.insert(*clip));
@@ -1412,6 +1459,9 @@ impl UiState {
         let mut sources = Vec::new();
         let audio = AudioPlan::without_media(project, &missing);
         for track in project.tracks() {
+            if track.hidden {
+                continue;
+            }
             for clip in &track.clips {
                 let ClipContent::Media { media_id } = clip.content else {
                     continue;
@@ -1424,6 +1474,7 @@ impl UiState {
                 };
                 if track.kind == TrackKind::Video {
                     sources.push(FrameSource {
+                        color: clip.color,
                         clip_id: clip.id,
                         path: media.path.clone(),
                         kind: media.kind,
@@ -1480,6 +1531,7 @@ impl UiState {
                 .iter()
                 .filter(|range| range.kind != MediaKind::Audio)
                 .map(|range| FrameSource {
+                    color: Default::default(),
                     clip_id: 0,
                     path: range.path.clone(),
                     kind: range.kind,
@@ -4204,7 +4256,9 @@ mod tests {
                     content: ClipContent::Media { media_id: 1 },
                     volume: 1.0,
                     muted: false,
+                    color: Default::default(),
                     transition: None,
+                    transition_out: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
                     linked_audio: false,
@@ -5076,7 +5130,9 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: true,
+                color: Default::default(),
                 transition: None,
+                transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
                 linked_audio: false,

@@ -171,6 +171,8 @@ pub fn track(project: &Project, cues: &[Cue]) -> Result<Track, String> {
         let (text, parse_html) = markup(&cue.text);
         clips.push(Clip {
             transition: None,
+            transition_out: None,
+            color: Default::default(),
             id,
             start_frame: start,
             source_start_frame: 0,
@@ -202,6 +204,9 @@ pub fn track(project: &Project, cues: &[Cue]) -> Result<Track, String> {
             .ok_or("No track IDs available")?,
         kind: TrackKind::Video,
         subtitles: true,
+        name: String::new(),
+        locked: false,
+        hidden: false,
         clips,
     })
 }

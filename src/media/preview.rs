@@ -1,6 +1,7 @@
 use super::MediaKind;
 use super::audio::Clock;
 use super::composite::{Compositor, VisualPlan};
+use crate::timeline::ColorAdjust;
 use ffmpeg_next as ffmpeg;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -10,6 +11,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct FrameSource {
+    pub color: ColorAdjust,
     pub clip_id: u64,
     pub path: PathBuf,
     pub kind: MediaKind,
@@ -48,6 +50,7 @@ pub fn storyboard(
         vec![0, key.duration / 2, key.duration - 1]
     };
     let source = FrameSource {
+        color: Default::default(),
         clip_id: 0,
         path: key.path.clone(),
         kind: key.kind,
@@ -304,9 +307,7 @@ impl FrameReader {
         let time_base = stream.time_base();
         let origin_pts = super::format_origin(&input, time_base);
         let rotation = super::Rotation::from_stream(&stream);
-        let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
-            .and_then(|context| context.decoder().video())
-            .map_err(|error| error.to_string())?;
+        let mut decoder = super::hardware::video_decoder(stream.parameters())?;
         if decoder.format() == ffmpeg::format::Pixel::None || decoder.width() == 0 {
             return Err("Preview source has an unknown pixel format".into());
         }
@@ -314,7 +315,7 @@ impl FrameReader {
         let display = rotation.dimensions(square.0, square.1);
         let picture = super::fitted_dimensions(display.0, display.1, output.0, output.1);
         let coded = rotation.dimensions(picture.0, picture.1);
-        let scaler = super::rgba_scaler(&decoder, coded.0, coded.1)?;
+        let scaler = super::rgba_scaler(&decoder, decoder.format(), coded.0, coded.1)?;
         if source.kind == MediaKind::Video && target > 0 {
             let micros = u128::from(target) * u128::from(fps.1) * 1_000_000 / u128::from(fps.0);
             if let Some(timestamp) = super::seek_timestamp(&input, micros)
@@ -368,9 +369,16 @@ impl FrameReader {
             .as_ref()
             .or(self.future.as_ref())
             .ok_or("Preview source has no decodable video frames")?;
+        let downloaded = super::hardware::download(&frame.1)?;
+        let frame = downloaded.as_ref().unwrap_or(&frame.1);
+        if frame.format() != self.scaler.input().format {
+            let output = self.scaler.output();
+            self.scaler =
+                super::rgba_scaler(&self.decoder, frame.format(), output.width, output.height)?;
+        }
         let mut scaled = ffmpeg::frame::Video::empty();
         self.scaler
-            .run(&frame.1, &mut scaled)
+            .run(frame, &mut scaled)
             .map_err(|error| error.to_string())?;
         let scaled = self.rotation.orient(&scaled);
         let row_size = scaled.width as usize * 4;
@@ -509,6 +517,7 @@ mod tests {
                 .unwrap();
             assert!(reference.status.success());
             let source = FrameSource {
+                color: Default::default(),
                 clip_id: 1,
                 path: path.clone(),
                 kind: MediaKind::Video,
@@ -545,6 +554,7 @@ mod tests {
         let root = PathBuf::from(std::env::var("OCUS_SEEK_FIXTURES").unwrap());
         for name in ["late", "zero"] {
             let source = FrameSource {
+                color: Default::default(),
                 clip_id: 1,
                 path: root.join(format!("{name}.mp4")),
                 kind: MediaKind::Video,
@@ -592,6 +602,7 @@ mod tests {
         data.extend((0..8 * 6 * 3).map(|value| value as u8));
         fs::write(&path, data).unwrap();
         let source = FrameSource {
+            color: Default::default(),
             clip_id: 1,
             path: path.clone(),
             kind: MediaKind::Image,
@@ -634,6 +645,7 @@ mod tests {
             );
             let frames = u64::from(fps.0 / fps.1);
             let source = FrameSource {
+                color: Default::default(),
                 clip_id: 1,
                 path,
                 kind: MediaKind::Video,
@@ -693,6 +705,7 @@ mod tests {
                 .success()
         );
         let source = FrameSource {
+            color: Default::default(),
             clip_id: 1,
             path: path.clone(),
             kind: MediaKind::Video,
@@ -763,6 +776,7 @@ mod tests {
                 (180, 320)
             };
             let source = FrameSource {
+                color: Default::default(),
                 clip_id: 1,
                 path: path.clone(),
                 kind: MediaKind::Video,
@@ -819,6 +833,7 @@ mod tests {
             data.extend(vec![255; width * height * 3]);
             fs::write(&path, data).unwrap();
             let source = FrameSource {
+                color: Default::default(),
                 clip_id: 1,
                 path: path.clone(),
                 kind: MediaKind::Image,
@@ -904,6 +919,7 @@ mod tests {
         ffmpeg::init().unwrap();
         let cancelled = Arc::new(AtomicBool::new(false));
         let source = FrameSource {
+            color: Default::default(),
             clip_id: 1,
             path,
             kind: MediaKind::Video,
@@ -937,6 +953,7 @@ mod tests {
         }
         fs::write(&path, source).unwrap();
         let clips = [FrameSource {
+            color: Default::default(),
             clip_id: 1,
             path: path.clone(),
             kind: MediaKind::Video,
@@ -1029,6 +1046,7 @@ mod tests {
         assert!(storyboard_frames[2].pixels[center] > 140);
         let cut = PreviewPlan {
             sources: vec![FrameSource {
+                color: Default::default(),
                 clip_id: 2,
                 path: path.clone(),
                 kind: MediaKind::Video,

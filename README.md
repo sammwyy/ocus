@@ -33,8 +33,15 @@ Independent HTML and Markdown switches parse `<b>` / `<bold>`, `<i>` / `<italic>
 other HTML remains literal text. These edits can be undone and are saved with
 the project. The workspace also supports splitting, moving, trimming, deleting
 and ripple-deleting clips. Ripple delete closes the selected clips' time ranges
-across all tracks; a clip spanning a removed range keeps its surviving source
-frames as two clips, and the whole edit is one undo step. **Open** and
+across unlocked tracks; a clip spanning a removed range keeps its surviving source
+frames as two clips, and the whole edit is one undo step. Double-click a track
+name to rename it (up to 32 characters; blank restores its positional label).
+Track headers always offer lock and visibility controls: locking protects clips
+from selection and edits, while hiding video or muting audio removes that track
+from both Program playback and export, including linked video sound. Right-click
+a header to rename, reorder within its kind, lock, hide/mute, or delete a track.
+V1 remains the base layer; lower video rows appear above it. All track changes
+support Undo/Redo. **Open** and
 **Save as…** use native file dialogs instead of requiring typed paths;
 **Save** reuses the chosen path. **New**, **Open** and closing the window
 offer Save, Don't Save or Cancel when there are unsaved changes; Save finishes
@@ -133,8 +140,12 @@ on the same GPU device as CreamUI. On a CPU-only window the monitors instead
 explain why video cannot be displayed. On narrower windows the media bin and
 inspector share a tabbed sidebar.
 
-The titlebar gear opens an in-editor settings dialog with Appearance and About
-sections. About shows the package version, build commit and author, with links
+The titlebar gear opens an in-editor settings dialog with Appearance,
+Performance and About sections. Performance turns hardware acceleration on or
+off (on by default): previews decode through CUDA or VAAPI on Linux and
+VideoToolbox on macOS, and H.264/HEVC exports use NVENC, VAAPI or
+VideoToolbox (VP9 through VAAPI). Unsupported media, missing drivers or a
+failing device fall back to software decoding and libx264, libx265 or libvpx. About shows the package version, build commit and author, with links
 to the source, issue tracker and releases in the default browser. Appearance can
 follow the system through CreamUI or use Light, Dark, or Midnight. Custom themes offer
 CreamUI's built-in Blue, Cyan, Green, Pink, Purple, and Orange accent presets;
@@ -223,8 +234,9 @@ from crates.io. No local CreamUI checkout is needed.
 - `src/app.rs`: window startup and wiring.
 - `src/project/`: saved project, JSON format, and edit history/undo-redo.
 - `src/timeline.rs`: tracks, clips, and titles.
-- `src/media.rs`, `src/media/preview.rs`, `src/media/composite.rs` and
-  `src/media/audio.rs`: sources, decoding, and shared preview/export composition.
+- `src/media.rs`, `src/media/preview.rs`, `src/media/composite.rs`,
+  `src/media/hardware.rs` and `src/media/audio.rs`: sources, decoding,
+  hardware acceleration, and shared preview/export composition.
 - `src/playback.rs`: default audio device and playback sessions.
 - `src/export.rs`: timeline video, GIF and audio export with cancellation.
 - `src/ui/`: compact CreamUI workspace and background file workflow.

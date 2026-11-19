@@ -103,6 +103,85 @@ mod tests {
     }
 
     #[test]
+    fn out_transitions_and_slide_directions_round_trip_and_validate() {
+        use crate::timeline::SlideDirection;
+        let mut document = serde_json::to_value(Project::new("Out transitions")).unwrap();
+        document["version"] = 1.into();
+        document["tracks"][0]["clips"] = serde_json::json!([{
+            "id": 1, "start_frame": 0, "source_start_frame": 0,
+            "duration_frames": 3, "content": {"title": Title::default()},
+            "volume": 1.0, "muted": false,
+            "transition": {"kind": "slide", "duration_frames": 3}
+        }]);
+        let legacy = from_json(&document.to_string()).unwrap();
+        let clip = &legacy.tracks()[0].clips[0];
+        assert!(clip.transition_out.is_none());
+        assert_eq!(
+            clip.transition.as_ref().unwrap().direction,
+            SlideDirection::Right
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&to_json(&legacy).unwrap()).unwrap()["tracks"]
+                [0]["clips"][0]["transition"],
+            document["tracks"][0]["clips"][0]["transition"]
+        );
+        for direction in ["left", "right", "up", "down"] {
+            document["tracks"][0]["clips"][0]["transition_out"] =
+                serde_json::json!({"kind": "slide", "duration_frames": 3, "direction": direction});
+            let project = from_json(&document.to_string()).unwrap();
+            assert_eq!(from_json(&to_json(&project).unwrap()).unwrap(), project);
+        }
+        document["tracks"][0]["clips"][0]["transition_out"]["direction"] = "diagonal".into();
+        assert!(from_json(&document.to_string()).is_err());
+        document["tracks"][0]["clips"][0]["transition_out"]["direction"] = "right".into();
+        document["tracks"][0]["clips"][0]["transition_out"]["duration_frames"] = 0.into();
+        assert!(from_json(&document.to_string()).is_err());
+        document["tracks"][0]["clips"][0]["transition_out"]["duration_frames"] = 1.into();
+        document["tracks"][0]["clips"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("transition");
+        document["tracks"][0]["kind"] = "audio".into();
+        document["media"] = serde_json::json!([Media {
+            id: 2,
+            path: "sound.wav".into(),
+            kind: MediaKind::Audio,
+            duration_us: None,
+            has_audio: true
+        }]);
+        document["tracks"][0]["clips"][0]["content"] =
+            serde_json::json!({"media": {"media_id": 2}});
+        assert!(from_json(&document.to_string()).is_err());
+        document["tracks"][0]["clips"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("transition_out");
+        assert!(from_json(&document.to_string()).is_ok());
+    }
+
+    #[test]
+    fn version_one_track_metadata_is_optional_and_round_trips() {
+        let original = Project::new("Legacy");
+        let json = to_json(&original).unwrap();
+        assert!(!json.contains("locked"));
+        assert!(!json.contains("hidden"));
+        assert_eq!(from_json(&json).unwrap(), original);
+        let mut document: serde_json::Value = serde_json::from_str(&json).unwrap();
+        document["tracks"][0]["name"] = "Main picture".into();
+        document["tracks"][0]["locked"] = true.into();
+        document["tracks"][0]["hidden"] = true.into();
+        let project = from_json(&document.to_string()).unwrap();
+        assert_eq!(project.tracks()[0].name, "Main picture");
+        assert!(project.tracks()[0].locked && project.tracks()[0].hidden);
+        assert_eq!(from_json(&to_json(&project).unwrap()).unwrap(), project);
+        assert_eq!(PROJECT_VERSION, 1);
+        for name in [" untrimmed", "line\nbreak", &"x".repeat(33)] {
+            document["tracks"][0]["name"] = name.into();
+            assert!(from_json(&document.to_string()).is_err());
+        }
+    }
+
+    #[test]
     fn transitions_round_trip_and_validate_without_changing_version() {
         let mut document = serde_json::to_value(Project::new("Transitions")).unwrap();
         document["version"] = 1.into();
@@ -165,7 +244,9 @@ mod tests {
             content: ClipContent::Media { media_id: 4 },
             volume: 1.0,
             muted: false,
+            color: Default::default(),
             transition: None,
+            transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
             linked_audio: false,
@@ -191,7 +272,9 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            color: Default::default(),
             transition: None,
+            transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
             linked_audio: false,
@@ -282,7 +365,9 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 1.0,
             muted: false,
+            color: Default::default(),
             transition: None,
+            transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
             linked_audio: false,
@@ -367,7 +452,9 @@ mod tests {
             content: ClipContent::Media { media_id: 8 },
             volume: 1.0,
             muted: false,
+            color: Default::default(),
             transition: None,
+            transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
             linked_audio: false,

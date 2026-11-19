@@ -8,8 +8,8 @@ use super::controls::{
 use super::edits::ClipRef;
 use super::interaction::{Action, DragPayload, MenuState};
 use super::state::{
-    ExportPage, MediaView, PlaybackMonitor, PreviewState, SequenceContent, SettingsPage,
-    SourceRange, TitleGesture, ZOOM_SECONDS, media_frames,
+    ChromaGesture, ExportPage, MediaView, PlaybackMonitor, PreviewState, SequenceContent,
+    SettingsPage, SourceRange, TitleGesture, ZOOM_SECONDS, media_frames,
 };
 use super::timeline_view::{ClipLook, Lane, LaneClip, TimelineView};
 use super::waveform::WaveformSlice;
@@ -1072,39 +1072,42 @@ impl Widget for ChromaSlider {
 
     fn on_drag_start(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
         let state = self.state.clone();
-        Some(Rc::new(move |_, _| state.pause()))
+        let target = self.target;
+        let property = self.property;
+        let key = self.key;
+        Some(Rc::new(move |_, rect| {
+            if state.busy.peek() || state.primary_clip() != Some(target) {
+                return;
+            }
+            state.pause();
+            *state.chroma_gesture.borrow_mut() = Some(ChromaGesture {
+                target,
+                property,
+                rect,
+                key,
+            });
+        }))
     }
 
     fn on_drag(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
-        let slider = self.clone();
-        ZoomSlider {
-            level: self.level(),
-            levels: 101,
-            set: Rc::new(move |level| {
-                if slider.state.busy.peek() || slider.state.primary_clip() != Some(slider.target) {
-                    return;
-                }
-                let mut key = slider.draft();
-                let value = level as f32 / 100.0;
-                match slider.property {
-                    0 => key.similarity = value,
-                    1 => key.smoothness = value,
-                    _ => key.spill = value,
-                }
-                slider.state.chroma_preview.set(Some((slider.target, key)));
-                slider.state.request_preview();
-            }),
-        }
-        .on_drag()
+        let state = self.state.clone();
+        Some(Rc::new(move |pointer, rect| {
+            state.preview_chroma_drag(Point {
+                x: pointer.x + rect.x,
+                y: pointer.y + rect.y,
+            });
+        }))
     }
 
     fn on_drag_end(&self) -> Option<Rc<dyn Fn()>> {
         let state = self.state.clone();
         let target = self.target;
         Some(Rc::new(move || {
+            let gesture = state.chroma_gesture.borrow_mut().take();
             let draft = state.chroma_preview.peek();
             state.chroma_preview.set(None);
             if let Some((clip, key)) = draft
+                && gesture.is_some_and(|gesture| gesture.target == target)
                 && clip == target
                 && state.primary_clip() == Some(target)
                 && selected_clip(&state).is_some_and(|(_, clip)| clip.chroma_key != Some(key))
@@ -9062,7 +9065,7 @@ mod tests {
             clip_id,
             key: Some(Default::default()),
         }));
-        let build_section = || {
+        let build_section = |property: usize| {
             let mut painter = TestPainter::default();
             let clip = selected_clip(&state).unwrap().1;
             let scene = creamui::reactive::with_context_scope(|| {
@@ -9070,7 +9073,15 @@ mod tests {
                     creamui::Theme::dark(),
                 ));
                 Renderer::new().render(
-                    chroma_section(&state, track_id, &clip, 280.0, false),
+                    Box::new(
+                        Flex::column()
+                            .child(Box::new(
+                                RawButton::new(Style::default().size(96.0, 24.0), || {})
+                                    .with_drag(|_, _| {})
+                                    .disabled(state.chroma_preview.peek().is_some()),
+                            ))
+                            .child(chroma_section(&state, track_id, &clip, 280.0, false)),
+                    ),
                     Size {
                         width: 280.0,
                         height: 1000.0,
@@ -9081,7 +9092,9 @@ mod tests {
             let label = painter
                 .bounds
                 .iter()
-                .find(|(label, _)| label.starts_with("Similarity"))
+                .find(|(label, _)| {
+                    label.starts_with(["Similarity", "Smoothness", "Spill"][property])
+                })
                 .unwrap()
                 .1;
             let index = (0..)
@@ -9094,26 +9107,59 @@ mod tests {
                 .unwrap();
             (scene, index, painter)
         };
-        for (press, final_value) in [(92, 40), (8, 95)] {
+        for (property, press, final_value) in [(0, 8, 92), (0, 20, 60), (1, 92, 36), (2, 50, 80)] {
             let before = selected_clip(&state).unwrap().1.chroma_key.unwrap();
-            let (scene, index, _) = build_section();
+            let (scene, index, _) = build_section(property);
             let end = scene.drag_end_at(index).unwrap();
             let (rect, drag) = scene.draggable_at(index).unwrap();
             let pointer = |value: usize| Point {
                 x: 6.0 + (rect.width - 12.0) * value as f32 / 100.0,
                 y: 12.0,
             };
+            let (start_rect, start) = scene
+                .drag_start_at(Point {
+                    x: rect.x + 8.0,
+                    y: rect.y + 12.0,
+                })
+                .unwrap();
+            start(Point { x: 8.0, y: 12.0 }, start_rect);
             drag(pointer(press), rect);
-            let (rebuilt, rebuilt_index, _) = build_section();
-            let (rect, drag) = rebuilt.draggable_at(rebuilt_index).unwrap();
-            drag(pointer(final_value), rect);
-            let (_, _, painted) = build_section();
-            assert!(
-                painted
-                    .labels
-                    .iter()
-                    .any(|label| label == &format!("Similarity · {final_value}%"))
-            );
+            let (rebuilt, rebuilt_index, _) = build_section(property);
+            assert_eq!(rebuilt_index + 1, index);
+            let point = pointer(final_value);
+            let absolute = Point {
+                x: point.x + rect.x,
+                y: point.y + rect.y,
+            };
+            state.preview_chroma_drag(absolute);
+            if let Some((routed_rect, drag)) = rebuilt.draggable_at(index) {
+                drag(
+                    Point {
+                        x: absolute.x - routed_rect.x,
+                        y: absolute.y - routed_rect.y,
+                    },
+                    routed_rect,
+                );
+            } else {
+                assert_eq!(property, 2);
+            }
+            let (_, _, painted) = build_section(property);
+            let mut expected = before;
+            match property {
+                0 => expected.similarity = final_value as f32 / 100.0,
+                1 => expected.smoothness = final_value as f32 / 100.0,
+                _ => expected.spill = final_value as f32 / 100.0,
+            }
+            assert_eq!(state.chroma_preview.peek().unwrap().1, expected);
+            assert!(painted.labels.iter().any(|label| label
+                == &format!(
+                    "{} · {final_value}%",
+                    [
+                        "Similarity",
+                        "Smoothness (soft edge)",
+                        "Spill (remove color tint)"
+                    ][property]
+                )));
             let knob = painted
                 .fills
                 .iter()
@@ -9132,25 +9178,15 @@ mod tests {
             assert_eq!(selected_clip(&state).unwrap().1.chroma_key.unwrap(), before);
             end();
             assert_eq!(
-                selected_clip(&state)
-                    .unwrap()
-                    .1
-                    .chroma_key
-                    .unwrap()
-                    .similarity,
-                final_value as f32 / 100.0
+                selected_clip(&state).unwrap().1.chroma_key.unwrap(),
+                expected
             );
             state.run(Action::Undo);
             assert_eq!(selected_clip(&state).unwrap().1.chroma_key.unwrap(), before);
             state.run(Action::Redo);
             assert_eq!(
-                selected_clip(&state)
-                    .unwrap()
-                    .1
-                    .chroma_key
-                    .unwrap()
-                    .similarity,
-                final_value as f32 / 100.0
+                selected_clip(&state).unwrap().1.chroma_key.unwrap(),
+                expected
             );
         }
     }
@@ -9208,6 +9244,7 @@ mod tests {
                 width: 96.0,
                 height: 24.0,
             };
+            slider.on_drag_start().unwrap()(Point { x: 30.0, y: 12.0 }, rect);
             slider.on_drag().unwrap()(Point { x: 30.0, y: 12.0 }, rect);
             slider.on_drag().unwrap()(Point { x: 48.0, y: 12.0 }, rect);
             assert_eq!(
@@ -9230,6 +9267,27 @@ mod tests {
                 0.5
             );
             state.run(Action::Undo);
+            assert_eq!(
+                selected_clip(&state)
+                    .unwrap()
+                    .1
+                    .chroma_key
+                    .unwrap()
+                    .similarity,
+                0.1
+            );
+            slider.on_drag_start().unwrap()(Point { x: 30.0, y: 12.0 }, rect);
+            state.busy.set(true);
+            state.preview_chroma_drag(Point { x: 80.0, y: 12.0 });
+            assert!(state.chroma_preview.peek().is_none());
+            state.busy.set(false);
+            state.preview_chroma_drag(Point { x: 80.0, y: 12.0 });
+            assert!(state.chroma_preview.peek().is_some());
+            state.run(Action::Escape);
+            assert!(state.chroma_gesture.borrow().is_none());
+            state.preview_chroma_drag(Point { x: 60.0, y: 12.0 });
+            slider.on_drag_end().unwrap()();
+            assert!(state.chroma_preview.peek().is_none());
             assert_eq!(
                 selected_clip(&state)
                     .unwrap()

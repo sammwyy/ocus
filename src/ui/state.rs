@@ -287,6 +287,14 @@ pub(crate) struct TitleGesture {
     pub resize: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ChromaGesture {
+    pub target: ClipRef,
+    pub property: usize,
+    pub rect: creamui::core::Rect,
+    pub key: crate::timeline::ChromaKey,
+}
+
 pub(super) struct TooltipState {
     pub controller: TooltipController,
     _effect: creamui::reactive::Effect,
@@ -322,6 +330,7 @@ pub(crate) struct UiState {
     pub title_picker: ColorPickerController,
     pub title_preview: Signal<Option<(ClipRef, Title)>>,
     pub chroma_preview: Signal<Option<(ClipRef, crate::timeline::ChromaKey)>>,
+    pub chroma_gesture: Rc<RefCell<Option<ChromaGesture>>>,
     pub title_gesture: Rc<RefCell<Option<TitleGesture>>>,
     pub media_query: TextController,
     pub media_filter: Signal<MediaFilter>,
@@ -488,6 +497,7 @@ impl UiState {
             title_picker: ColorPickerController::new(),
             title_preview: Signal::new(None),
             chroma_preview: Signal::new(None),
+            chroma_gesture: Rc::new(RefCell::new(None)),
             title_gesture: Rc::new(RefCell::new(None)),
             media_query: TextController::default(),
             media_filter: Signal::new(MediaFilter::All),
@@ -1346,8 +1356,35 @@ impl UiState {
         }
     }
 
+    pub(super) fn preview_chroma_drag(&self, pointer: Point) {
+        let Some(gesture) = *self.chroma_gesture.borrow() else {
+            return;
+        };
+        if self.busy.peek() || self.primary_clip() != Some(gesture.target) {
+            return;
+        }
+        let draft = self.chroma_preview.peek();
+        let mut key = draft
+            .filter(|(clip, _)| *clip == gesture.target)
+            .map_or(gesture.key, |(_, key)| key);
+        let x = pointer.x - gesture.rect.x;
+        let value = (((x - 6.0) / (gesture.rect.width - 12.0).max(1.0)).clamp(0.0, 1.0) * 100.0)
+            .round()
+            / 100.0;
+        match gesture.property {
+            0 => key.similarity = value,
+            1 => key.smoothness = value,
+            _ => key.spill = value,
+        }
+        if draft != Some((gesture.target, key)) {
+            self.chroma_preview.set(Some((gesture.target, key)));
+            self.request_preview();
+        }
+    }
+
     pub(super) fn clear_title_gesture(&self) {
         self.title_gesture.borrow_mut().take();
+        self.chroma_gesture.borrow_mut().take();
         if self.chroma_preview.peek().is_some() {
             self.chroma_preview.set(None);
             self.request_preview();

@@ -448,7 +448,10 @@ impl UiState {
         let state = self.clone();
         window.on_files_dropped_at(move |paths, point| state.drop_files(paths, point));
         let state = self.clone();
-        window.on_pointer_moved(move |point| state.pointer.set(point));
+        window.on_pointer_moved(move |point| {
+            state.pointer.set(point);
+            state.preview_chroma_drag(point);
+        });
         let state = self.clone();
         window.on_keyboard_input(move |event, held| {
             let mut modifiers = Modifiers {

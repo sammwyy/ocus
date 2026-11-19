@@ -278,6 +278,7 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 color: Default::default(),
+                lut: None,
                 transition: None,
                 transition_out: None,
                 fade_in_frames: 0,

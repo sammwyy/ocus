@@ -1,6 +1,6 @@
 use super::MediaKind;
 use super::audio::Clock;
-use super::composite::{Compositor, VisualPlan};
+use super::composite::{Compositor, VisualPlan, adjust_color, apply_lut};
 use crate::timeline::{ColorAdjust, Playback};
 use ffmpeg_next as ffmpeg;
 use std::collections::HashMap;
@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone)]
 pub struct FrameSource {
     pub playback: crate::timeline::Playback,
+    pub lut: Option<PathBuf>,
     pub color: ColorAdjust,
     pub clip_id: u64,
     pub path: PathBuf,
@@ -40,6 +41,8 @@ pub struct FrameImage {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct StoryboardKey {
+    pub color_bits: [u32; 3],
+    pub lut: Option<PathBuf>,
     pub playback: crate::timeline::Playback,
     pub path: PathBuf,
     pub kind: MediaKind,
@@ -61,9 +64,15 @@ pub fn storyboard(
     } else {
         vec![0, key.duration / 2, key.duration - 1]
     };
+    let [brightness, contrast, saturation] = key.color_bits.map(f32::from_bits);
     let source = FrameSource {
         playback: key.playback,
-        color: Default::default(),
+        lut: key.lut.clone(),
+        color: ColorAdjust {
+            brightness,
+            contrast,
+            saturation,
+        },
         clip_id: 0,
         path: key.path.clone(),
         kind: key.kind,
@@ -72,6 +81,7 @@ pub fn storyboard(
         duration: key.duration,
     };
     let mut frames = Vec::new();
+    let mut luts = HashMap::new();
     let mut layers = VideoLayers::new(key.fps, (160, 90));
     for offset in offsets {
         if cancelled.load(Ordering::Relaxed) {
@@ -87,6 +97,7 @@ pub fn storyboard(
         } else {
             layers.layer_at(&source, offset, &cancelled)?
         };
+        let image = apply_lut(&mut luts, &source, adjust_color(image, source.color))?;
         let mut image = Arc::unwrap_or_clone(image);
         for pixel in image.pixels.as_chunks_mut::<4>().0 {
             for channel in 0..3 {
@@ -581,6 +592,7 @@ mod tests {
                 path.clone()
             };
             let mut source = FrameSource {
+                lut: None,
                 color: Default::default(),
                 playback: Playback::Forward,
                 clip_id: 1,
@@ -634,6 +646,8 @@ mod tests {
             assert_eq!(freeze.readers[&1].decoded_frames, decoded);
             assert!(freeze.layer_at(&source, 80, &cancelled).is_err());
             let key = StoryboardKey {
+                lut: None,
+                color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
                 playback: Playback::Freeze,
                 path: source.path.clone(),
                 kind: source.kind,
@@ -683,6 +697,7 @@ mod tests {
                 .success()
         );
         let mut source = FrameSource {
+            lut: None,
             color: Default::default(),
             playback: Playback::Forward,
             clip_id: 1,
@@ -767,6 +782,7 @@ mod tests {
             assert!(reference.status.success());
             let source = FrameSource {
                 playback: crate::timeline::Playback::Forward,
+                lut: None,
                 color: Default::default(),
                 clip_id: 1,
                 path: path.clone(),
@@ -805,6 +821,7 @@ mod tests {
         for name in ["late", "zero"] {
             let source = FrameSource {
                 playback: crate::timeline::Playback::Forward,
+                lut: None,
                 color: Default::default(),
                 clip_id: 1,
                 path: root.join(format!("{name}.mp4")),
@@ -854,6 +871,7 @@ mod tests {
         fs::write(&path, data).unwrap();
         let source = FrameSource {
             playback: crate::timeline::Playback::Forward,
+            lut: None,
             color: Default::default(),
             clip_id: 1,
             path: path.clone(),
@@ -898,6 +916,7 @@ mod tests {
             let frames = u64::from(fps.0 / fps.1);
             let source = FrameSource {
                 playback: crate::timeline::Playback::Forward,
+                lut: None,
                 color: Default::default(),
                 clip_id: 1,
                 path,
@@ -959,6 +978,7 @@ mod tests {
         );
         let source = FrameSource {
             playback: crate::timeline::Playback::Forward,
+            lut: None,
             color: Default::default(),
             clip_id: 1,
             path: path.clone(),
@@ -1031,6 +1051,7 @@ mod tests {
             };
             let source = FrameSource {
                 playback: crate::timeline::Playback::Forward,
+                lut: None,
                 color: Default::default(),
                 clip_id: 1,
                 path: path.clone(),
@@ -1089,6 +1110,7 @@ mod tests {
             fs::write(&path, data).unwrap();
             let source = FrameSource {
                 playback: crate::timeline::Playback::Forward,
+                lut: None,
                 color: Default::default(),
                 clip_id: 1,
                 path: path.clone(),
@@ -1176,6 +1198,7 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         let source = FrameSource {
             playback: crate::timeline::Playback::Forward,
+            lut: None,
             color: Default::default(),
             clip_id: 1,
             path,
@@ -1211,6 +1234,7 @@ mod tests {
         fs::write(&path, source).unwrap();
         let clips = [FrameSource {
             playback: crate::timeline::Playback::Forward,
+            lut: None,
             color: Default::default(),
             clip_id: 1,
             path: path.clone(),
@@ -1289,6 +1313,8 @@ mod tests {
         );
         let storyboard_frames = storyboard(
             &StoryboardKey {
+                lut: None,
+                color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
                 playback: crate::timeline::Playback::Forward,
                 path: path.clone(),
                 kind: MediaKind::Video,
@@ -1306,6 +1332,7 @@ mod tests {
         let cut = PreviewPlan {
             sources: vec![FrameSource {
                 playback: crate::timeline::Playback::Forward,
+                lut: None,
                 color: Default::default(),
                 clip_id: 2,
                 path: path.clone(),

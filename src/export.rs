@@ -916,6 +916,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                lut: None,
                 transition_out: None,
                 color: Default::default(),
                 transition: None,
@@ -935,64 +936,92 @@ mod tests {
         let mut settings =
             ExportSettings::for_project(64, 36, editor.project().settings().frame_rate.clone());
         settings.video_quality = Some(0);
-        let mut images = Vec::new();
-        for playback in [Playback::Forward, Playback::Reverse, Playback::Freeze] {
-            if playback != Playback::Forward {
-                assert!(editor.apply(Command::SetPlayback {
+        let original = editor.project().clone();
+        let lut = dir.path().join("invert.cube");
+        fs::write(&lut, "LUT_1D_SIZE 2\n1 1 1\n0 0 0\n").unwrap();
+        let mut ungraded = None;
+        for graded in [false, true] {
+            let mut editor = Editor::new(original.clone());
+            if graded {
+                assert!(editor.apply(Command::SetClipColor {
                     track_id: 0,
                     clip_id: 1,
-                    playback
+                    color: crate::timeline::ColorAdjust {
+                        brightness: 0.1,
+                        contrast: 0.6,
+                        saturation: 0.4
+                    }
+                }));
+                assert!(editor.apply(Command::SetClipLut {
+                    track_id: 0,
+                    clip_id: 1,
+                    path: Some(lut.clone())
                 }));
             }
-            let path = dir.path().join(format!("{playback:?}.mp4"));
-            render_with_settings(
-                editor.project(),
-                &path,
-                &settings,
-                Arc::new(ExportControl::default()),
-            )
-            .unwrap();
-            let output = std::process::Command::new("ffmpeg")
-                .args(["-v", "error", "-i"])
-                .arg(&path)
-                .args(["-an", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
-                .output()
+            let mut images = Vec::new();
+            for playback in [Playback::Forward, Playback::Reverse, Playback::Freeze] {
+                if playback != Playback::Forward {
+                    assert!(editor.apply(Command::SetPlayback {
+                        track_id: 0,
+                        clip_id: 1,
+                        playback
+                    }));
+                }
+                let path = dir.path().join(format!("{playback:?}-{graded}.mp4"));
+                render_with_settings(
+                    editor.project(),
+                    &path,
+                    &settings,
+                    Arc::new(ExportControl::default()),
+                )
                 .unwrap();
-            assert!(output.status.success());
-            let frames: Vec<_> = output
-                .stdout
-                .as_chunks::<{ 64 * 36 * 3 }>()
-                .0
-                .iter()
-                .map(|frame| frame.to_vec())
-                .collect();
-            assert_eq!(frames.len(), 6);
-            images.push(frames);
-            if playback == Playback::Freeze {
-                let output = ffmpeg::format::input(&path).unwrap();
-                assert!(output.streams().best(ffmpeg::media::Type::Audio).is_none());
-                continue;
+                let output = std::process::Command::new("ffmpeg")
+                    .args(["-v", "error", "-i"])
+                    .arg(&path)
+                    .args(["-an", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                let frames: Vec<_> = output
+                    .stdout
+                    .as_chunks::<{ 64 * 36 * 3 }>()
+                    .0
+                    .iter()
+                    .map(|frame| frame.to_vec())
+                    .collect();
+                assert_eq!(frames.len(), 6);
+                images.push(frames);
+                if playback == Playback::Freeze {
+                    let output = ffmpeg::format::input(&path).unwrap();
+                    assert!(output.streams().best(ffmpeg::media::Type::Audio).is_none());
+                    continue;
+                }
+                let audio = std::process::Command::new("ffmpeg")
+                    .args(["-v", "error", "-i"])
+                    .arg(&path)
+                    .args(["-vn", "-f", "f32le", "-ac", "2", "-"])
+                    .output()
+                    .unwrap();
+                assert!(audio.status.success());
+                let samples: Vec<_> = audio
+                    .stdout
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|v| f32::from_le_bytes(*v))
+                    .collect();
+                assert!(!samples.is_empty());
+                assert!(samples.iter().any(|sample| sample.abs() > 0.03));
             }
-            let audio = std::process::Command::new("ffmpeg")
-                .args(["-v", "error", "-i"])
-                .arg(&path)
-                .args(["-vn", "-f", "f32le", "-ac", "2", "-"])
-                .output()
-                .unwrap();
-            assert!(audio.status.success());
-            let samples: Vec<_> = audio
-                .stdout
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|v| f32::from_le_bytes(*v))
-                .collect();
-            assert!(!samples.is_empty());
-            assert!(samples.iter().any(|sample| sample.abs() > 0.03));
-        }
-        for k in 0..6 {
-            assert_eq!(images[1][k], images[0][5 - k]);
-            assert_eq!(images[2][k], images[0][5]);
+            for k in 0..6 {
+                assert_eq!(images[1][k], images[0][5 - k]);
+                assert_eq!(images[2][k], images[0][5]);
+            }
+            if let Some(ungraded) = &ungraded {
+                assert_ne!(&images[0][0], ungraded);
+            } else {
+                ungraded = Some(images[0][0].clone());
+            }
         }
     }
 
@@ -1043,6 +1072,7 @@ mod tests {
             track_id,
             clip: Clip {
                 playback: crate::timeline::Playback::Forward,
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1198,6 +1228,7 @@ mod tests {
             track_id: 0,
             clip: Clip {
                 playback: crate::timeline::Playback::Forward,
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1273,6 +1304,7 @@ mod tests {
             track_id: 0,
             clip: Clip {
                 playback: crate::timeline::Playback::Forward,
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1394,6 +1426,7 @@ mod tests {
             track_id: 2,
             clip: Clip {
                 playback: crate::timeline::Playback::Forward,
+                lut: None,
                 id: 3,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1464,6 +1497,7 @@ mod tests {
         let mut layered = editor.project().tracks().to_vec();
         layered[0].clips = vec![Clip {
             playback: crate::timeline::Playback::Forward,
+            lut: None,
             id: 4,
             start_frame: 15,
             source_start_frame: 15,
@@ -1480,6 +1514,7 @@ mod tests {
         }];
         layered[1].clips = vec![Clip {
             playback: crate::timeline::Playback::Forward,
+            lut: None,
             id: 5,
             start_frame: 0,
             source_start_frame: 0,
@@ -1502,6 +1537,7 @@ mod tests {
             hidden: false,
             clips: vec![Clip {
                 playback: crate::timeline::Playback::Forward,
+                lut: None,
                 id: 6,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1619,6 +1655,7 @@ mod tests {
             track_id: 0,
             clip: Clip {
                 playback: crate::timeline::Playback::Forward,
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1699,6 +1736,7 @@ mod tests {
             track_id: 0,
             clip: Clip {
                 playback: crate::timeline::Playback::Forward,
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1871,6 +1909,7 @@ mod tests {
             track_id,
             clip: Clip {
                 playback: crate::timeline::Playback::Forward,
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1998,6 +2037,7 @@ mod tests {
             track_id: 2,
             clip: Clip {
                 playback: crate::timeline::Playback::Forward,
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,

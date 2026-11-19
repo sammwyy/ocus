@@ -2232,6 +2232,40 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         rows.push(section("Timing", timing));
         if track_kind == TrackKind::Video {
             rows.push(transition_section(state, &clip, busy));
+            if matches!(clip.content, ClipContent::Media { .. }) {
+                let clip_id = clip.id;
+                let name = clip
+                    .lut
+                    .as_ref()
+                    .and_then(|path| path.file_name())
+                    .map_or_else(|| "None".into(), |name| name.to_string_lossy().into_owned());
+                rows.push(section(
+                    "Color LUT",
+                    vec![
+                        property("LUT", name),
+                        inline(secondary_button(
+                            None,
+                            "Choose .cube file…",
+                            !busy,
+                            state,
+                            move |state| state.choose_lut(track_id, clip_id),
+                        )),
+                        inline(secondary_button(
+                            None,
+                            "Clear LUT",
+                            !busy && clip.lut.is_some(),
+                            state,
+                            move |state| {
+                                state.edit(Command::SetClipLut {
+                                    track_id,
+                                    clip_id,
+                                    path: None,
+                                });
+                            },
+                        )),
+                    ],
+                ));
+            }
         }
         if let ClipContent::Title(title) = &clip.content {
             rows.push(section(
@@ -3211,6 +3245,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     waveform: WaveformSlice {
                         peaks,
                         clip: Clip {
+                            lut: None,
                             transition_out: None,
                             color: Default::default(),
                             id: 0,
@@ -4904,6 +4939,7 @@ mod tests {
     fn destination_clip(start_frame: u64, duration_frames: u64) -> Clip {
         Clip {
             playback: crate::timeline::Playback::Forward,
+            lut: None,
             id: 10,
             start_frame,
             source_start_frame: 0,
@@ -5078,6 +5114,21 @@ mod tests {
             duration_frames: 40
         }));
         let bin_image = Arc::new(RgbaImage::new(1, 1, vec![0, 0, 0, 255]).unwrap());
+        let lut = dir.path().join("invert.cube");
+        std::fs::write(&lut, "LUT_1D_SIZE 2\n1 1 1\n0 0 0\n").unwrap();
+        assert!(state.edit(Command::SetClipColor {
+            track_id: target.0,
+            clip_id: target.1,
+            color: ColorAdjust {
+                brightness: 0.1,
+                ..Default::default()
+            }
+        }));
+        assert!(state.edit(Command::SetClipLut {
+            track_id: target.0,
+            clip_id: target.1,
+            path: Some(lut.clone())
+        }));
         state
             .thumbnails
             .borrow_mut()
@@ -5177,6 +5228,19 @@ mod tests {
             }
         }
         let mut clip = selected_clip(&state).unwrap().1;
+        clip.playback = Playback::Forward;
+        clip.source_start_frame = 0;
+        clip.color = Default::default();
+        clip.lut = None;
+        assert_eq!(
+            state.clip_thumbnail(&clip, &media, (30, 1)).unwrap().id(),
+            bin_image.id()
+        );
+        clip.color.brightness = 0.1;
+        assert!(state.clip_thumbnail(&clip, &media, (30, 1)).is_none());
+        clip.color = Default::default();
+        clip.lut = Some(lut);
+        assert!(state.clip_thumbnail(&clip, &media, (30, 1)).is_none());
         clip.duration_frames = 0;
         assert!(state.clip_thumbnail(&clip, &media, (30, 1)).is_none());
     }
@@ -5517,6 +5581,8 @@ mod tests {
             .next()
             .unwrap();
         let key = StoryboardKey {
+            lut: None,
+            color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
             playback: Playback::Forward,
             path,
             kind: MediaKind::Video,
@@ -7237,6 +7303,51 @@ mod tests {
     }
 
     #[test]
+    fn lut_inspector_shows_media_filename_but_not_titles_or_audio() {
+        let state = UiState::new();
+        state.run(Action::AddTitle);
+        assert!(
+            !render(&state, 1280.0, 1100.0)
+                .labels
+                .iter()
+                .any(|label| label == "LUT")
+        );
+        for (id, kind, path) in [
+            (1, MediaKind::Video, "/scene.mp4"),
+            (2, MediaKind::Audio, "/sound.wav"),
+        ] {
+            assert!(state.edit(Command::ImportMedia(Media {
+                id,
+                path: path.into(),
+                kind,
+                duration_us: Some(1_000_000),
+                has_audio: false
+            })));
+            state.insert_media(id);
+            let labels = render(&state, 1280.0, 1100.0).labels;
+            assert_eq!(
+                labels.iter().any(|label| label == "LUT"),
+                kind == MediaKind::Video
+            );
+            if kind == MediaKind::Video {
+                assert!(labels.iter().any(|label| label == "Choose .cube file…"));
+                let (track_id, clip) = selected_clip(&state).unwrap();
+                assert!(state.edit(Command::SetClipLut {
+                    track_id,
+                    clip_id: clip.id,
+                    path: Some("/looks/summer.cube".into())
+                }));
+                assert!(
+                    render(&state, 1280.0, 1100.0)
+                        .labels
+                        .iter()
+                        .any(|label| label == "summer.cube")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn inspector_source_steps_preserve_length_and_clamp_to_media() {
         let state = UiState::new();
         assert!(state.edit(Command::ImportMedia(Media {
@@ -7250,6 +7361,7 @@ mod tests {
             track_id: 0,
             clip: Clip {
                 playback: crate::timeline::Playback::Forward,
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,

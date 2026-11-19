@@ -1032,7 +1032,11 @@ fn transform_rows(state: &UiState, transform: Transform, inner: f32) -> Vec<Boxe
                     Help::new(match easing {
                         Easing::Linear => "Move at a steady speed to the next keyframe.",
                         Easing::Hold => "Keep this value until the next keyframe.",
-                        _ => "Smoothly change speed toward the next keyframe.",
+                        Easing::EASE_IN => "Start slowly, then speed up toward the next keyframe.",
+                        Easing::EASE_OUT => {
+                            "Start quickly, then slow down toward the next keyframe."
+                        }
+                        _ => "Start slowly, speed up, then slow down at the next keyframe.",
                     }),
                     state,
                 ));
@@ -8346,6 +8350,53 @@ mod tests {
             creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
                 creamui::Theme::dark(),
             ));
+            state.program.position.set(5);
+            let easing_help = [
+                "Move at a steady speed to the next keyframe.",
+                "Start slowly, then speed up toward the next keyframe.",
+                "Start quickly, then slow down toward the next keyframe.",
+                "Start slowly, speed up, then slow down at the next keyframe.",
+                "Keep this value until the next keyframe.",
+            ];
+            let draw_easing = || {
+                let mut painter = TestPainter::default();
+                Renderer::new().render(
+                    Box::new(append(
+                        Flex::column(),
+                        transform_rows(&state, animated.transform_at(5), 280.0),
+                    )),
+                    Size {
+                        width: 300.0,
+                        height: 900.0,
+                    },
+                    &mut painter,
+                );
+                painter
+            };
+            draw_easing();
+            for help in easing_help {
+                assert!(state.tooltips.borrow().contains_key(&(help, 0)));
+                state.tooltip_controller((help, 0)).focus(true);
+                let painter = draw_easing();
+                assert_eq!(
+                    painter
+                        .labels
+                        .iter()
+                        .filter(|label| easing_help.contains(&label.as_str()))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    painter
+                        .labels
+                        .iter()
+                        .filter(|label| label.as_str() == help)
+                        .count(),
+                    1
+                );
+            }
+            state.tooltip_controller((easing_help[4], 0)).focus(false);
+            state.program.position.set(10);
             let labels = Rc::new(std::cell::RefCell::new(Vec::new()));
             let renders = Rc::new(std::cell::Cell::new(0));
             let observed = labels.clone();

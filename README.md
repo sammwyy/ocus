@@ -25,8 +25,15 @@ Independent HTML and Markdown switches parse `<b>` / `<bold>`, `<i>` / `<italic>
 other HTML remains literal text. These edits can be undone and are saved with
 the project. The workspace also supports splitting, moving, trimming, deleting
 and ripple-deleting clips. Ripple delete closes the selected clips' time ranges
-across all tracks; a clip spanning a removed range keeps its surviving source
-frames as two clips, and the whole edit is one undo step. **Open** and
+across unlocked tracks; a clip spanning a removed range keeps its surviving source
+frames as two clips, and the whole edit is one undo step. Double-click a track
+name to rename it (up to 32 characters; blank restores its positional label).
+Track headers always offer lock and visibility controls: locking protects clips
+from selection and edits, while hiding video or muting audio removes that track
+from both Program playback and export, including linked video sound. Right-click
+a header to rename, reorder within its kind, lock, hide/mute, or delete a track.
+V1 remains the base layer; lower video rows appear above it. All track changes
+support Undo/Redo. **Open** and
 **Save as…** use native file dialogs instead of requiring typed paths;
 **Save** reuses the chosen path. **New**, **Open** and closing the window
 offer Save, Don't Save or Cancel when there are unsaved changes; Save finishes

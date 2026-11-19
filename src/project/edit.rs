@@ -15,6 +15,9 @@ pub(crate) fn split_tracks(
     let mut changed = false;
     for &(track_id, clip_id) in targets {
         let track = tracks.iter_mut().find(|track| track.id == track_id)?;
+        if track.locked {
+            return None;
+        }
         let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) else {
             continue;
         };
@@ -44,6 +47,22 @@ pub(crate) fn split_tracks(
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     RenameProject(String),
+    RenameTrack {
+        track_id: u64,
+        name: String,
+    },
+    SetTrackLocked {
+        track_id: u64,
+        locked: bool,
+    },
+    SetTrackHidden {
+        track_id: u64,
+        hidden: bool,
+    },
+    MoveTrack {
+        track_id: u64,
+        down: bool,
+    },
     SetLastExport(Option<LastExport>),
     InsertClip {
         track_id: u64,
@@ -108,7 +127,7 @@ fn ripple_delete(project: &Project, selection: &[(u64, u64)]) -> Option<Vec<Trac
         let clip = project
             .tracks
             .iter()
-            .find(|track| track.id == track_id)?
+            .find(|track| track.id == track_id && !track.locked)?
             .clips
             .iter()
             .find(|clip| clip.id == clip_id)?;
@@ -136,6 +155,9 @@ fn ripple_delete(project: &Project, selection: &[(u64, u64)]) -> Option<Vec<Trac
         .max()
         .unwrap_or(0);
     for track in &mut tracks {
+        if track.locked {
+            continue;
+        }
         track
             .clips
             .retain(|clip| !selected.contains(&(track.id, clip.id)));
@@ -143,6 +165,9 @@ fn ripple_delete(project: &Project, selection: &[(u64, u64)]) -> Option<Vec<Trac
     for (start, end) in merged.into_iter().rev() {
         let length = end - start;
         for track in &mut tracks {
+            if track.locked {
+                continue;
+            }
             let mut kept = Vec::with_capacity(track.clips.len());
             for mut clip in std::mem::take(&mut track.clips) {
                 let clip_end = clip.start_frame.checked_add(clip.duration_frames)?;
@@ -328,7 +353,107 @@ impl Editor {
     }
 
     fn execute(&mut self, command: Command) -> Option<Command> {
+        let editable = |id| {
+            self.project
+                .tracks
+                .iter()
+                .any(|track| track.id == id && !track.locked)
+        };
+        let allowed = match &command {
+            Command::InsertClip { track_id, .. }
+            | Command::RemoveClip { track_id, .. }
+            | Command::Split { track_id, .. }
+            | Command::Trim { track_id, .. }
+            | Command::SetClipAudio { track_id, .. }
+            | Command::SetTitle { track_id, .. } => editable(*track_id),
+            Command::Move {
+                track_id,
+                target_track_id,
+                ..
+            } => editable(*track_id) && editable(*target_track_id),
+            Command::ReplaceTracks(tracks) => self
+                .project
+                .tracks
+                .iter()
+                .filter(|track| track.locked)
+                .all(|old| {
+                    tracks.iter().any(|new| {
+                        new.id == old.id && new.kind == old.kind && new.clips == old.clips
+                    })
+                }),
+            _ => true,
+        };
+        if !allowed {
+            return None;
+        }
         match command {
+            Command::RenameTrack { track_id, name } => {
+                let name = name.trim().to_owned();
+                if !Track::valid_name(&name) {
+                    return None;
+                }
+                let track = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.id == track_id)?;
+                if track.name == name {
+                    return None;
+                }
+                Some(Command::RenameTrack {
+                    track_id,
+                    name: std::mem::replace(&mut track.name, name),
+                })
+            }
+            Command::SetTrackLocked { track_id, locked } => {
+                let track = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.id == track_id)?;
+                if track.locked == locked {
+                    return None;
+                }
+                Some(Command::SetTrackLocked {
+                    track_id,
+                    locked: std::mem::replace(&mut track.locked, locked),
+                })
+            }
+            Command::SetTrackHidden { track_id, hidden } => {
+                let track = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.id == track_id)?;
+                if track.hidden == hidden {
+                    return None;
+                }
+                Some(Command::SetTrackHidden {
+                    track_id,
+                    hidden: std::mem::replace(&mut track.hidden, hidden),
+                })
+            }
+            Command::MoveTrack { track_id, down } => {
+                let index = self
+                    .project
+                    .tracks
+                    .iter()
+                    .position(|track| track.id == track_id)?;
+                let kind = self.project.tracks[index].kind;
+                let target = if down {
+                    (index + 1..self.project.tracks.len())
+                        .find(|&i| self.project.tracks[i].kind == kind)
+                } else {
+                    (0..index)
+                        .rev()
+                        .find(|&i| self.project.tracks[i].kind == kind)
+                }?;
+                self.project.tracks.swap(index, target);
+                Some(Command::MoveTrack {
+                    track_id,
+                    down: !down,
+                })
+            }
             Command::RenameProject(name)
                 if name != self.project.name() && !name.trim().is_empty() =>
             {
@@ -654,6 +779,161 @@ impl Editor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn track_metadata_and_order_are_validated_and_undoable() {
+        let original = super::Project::new("Tracks");
+        let mut editor = super::Editor::new(original.clone());
+        use super::Command;
+        assert!(editor.apply(Command::RenameTrack {
+            track_id: 0,
+            name: "  Main picture  ".into()
+        }));
+        assert_eq!(editor.project().tracks()[0].name, "Main picture");
+        assert!(!editor.apply(Command::RenameTrack {
+            track_id: 0,
+            name: "x".repeat(33)
+        }));
+        assert!(!editor.apply(Command::RenameTrack {
+            track_id: 99,
+            name: "Missing".into()
+        }));
+        assert!(editor.apply(Command::SetTrackLocked {
+            track_id: 0,
+            locked: true
+        }));
+        assert!(editor.apply(Command::SetTrackHidden {
+            track_id: 0,
+            hidden: true
+        }));
+        assert!(!editor.apply(Command::MoveTrack {
+            track_id: 0,
+            down: false
+        }));
+        assert!(editor.apply(Command::MoveTrack {
+            track_id: 0,
+            down: true
+        }));
+        assert_eq!(editor.project().tracks()[1].id, 0);
+        for _ in 0..4 {
+            assert!(editor.undo());
+        }
+        assert_eq!(editor.project(), &original);
+        for _ in 0..4 {
+            assert!(editor.redo());
+        }
+        assert!(editor.project().tracks()[1].locked);
+        assert!(editor.apply(Command::RenameTrack {
+            track_id: 0,
+            name: String::new()
+        }));
+        assert_eq!(editor.project().tracks()[1].display_name("V2"), "V2");
+    }
+
+    #[test]
+    fn locked_tracks_refuse_clip_edits_and_survive_ripple_delete() {
+        use super::{Command, Editor, Project};
+        use crate::timeline::{Clip, ClipContent, Title};
+        let mut editor = Editor::new(Project::new("Locked"));
+        let clip = Clip {
+            id: 1,
+            start_frame: 0,
+            source_start_frame: 0,
+            duration_frames: 90,
+            content: ClipContent::Title(Title::default()),
+            volume: 1.0,
+            muted: false,
+            linked_audio: false,
+        };
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 0,
+            clip: clip.clone()
+        }));
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 1,
+            clip: Clip {
+                id: 2,
+                ..clip.clone()
+            }
+        }));
+        assert!(editor.apply(Command::SetTrackLocked {
+            track_id: 0,
+            locked: true
+        }));
+        let locked = editor.project().clone();
+        for command in [
+            Command::InsertClip {
+                track_id: 0,
+                clip: Clip {
+                    id: 3,
+                    start_frame: 90,
+                    ..clip.clone()
+                },
+            },
+            Command::RemoveClip {
+                track_id: 0,
+                clip_id: 1,
+            },
+            Command::Split {
+                track_id: 0,
+                clip_id: 1,
+                at_frame: 30,
+                new_id: 3,
+            },
+            Command::Move {
+                track_id: 0,
+                target_track_id: 1,
+                clip_id: 1,
+                to_frame: 90,
+            },
+            Command::Move {
+                track_id: 1,
+                target_track_id: 0,
+                clip_id: 2,
+                to_frame: 90,
+            },
+            Command::Trim {
+                track_id: 0,
+                clip_id: 1,
+                start_frame: 0,
+                source_start_frame: 0,
+                duration_frames: 30,
+            },
+            Command::SetTitle {
+                track_id: 0,
+                clip_id: 1,
+                title: Title {
+                    text: "Changed".into(),
+                    ..Title::default()
+                },
+            },
+            Command::SetClipAudio {
+                track_id: 0,
+                clip_id: 1,
+                volume: 0.5,
+                muted: true,
+            },
+            Command::RippleDelete {
+                track_id: 0,
+                clip_id: 1,
+            },
+        ] {
+            assert!(!editor.apply(command));
+            assert_eq!(editor.project(), &locked);
+        }
+        let mut tracks = locked.tracks().to_vec();
+        tracks[0].clips.clear();
+        assert!(!editor.apply(Command::ReplaceTracks(tracks)));
+        let mut tracks = locked.tracks().to_vec();
+        tracks.remove(0);
+        assert!(!editor.apply(Command::ReplaceTracks(tracks)));
+        assert!(editor.apply(Command::RippleDelete {
+            track_id: 1,
+            clip_id: 2
+        }));
+        assert_eq!(editor.project().tracks()[0], locked.tracks()[0]);
+        assert!(editor.undo());
+        assert_eq!(editor.project(), &locked);
+    }
     use super::*;
 
     #[test]

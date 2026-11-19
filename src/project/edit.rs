@@ -56,6 +56,10 @@ pub enum Command {
     ImportMedia(Media),
     ReprobeMedia(Media),
     RelinkMedia(Media),
+    RestoreMedia {
+        media: Media,
+        linked_audio: Vec<(u64, bool)>,
+    },
     RemoveMedia(u64),
     Split {
         track_id: u64,
@@ -439,12 +443,60 @@ impl Editor {
                 {
                     return None;
                 }
+                let has_sound = media.kind == MediaKind::Video && media.has_audio;
+                let linked_audio = self
+                    .project
+                    .tracks
+                    .iter()
+                    .flat_map(|track| &track.clips)
+                    .filter(|clip| clip.content == ClipContent::Media { media_id: media.id })
+                    .map(|clip| (clip.id, clip.linked_audio && has_sound))
+                    .collect();
+                self.execute(Command::RestoreMedia {
+                    media,
+                    linked_audio,
+                })
+            }
+            Command::RestoreMedia {
+                media,
+                linked_audio,
+            } => {
+                let index = self
+                    .project
+                    .media
+                    .iter()
+                    .position(|item| item.id == media.id)?;
                 let original = std::mem::replace(&mut self.project.media[index], media);
+                let mut previous = Vec::new();
+                for clip in self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .flat_map(|track| &mut track.clips)
+                {
+                    if let Some((_, linked)) = linked_audio.iter().find(|(id, _)| *id == clip.id) {
+                        previous
+                            .push((clip.id, std::mem::replace(&mut clip.linked_audio, *linked)));
+                    }
+                }
                 if self.project.validate().is_err() {
                     self.project.media[index] = original;
+                    for clip in self
+                        .project
+                        .tracks
+                        .iter_mut()
+                        .flat_map(|track| &mut track.clips)
+                    {
+                        if let Some((_, linked)) = previous.iter().find(|(id, _)| *id == clip.id) {
+                            clip.linked_audio = *linked;
+                        }
+                    }
                     return None;
                 }
-                Some(Command::RelinkMedia(original))
+                Some(Command::RestoreMedia {
+                    media: original,
+                    linked_audio: previous,
+                })
             }
             Command::ReprobeMedia(media) => {
                 let index = self
@@ -730,6 +782,51 @@ mod tests {
         assert!(editor.redo());
         assert_eq!(editor.project().media(), &[replacement]);
     }
+
+    #[test]
+    fn relink_silent_video_unlinks_and_undo_restores_both() {
+        let mut editor = Editor::new(Project::new("Relink"));
+        let original = Media {
+            id: 4,
+            path: "old.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: true,
+        };
+        assert!(editor.apply(Command::ImportMedia(original.clone())));
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 0,
+            clip: Clip {
+                id: 1,
+                start_frame: 0,
+                source_start_frame: 0,
+                duration_frames: 30,
+                content: ClipContent::Media { media_id: 4 },
+                volume: 1.0,
+                muted: false,
+                linked_audio: true,
+            }
+        }));
+        let before = editor.project().clone();
+        assert!(!editor.apply(Command::RelinkMedia(Media {
+            path: "short.mp4".into(),
+            duration_us: Some(500_000),
+            has_audio: false,
+            ..original.clone()
+        })));
+        assert_eq!(editor.project(), &before);
+        assert!(editor.apply(Command::RelinkMedia(Media {
+            path: "silent.mp4".into(),
+            has_audio: false,
+            ..original
+        })));
+        assert!(!editor.project().tracks()[0].clips[0].linked_audio);
+        assert!(editor.undo());
+        assert_eq!(editor.project(), &before);
+        assert!(editor.redo());
+        assert!(!editor.project().tracks()[0].clips[0].linked_audio);
+    }
+
     #[test]
     fn rename_undo_redo_and_new_edit_invalidate_redo() {
         let mut editor = Editor::new(Project::new("Untitled"));

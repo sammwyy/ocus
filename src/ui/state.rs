@@ -1,7 +1,7 @@
 use super::edits::{self, ClipRef, CopiedClip};
 use super::interaction::{DragState, Gesture, MenuState};
 use crate::export::{self, ExportControl, presets};
-use crate::media::audio::{self, AudioPlan, AudioSource, Clock};
+use crate::media::audio::{self, AudioPlan, AudioSource, Clock, carries_sound};
 use crate::media::composite::VisualPlan;
 use crate::media::preview::{
     FrameImage, FrameSource, PreviewEvent, PreviewPlan, StoryboardKey, decode_sequence, storyboard,
@@ -13,7 +13,7 @@ use crate::project::export_settings::{
 };
 use crate::project::{Command, Editor, Project, recovery, store};
 use crate::settings::{self, Settings, ThemeMode};
-use crate::timeline::{Clip, ClipContent, Title, TrackKind};
+use crate::timeline::{ClipContent, Title, TrackKind};
 use creamui::core::{Modifiers, Point, Rect, RgbaImage};
 use creamui::widgets::{
     ColorPickerController, ScrollController, TextController, TooltipController,
@@ -1148,7 +1148,7 @@ impl UiState {
         let editor = self.editor.borrow();
         let project = editor.project();
         let mut sources = Vec::new();
-        let mut audio_sources = Vec::new();
+        let audio = AudioPlan::without_media(project, &missing);
         for track in project.tracks() {
             for clip in &track.clips {
                 let ClipContent::Media { media_id } = clip.content else {
@@ -1170,15 +1170,6 @@ impl UiState {
                         duration: clip.duration_frames,
                     });
                 }
-                if audible(track.kind, clip, media) {
-                    audio_sources.push(AudioSource {
-                        path: media.path.clone(),
-                        start: clip.start_frame,
-                        source_start: clip.source_start_frame,
-                        duration: clip.duration_frames,
-                        volume: clip.volume,
-                    });
-                }
             }
         }
         let fps = (
@@ -1198,11 +1189,6 @@ impl UiState {
             end,
             fps,
             resolution,
-        };
-        let audio = AudioPlan {
-            sources: audio_sources,
-            end,
-            fps,
         };
         (plan, audio)
     }
@@ -2673,19 +2659,6 @@ impl UiState {
     }
 }
 
-/// Whether a clip contributes sound to preview playback.
-pub(crate) fn audible(kind: TrackKind, clip: &Clip, media: &Media) -> bool {
-    !clip.muted && carries_sound(kind, clip, media)
-}
-
-/// Whether the clip plays sound on its track when unmuted.
-fn carries_sound(kind: TrackKind, clip: &Clip, media: &Media) -> bool {
-    match kind {
-        TrackKind::Video => clip.linked_audio && media.has_audio,
-        TrackKind::Audio => media.kind == MediaKind::Audio || media.has_audio,
-    }
-}
-
 /// What the timeline gives program playback: whether anything can play
 /// (muted sound still plays, silently) and whether any of it is picture.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2883,6 +2856,7 @@ fn import_summary(imported: usize, total: usize, errors: &[(PathBuf, String)]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::timeline::Clip;
 
     #[test]
     fn empty_recovery_check_leaves_editor_available_and_does_not_finish_other_work() {

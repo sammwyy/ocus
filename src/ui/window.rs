@@ -3458,29 +3458,33 @@ fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidg
                 .child(footer_actions),
         )
     };
-    let footer = Box::new(
-        Flex::column()
+    let mut footer = Flex::column().width(inner).gap(8.0).child(Box::new(
+        Flex::row()
             .width(inner)
             .gap(8.0)
-            .child(Box::new(
-                Flex::row()
-                    .width(inner)
-                    .gap(8.0)
-                    .align(Align::Center)
-                    .child(text("Save to", muted(), 11.0))
-                    .child(text(
-                        fit(&state.export_path.value(), inner - 150.0, 11.0),
-                        text_color(),
-                        11.0,
-                    ))
-                    .child(spacer())
-                    .child(secondary_button(None, "Change…", true, state, |state| {
-                        state.export_scroll.set(0.0);
-                        state.export_page.set(ExportPage::Output);
-                    })),
+            .align(Align::Center)
+            .child(text("Save to", muted(), 11.0))
+            .child(text(
+                fit(&state.export_path.value(), inner - 150.0, 11.0),
+                text_color(),
+                11.0,
             ))
-            .child(footer_status),
-    );
+            .child(spacer())
+            .child(secondary_button(None, "Change…", true, state, |state| {
+                state.export_scroll.set(0.0);
+                state.export_page.set(ExportPage::Output);
+            })),
+    ));
+    if state.project_path.get().is_some() {
+        footer = footer.child(Box::new(
+            Flex::row()
+                .gap(6.0)
+                .align(Align::Center)
+                .child(glyph(Glyph::Save, muted(), 12.0))
+                .child(text("Export also saves your project", muted(), 11.0)),
+        ));
+    }
+    let footer = Box::new(footer.child(footer_status));
     let close = state.clone();
     Box::new(Layer {
         style: Layer::at(0.0, 0.0, viewport.width, viewport.height),
@@ -5558,6 +5562,34 @@ mod tests {
                     assert!(bounds.y >= 0.0 && bounds.y + bounds.height <= 480.0);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn export_dialog_says_export_also_saves_a_saved_project() {
+        const HINT: &str = "Export also saves your project";
+        let state = UiState::new();
+        assert!(state.add_title());
+        state.export_dialog();
+        assert!(
+            !render(&state, 1280.0, 480.0)
+                .labels
+                .iter()
+                .any(|label| label == HINT)
+        );
+        state
+            .project_path
+            .set(Some(std::env::temp_dir().join("Movies/project.ocus")));
+        for width in [420.0, 680.0, 1280.0] {
+            let painter = render(&state, width, 480.0);
+            let (_, bounds) = painter
+                .bounds
+                .iter()
+                .rev()
+                .find(|(text, _)| text == HINT)
+                .unwrap();
+            assert!(bounds.x >= 0.0 && bounds.x + bounds.width <= width);
+            assert!(bounds.y >= 0.0 && bounds.y + bounds.height <= 480.0);
         }
     }
 

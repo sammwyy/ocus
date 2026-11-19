@@ -315,9 +315,7 @@ impl FrameReader {
         let time_base = stream.time_base();
         let origin_pts = super::format_origin(&input, time_base);
         let rotation = super::Rotation::from_stream(&stream);
-        let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
-            .and_then(|context| context.decoder().video())
-            .map_err(|error| error.to_string())?;
+        let mut decoder = super::hardware::video_decoder(stream.parameters())?;
         if decoder.format() == ffmpeg::format::Pixel::None || decoder.width() == 0 {
             return Err("Preview source has an unknown pixel format".into());
         }
@@ -325,7 +323,7 @@ impl FrameReader {
         let display = rotation.dimensions(square.0, square.1);
         let picture = super::fitted_dimensions(display.0, display.1, output.0, output.1);
         let coded = rotation.dimensions(picture.0, picture.1);
-        let scaler = super::rgba_scaler(&decoder, coded.0, coded.1)?;
+        let scaler = super::rgba_scaler(&decoder, decoder.format(), coded.0, coded.1)?;
         if source.kind == MediaKind::Video && target > 0 {
             let micros = u128::from(target) * u128::from(fps.1) * 1_000_000 / u128::from(fps.0);
             if let Some(timestamp) = super::seek_timestamp(&input, micros)
@@ -379,9 +377,16 @@ impl FrameReader {
             .as_ref()
             .or(self.future.as_ref())
             .ok_or("Preview source has no decodable video frames")?;
+        let downloaded = super::hardware::download(&frame.1)?;
+        let frame = downloaded.as_ref().unwrap_or(&frame.1);
+        if frame.format() != self.scaler.input().format {
+            let output = self.scaler.output();
+            self.scaler =
+                super::rgba_scaler(&self.decoder, frame.format(), output.width, output.height)?;
+        }
         let mut scaled = ffmpeg::frame::Video::empty();
         self.scaler
-            .run(&frame.1, &mut scaled)
+            .run(frame, &mut scaled)
             .map_err(|error| error.to_string())?;
         let scaled = self.rotation.orient(&scaled);
         let row_size = scaled.width as usize * 4;

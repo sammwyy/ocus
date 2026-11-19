@@ -130,8 +130,12 @@ on the same GPU device as CreamUI. On a CPU-only window the monitors instead
 explain why video cannot be displayed. On narrower windows the media bin and
 inspector share a tabbed sidebar.
 
-The titlebar gear opens an in-editor settings dialog with Appearance and About
-sections. About shows the package version, build commit and author, with links
+The titlebar gear opens an in-editor settings dialog with Appearance,
+Performance and About sections. Performance turns hardware acceleration on or
+off (on by default): previews decode through CUDA or VAAPI on Linux and
+VideoToolbox on macOS, and H.264/HEVC exports use NVENC, VAAPI or
+VideoToolbox (VP9 through VAAPI). Unsupported media, missing drivers or a
+failing device fall back to software decoding and libx264, libx265 or libvpx. About shows the package version, build commit and author, with links
 to the source, issue tracker and releases in the default browser. Appearance can
 follow the system through CreamUI or use Light, Dark, or Midnight. Custom themes offer
 CreamUI's built-in Blue, Cyan, Green, Pink, Purple, and Orange accent presets;
@@ -220,8 +224,9 @@ from crates.io. No local CreamUI checkout is needed.
 - `src/app.rs`: window startup and wiring.
 - `src/project/`: saved project, JSON format, and edit history/undo-redo.
 - `src/timeline.rs`: tracks, clips, and titles.
-- `src/media.rs`, `src/media/preview.rs`, `src/media/composite.rs` and
-  `src/media/audio.rs`: sources, decoding, and shared preview/export composition.
+- `src/media.rs`, `src/media/preview.rs`, `src/media/composite.rs`,
+  `src/media/hardware.rs` and `src/media/audio.rs`: sources, decoding,
+  hardware acceleration, and shared preview/export composition.
 - `src/playback.rs`: default audio device and playback sessions.
 - `src/export.rs`: timeline video, GIF and audio export with cancellation.
 - `src/ui/`: compact CreamUI workspace and background file workflow.

@@ -45,6 +45,7 @@ pub(crate) fn split_tracks(
         };
         next_id = next_id.checked_add(1)?;
         clip.duration_frames = offset;
+        clip.transition_out = None;
         clip.fade_out_frames = 0;
         clip.clamp_fades();
         track.clips.insert(index + 1, right);
@@ -55,6 +56,11 @@ pub(crate) fn split_tracks(
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
+    SetTransitionOut {
+        track_id: u64,
+        clip_id: u64,
+        transition: Option<Transition>,
+    },
     SetTransition {
         track_id: u64,
         clip_id: u64,
@@ -226,6 +232,7 @@ fn ripple_delete(project: &Project, selection: &[(u64, u64)]) -> Option<Vec<Trac
                         right.fade_in_frames = 0;
                         right.clamp_fades();
                         clip.fade_out_frames = 0;
+                        clip.transition_out = None;
                         clip.duration_frames = start - clip.start_frame;
                         kept.push(clip);
                         kept.push(right);
@@ -415,6 +422,7 @@ impl Editor {
             | Command::SetClipColor { track_id, .. }
             | Command::SetClipFades { track_id, .. }
             | Command::SetTransition { track_id, .. }
+            | Command::SetTransitionOut { track_id, .. }
             | Command::SetTitle { track_id, .. } => editable(*track_id),
             Command::Move {
                 track_id,
@@ -917,6 +925,35 @@ impl Editor {
                 clip.clamp_fades();
                 self.execute(Command::ReplaceTracks(tracks))
             }
+            Command::SetTransitionOut {
+                track_id,
+                clip_id,
+                transition,
+            } => {
+                if transition
+                    .as_ref()
+                    .is_some_and(|value| value.duration_frames == 0)
+                {
+                    return None;
+                }
+                let track = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.id == track_id)?;
+                if track.kind != TrackKind::Video {
+                    return None;
+                }
+                let clip = track.clips.iter_mut().find(|clip| clip.id == clip_id)?;
+                if clip.transition_out == transition {
+                    return None;
+                }
+                Some(Command::SetTransitionOut {
+                    track_id,
+                    clip_id,
+                    transition: std::mem::replace(&mut clip.transition_out, transition),
+                })
+            }
             Command::SetTransition {
                 track_id,
                 clip_id,
@@ -1089,6 +1126,7 @@ mod tests {
             speed: 1.0,
             color: ColorAdjust::default(),
             transition: None,
+            transition_out: None,
             id: 1,
             start_frame: 0,
             source_start_frame: 0,
@@ -1180,6 +1218,16 @@ mod tests {
                 transition: Some(crate::timeline::Transition {
                     kind: crate::timeline::TransitionKind::Fade,
                     duration_frames: 10,
+                    direction: Default::default(),
+                }),
+            },
+            Command::SetTransitionOut {
+                track_id: 0,
+                clip_id: 1,
+                transition: Some(crate::timeline::Transition {
+                    kind: crate::timeline::TransitionKind::Fade,
+                    duration_frames: 10,
+                    direction: Default::default(),
                 }),
             },
             Command::RippleDelete {
@@ -1262,6 +1310,12 @@ mod tests {
         clip.transition = Some(Transition {
             kind: crate::timeline::TransitionKind::Dissolve,
             duration_frames: 10,
+            direction: crate::timeline::SlideDirection::Left,
+        });
+        clip.transition_out = Some(Transition {
+            kind: crate::timeline::TransitionKind::Slide,
+            duration_frames: 10,
+            direction: crate::timeline::SlideDirection::Down,
         });
         for (speed, fades) in [(0.5, (20, 30)), (2.0, (20, 10)), (4.0, (15, 0))] {
             let mut editor = Editor::new(original.clone());
@@ -1273,6 +1327,10 @@ mod tests {
             let clip = &editor.project().tracks()[0].clips[0];
             assert_eq!((clip.fade_in_frames, clip.fade_out_frames), fades);
             assert_eq!(clip.transition, original.tracks[0].clips[0].transition);
+            assert_eq!(
+                clip.transition_out,
+                original.tracks[0].clips[0].transition_out
+            );
             assert_eq!(clip.color, original.tracks[0].clips[0].color);
             editor.project().validate().unwrap();
             assert!(editor.undo());
@@ -1500,6 +1558,7 @@ mod tests {
             linked_audio: false,
             color: ColorAdjust::default(),
             transition: None,
+            transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
         };
@@ -1727,6 +1786,7 @@ mod tests {
                 duration_frames: 30,
                 content: ClipContent::Media { media_id: 4 },
                 volume: 1.0,
+                transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
                 muted: false,
@@ -1797,6 +1857,7 @@ mod tests {
                 speed: 1.0,
                 color: Default::default(),
                 transition: None,
+                transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
                 linked_audio: false,
@@ -1875,6 +1936,7 @@ mod tests {
             speed: 1.0,
             color: Default::default(),
             transition: None,
+            transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
             linked_audio: false,
@@ -1956,6 +2018,7 @@ mod tests {
             speed: 1.0,
             color: Default::default(),
             transition: None,
+            transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
             linked_audio: false,
@@ -2004,6 +2067,7 @@ mod tests {
                 speed: 1.0,
                 color: Default::default(),
                 transition: None,
+                transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
                 linked_audio: false,
@@ -2049,6 +2113,71 @@ mod tests {
     }
 
     #[test]
+    fn out_transitions_are_undoable_and_stay_on_the_right_of_splits() {
+        use crate::timeline::{SlideDirection, TransitionKind};
+        let mut editor = Editor::new(Project::new("Out transitions"));
+        let clip: Clip = serde_json::from_value(serde_json::json!({
+            "id": 1, "start_frame": 0, "source_start_frame": 0,
+            "duration_frames": 10, "content": {"title": Title::default()},
+            "volume": 1.0, "muted": false
+        }))
+        .unwrap();
+        assert!(editor.apply(Command::InsertClip { track_id: 0, clip }));
+        let transition = Transition {
+            kind: TransitionKind::Slide,
+            direction: SlideDirection::Left,
+            duration_frames: 3,
+        };
+        let set = |transition| Command::SetTransitionOut {
+            track_id: 0,
+            clip_id: 1,
+            transition,
+        };
+        assert!(!editor.apply(set(Some(Transition {
+            duration_frames: 0,
+            ..transition.clone()
+        }))));
+        assert!(editor.apply(set(Some(transition.clone()))));
+        assert!(!editor.apply(set(Some(transition.clone()))));
+        assert!(editor.undo());
+        assert!(
+            editor.project().tracks()[0].clips[0]
+                .transition_out
+                .is_none()
+        );
+        assert!(editor.redo());
+        assert!(editor.apply(Command::SetTransition {
+            track_id: 0,
+            clip_id: 1,
+            transition: Some(transition.clone())
+        }));
+        let before = editor.project().clone();
+        assert!(editor.apply(Command::Split {
+            track_id: 0,
+            clip_id: 1,
+            at_frame: 5,
+            new_id: 2
+        }));
+        let clips = &editor.project().tracks()[0].clips;
+        assert_eq!(clips[0].transition, Some(transition.clone()));
+        assert!(clips[0].transition_out.is_none());
+        assert!(clips[1].transition.is_none());
+        assert_eq!(clips[1].transition_out, Some(transition.clone()));
+        assert!(editor.undo());
+        assert_eq!(editor.project(), &before);
+        assert!(editor.redo());
+        assert!(editor.undo());
+        assert!(editor.apply(set(None)));
+        assert!(editor.undo());
+        assert_eq!(editor.project(), &before);
+        assert!(!editor.apply(Command::SetTransitionOut {
+            track_id: 99,
+            clip_id: 1,
+            transition: Some(transition)
+        }));
+    }
+
+    #[test]
     fn transitions_are_undoable_and_stay_on_the_left_of_splits() {
         use crate::timeline::{Transition, TransitionKind};
         let mut editor = Editor::new(Project::new("Transitions"));
@@ -2060,6 +2189,7 @@ mod tests {
         .unwrap();
         assert!(editor.apply(Command::InsertClip { track_id: 0, clip }));
         let transition = Some(Transition {
+            direction: Default::default(),
             kind: TransitionKind::Dissolve,
             duration_frames: 20,
         });
@@ -2069,6 +2199,7 @@ mod tests {
             transition,
         };
         assert!(!editor.apply(set(Some(Transition {
+            direction: Default::default(),
             kind: TransitionKind::Fade,
             duration_frames: 0
         }))));
@@ -2138,6 +2269,7 @@ mod tests {
             speed: 1.0,
             color: Default::default(),
             transition: None,
+            transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
             linked_audio: false,
@@ -2222,6 +2354,7 @@ mod tests {
             speed: 1.0,
             color: Default::default(),
             transition: None,
+            transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
             linked_audio: false,
@@ -2325,6 +2458,7 @@ mod tests {
             speed: 1.0,
             color: Default::default(),
             transition: None,
+            transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
             linked_audio: false,
@@ -2418,6 +2552,7 @@ mod tests {
                     speed: 1.0,
                     color: Default::default(),
                     transition: None,
+                    transition_out: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
                     linked_audio: id == 2,
@@ -2475,6 +2610,7 @@ mod tests {
             speed: 1.0,
             color: Default::default(),
             transition: None,
+            transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
             linked_audio: false,
@@ -2500,6 +2636,7 @@ mod tests {
                     speed: 1.0,
                     color: Default::default(),
                     transition: None,
+                    transition_out: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
                     linked_audio: false,
@@ -2570,6 +2707,7 @@ mod tests {
                     speed: 1.0,
                     color: Default::default(),
                     transition: None,
+                    transition_out: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
                     linked_audio: false,
@@ -2605,6 +2743,7 @@ mod tests {
             speed: 1.0,
             color: Default::default(),
             transition: None,
+            transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
             linked_audio: false,
@@ -2649,6 +2788,7 @@ mod tests {
                 speed: 1.0,
                 color: Default::default(),
                 transition: None,
+                transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
                 linked_audio: false,
@@ -2672,6 +2812,7 @@ mod tests {
                 speed: 1.0,
                 color: Default::default(),
                 transition: None,
+                transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
                 linked_audio: false,
@@ -2710,6 +2851,7 @@ mod tests {
                 speed: 1.0,
                 color: Default::default(),
                 transition: None,
+                transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
                 linked_audio: false,

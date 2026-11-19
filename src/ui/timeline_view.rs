@@ -66,6 +66,7 @@ impl ClipLook {
 
 pub(super) struct LaneClip {
     pub transition_frames: u64,
+    pub transition_out_frames: u64,
     pub clip_id: u64,
     pub start: u64,
     pub duration: u64,
@@ -848,19 +849,34 @@ impl TimelineView {
             }
             _ => {}
         }
-        if clip.transition_frames > 0 && content.height > 0.0 {
-            let end = geometry.x(clip
-                .start
-                .saturating_add(clip.transition_frames.min(clip.duration)));
-            let width = (end - full.x).max(1.0);
-            for x in (left.floor() as i32)..(end.min(right).ceil() as i32) {
-                let progress = ((x as f32 - full.x) / width).clamp(0.0, 1.0);
+        for (frames, out) in [
+            (clip.transition_frames, false),
+            (clip.transition_out_frames, true),
+        ] {
+            if frames == 0 || content.height <= 0.0 {
+                continue;
+            }
+            let frames = frames.min(clip.duration);
+            let start = if out {
+                geometry.x(clip.start.saturating_add(clip.duration - frames))
+            } else {
+                full.x
+            };
+            let end = if out {
+                full.x + full.width
+            } else {
+                geometry.x(clip.start.saturating_add(frames))
+            };
+            let width = (end - start).max(1.0);
+            for x in (start.max(left).floor() as i32)..(end.min(right).ceil() as i32) {
+                let progress = ((x as f32 - start) / width).clamp(0.0, 1.0);
+                let height = if out { progress } else { 1.0 - progress } * content.height;
                 painter.fill_rect(
                     Rect {
                         x: x as f32,
-                        y: content.y + progress * content.height,
+                        y: content.y + content.height - height,
                         width: 1.0,
-                        height: (1.0 - progress) * content.height,
+                        height,
                     },
                     Color::rgba(255, 255, 255, 40),
                     0.0,
@@ -868,12 +884,12 @@ impl TimelineView {
             }
             painter.stroke_line(
                 Point {
-                    x: full.x,
-                    y: content.y,
+                    x: start,
+                    y: content.y + if out { content.height } else { 0.0 },
                 },
                 Point {
                     x: end,
-                    y: content.y + content.height,
+                    y: content.y + if out { 0.0 } else { content.height },
                 },
                 Color::rgba(255, 255, 255, 190),
                 1.0,

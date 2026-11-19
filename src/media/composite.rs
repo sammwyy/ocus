@@ -1357,6 +1357,84 @@ mod tests {
     static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
 
     #[test]
+    fn easing_motion_compositor_frames() {
+        use crate::timeline::{Easing, Keyframe, evaluate_transform};
+        let (width, height) = (320, 80);
+        let mut image = FrameImage {
+            width,
+            height,
+            picture: (152, 32, 16, 16),
+            pixels: vec![0; (width * height * 4) as usize],
+        };
+        for y in 32..48 {
+            for x in 152..168 {
+                let index = ((y * width + x) * 4) as usize;
+                image.pixels[index..index + 4].copy_from_slice(&[240, 120, 40, 255]);
+            }
+        }
+        let output = std::env::var_os("OCUS_EASING_EVIDENCE").map(std::path::PathBuf::from);
+        let mut table = String::from("preset,time_s,transform_x,measured_center_x_px\n");
+        for (name, easing) in [
+            ("linear", Easing::Linear),
+            ("ease-in", Easing::EASE_IN),
+            ("ease-out", Easing::EASE_OUT),
+            ("ease-in-out", Easing::EASE_IN_OUT),
+            ("hold", Easing::Hold),
+        ] {
+            let keys = [
+                Keyframe {
+                    easing,
+                    ..Keyframe::new(
+                        0,
+                        Transform {
+                            x: -0.4,
+                            ..Default::default()
+                        },
+                    )
+                },
+                Keyframe::new(
+                    60,
+                    Transform {
+                        x: 0.4,
+                        ..Default::default()
+                    },
+                ),
+            ];
+            for frame in 0..=60 {
+                let transform = evaluate_transform(Default::default(), &keys, frame);
+                let mut pixels = vec![0; (width * height * 4) as usize];
+                draw_transformed(&mut pixels, width, height, &image, transform);
+                let mut weight = 0.0;
+                let mut weighted_x = 0.0;
+                for (index, pixel) in pixels.as_chunks::<4>().0.iter().enumerate() {
+                    weight += pixel[0] as f64;
+                    weighted_x += (index as u32 % width) as f64 * pixel[0] as f64;
+                }
+                assert!(weight > 0.0);
+                let center = weighted_x / weight + 0.5;
+                assert!((center - (160.0 + transform.x as f64 * 320.0)).abs() < 1.0);
+                if frame % 15 == 0 {
+                    table.push_str(&format!(
+                        "{name},{:.1},{:.6},{center:.3}\n",
+                        frame as f64 / 30.0,
+                        transform.x
+                    ));
+                }
+                if let Some(dir) = &output {
+                    let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+                    for pixel in pixels.as_chunks::<4>().0 {
+                        ppm.extend_from_slice(&pixel[..3]);
+                    }
+                    fs::write(dir.join(format!("{name}-{frame:03}.ppm")), ppm).unwrap();
+                }
+            }
+        }
+        if let Some(dir) = output {
+            fs::write(dir.join("positions.csv"), table).unwrap();
+        }
+    }
+
+    #[test]
     fn keyframed_opacity_and_position_change_composed_frames() {
         use crate::timeline::Keyframe;
         ffmpeg_next::init().unwrap();

@@ -43,3 +43,7 @@ wgpu = { version = "22", default-features = false, features = ["wgsl", "dx12", "
 
 [build-dependencies]
 winres = "0.1.12"
+
+[[bench]]
+name = "performance"
+harness = false

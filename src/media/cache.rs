@@ -261,7 +261,7 @@ pub(super) fn evict(root: &Path, cap: u64) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::process::Command;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     fn fixture(root: &Path, size: &str) -> StoryboardKey {
         let path = root.join("source.mkv");
@@ -502,36 +502,5 @@ mod tests {
         assert!(storyboard_in(Some(&root), &request, cancel(false)).is_err());
         assert!(thumbnail_in(Some(&root), &request.path).is_err());
         assert!(!root.exists());
-    }
-
-    #[test]
-    #[ignore]
-    fn disk_media_cache_benchmark() {
-        let dir = tempfile::tempdir().unwrap();
-        let request = fixture(dir.path(), "1920x1080");
-        let root = dir.path().join("cache");
-        let mut cold = Vec::new();
-        let mut warm = Vec::new();
-        for _ in 0..5 {
-            if root.exists() {
-                fs::remove_dir_all(&root).unwrap();
-            }
-            for samples in [&mut cold, &mut warm] {
-                let start = Instant::now();
-                let thumb = thumbnail_in(Some(&root), &request.path).unwrap();
-                let frames = storyboard_in(Some(&root), &request, cancel(false)).unwrap();
-                assert!(!thumb.pixels.is_empty());
-                assert_eq!(frames.len(), 3);
-                samples.push(start.elapsed());
-            }
-        }
-        cold.sort();
-        warm.sort();
-        println!(
-            "\n| 1080p thumbnail + storyboard (5 runs) | Median |\n|---|---:|\n| Cold | {:.3} ms |\n| Warm | {:.3} ms |\n| Speedup | {:.2}x |",
-            cold[2].as_secs_f64() * 1000.0,
-            warm[2].as_secs_f64() * 1000.0,
-            cold[2].as_secs_f64() / warm[2].as_secs_f64()
-        );
     }
 }

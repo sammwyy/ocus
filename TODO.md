@@ -71,6 +71,9 @@ clip commands do not complete the corresponding editor workflows.
 
 ## End-to-end usability
 
+- [x] Import and export timeline cuts through OpenTimelineIO (.otio) and
+  CMX3600 EDL (.edl).
+
 - [x] Wire import, playback, editing, project open/save, and export into the
   window with clear empty, loading, and error states.
 - [x] Add keyboard shortcuts for the main actions without stealing text

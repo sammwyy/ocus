@@ -187,6 +187,7 @@ pub enum Command {
         clip_id: u64,
     },
     RippleDeleteSelection(Vec<(u64, u64)>),
+    RemoveSilences(Vec<(u64, u64)>),
     ReplaceTracks(Vec<Track>),
     AddMarker(u64),
     RemoveMarker(u64),
@@ -213,6 +214,17 @@ fn ripple_delete(project: &Project, selection: &[(u64, u64)]) -> Option<Vec<Trac
             clip.start_frame,
             clip.start_frame.checked_add(clip.duration_frames)?,
         ));
+    }
+    ripple_ranges(project, ranges, &selected)
+}
+
+fn ripple_ranges(
+    project: &Project,
+    mut ranges: Vec<(u64, u64)>,
+    selected: &HashSet<(u64, u64)>,
+) -> Option<Vec<Track>> {
+    if ranges.is_empty() || ranges.iter().any(|(start, end)| start >= end) {
+        return None;
     }
     ranges.sort_unstable();
     let mut merged: Vec<(u64, u64)> = Vec::new();
@@ -1478,6 +1490,12 @@ impl Editor {
                         last,
                         clip.transform_at(clip.start_frame + last),
                     );
+                    if let Some(index) = clip.keyframes.iter().rposition(|key| key.frame < last) {
+                        let left = clip.keyframes[index];
+                        let right = clip.keyframes[index + 1];
+                        let t = (last - left.frame) as f64 / (right.frame - left.frame) as f64;
+                        clip.keyframes[index].easing = left.easing.split(t).0;
+                    }
                     clip.keyframes.retain(|key| key.frame < last);
                     clip.keyframes.push(boundary);
                 }
@@ -1667,6 +1685,10 @@ impl Editor {
             }
             Command::RippleDeleteSelection(selection) => {
                 let tracks = ripple_delete(&self.project, &selection)?;
+                self.execute(Command::ReplaceTracks(tracks))
+            }
+            Command::RemoveSilences(ranges) => {
+                let tracks = ripple_ranges(&self.project, ranges, &HashSet::new())?;
                 self.execute(Command::ReplaceTracks(tracks))
             }
         }
@@ -2048,6 +2070,44 @@ mod tests {
             "linked_audio": true
         }]);
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn silence_ranges_keep_linked_audio_speed_reverse_and_history() {
+        for playback in [Playback::Forward, Playback::Reverse] {
+            let mut project = speed_project();
+            project.tracks[0].clips[0].speed = 2.0;
+            project.tracks[0].clips[0].playback = playback;
+            let original = project.tracks[0].clips[0].clone();
+            let mut later = original.clone();
+            later.id = 2;
+            later.start_frame = 80;
+            project.tracks[0].clips.push(later);
+            let before = project.tracks.clone();
+            let mut editor = Editor::new(project);
+            assert!(!editor.apply(Command::RemoveSilences(vec![])));
+            assert!(!editor.apply(Command::RemoveSilences(vec![(30, 20)])));
+            assert!(editor.apply(Command::RemoveSilences(vec![(30, 40)])));
+            let pieces = &editor.project().tracks()[0].clips;
+            assert_eq!(pieces.len(), 3);
+            assert_eq!(pieces[0].duration_frames, 20);
+            assert_eq!(pieces[1].start_frame, 30);
+            assert_eq!(pieces[2].start_frame, 70);
+            assert!(pieces.iter().all(|clip| clip.linked_audio));
+            assert_eq!(
+                pieces[0].source_start_frame,
+                original.source_start_for_range(0, 20).unwrap()
+            );
+            assert_eq!(
+                pieces[1].source_start_frame,
+                original.source_start_for_range(30, 30).unwrap()
+            );
+            let after = editor.project().tracks().to_vec();
+            assert!(editor.undo());
+            assert_eq!(editor.project().tracks(), before);
+            assert!(editor.redo());
+            assert_eq!(editor.project().tracks(), after);
+        }
     }
 
     #[test]
@@ -4367,6 +4427,15 @@ mod tests {
             }],
             vec![Keyframe {
                 scale: f32::NAN,
+                ..first
+            }],
+            vec![Keyframe {
+                easing: crate::timeline::Easing::Curve {
+                    x1: -0.1,
+                    y1: 0.0,
+                    x2: 1.0,
+                    y2: 1.0,
+                },
                 ..first
             }],
         ] {

@@ -15,6 +15,76 @@ use std::time::Duration;
 pub const RATE: u32 = 48_000;
 pub const CHANNELS: usize = 2;
 
+pub(crate) fn silences(
+    path: &Path,
+    start: u64,
+    duration: u64,
+    fps: (u32, u32),
+) -> Result<Vec<(f64, f64)>, String> {
+    ffmpeg::init().map_err(|error| error.to_string())?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut reader = AudioReader::open(path, start, fps, cancelled.clone())?
+        .ok_or("This source has no audio")?;
+    let frames =
+        (u128::from(duration) * u128::from(fps.1) * u128::from(RATE) / u128::from(fps.0)) as u64;
+    detect_silences(frames, |samples, count| {
+        reader.read(samples, count, &cancelled)
+    })
+}
+
+fn detect_silences(
+    frames: u64,
+    mut read: impl FnMut(&mut Vec<f32>, usize) -> Result<usize, String>,
+) -> Result<Vec<(f64, f64)>, String> {
+    let window = RATE as usize / 100;
+    let mut position = 0;
+    let mut silent_start = None;
+    let mut ranges = Vec::new();
+    let mut samples = Vec::new();
+    let mut finish = |start: u64, end: u64| {
+        if end - start >= u64::from(RATE) / 2 {
+            let padding = u64::from(RATE) / 10;
+            let left = if start == 0 { 0 } else { start + padding };
+            let right = if end == frames {
+                end
+            } else {
+                end.saturating_sub(padding)
+            };
+            if left < right {
+                ranges.push((
+                    left as f64 / f64::from(RATE),
+                    right as f64 / f64::from(RATE),
+                ));
+            }
+        }
+    };
+    while position < frames {
+        samples.clear();
+        let count = read(
+            &mut samples,
+            (frames - position).min(window as u64) as usize,
+        )?;
+        if count == 0 {
+            break;
+        }
+        let power = samples
+            .iter()
+            .map(|&value| f64::from(value).powi(2))
+            .sum::<f64>()
+            / samples.len() as f64;
+        if power < 0.0001 {
+            silent_start.get_or_insert(position);
+        } else if let Some(start) = silent_start.take() {
+            finish(start, position);
+        }
+        position += count as u64;
+    }
+    if let Some(start) = silent_start {
+        finish(start, position);
+    }
+    Ok(ranges)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Loudness {
     pub integrated: f64,
@@ -1184,6 +1254,39 @@ mod tests {
     use super::*;
     use crate::timeline::Transform;
     use std::fs;
+
+    #[test]
+    fn silence_windows_threshold_padding_and_edges() {
+        fn detect(parts: &[(f32, usize)]) -> Vec<(f64, f64)> {
+            let samples: Vec<f32> = parts
+                .iter()
+                .flat_map(|(level, windows)| {
+                    std::iter::repeat_n(*level, windows * RATE as usize / 100 * CHANNELS)
+                })
+                .collect();
+            let frames = samples.len() / CHANNELS;
+            let mut offset = 0;
+            detect_silences(frames as u64, |output, count| {
+                let end = (offset + count * CHANNELS).min(samples.len());
+                output.extend_from_slice(&samples[offset..end]);
+                let read = (end - offset) / CHANNELS;
+                offset = end;
+                Ok(read)
+            })
+            .unwrap()
+        }
+        assert_eq!(detect(&[(0.0, 100)]), vec![(0.0, 1.0)]);
+        assert!(detect(&[(0.02, 100)]).is_empty());
+        assert!(detect(&[(0.0, 49), (0.1, 10)]).is_empty());
+        assert_eq!(
+            detect(&[(0.1, 50), (0.001, 100), (0.1, 50)]),
+            vec![(0.6, 1.4)]
+        );
+        assert_eq!(detect(&[(0.0, 100), (0.1, 50)]), vec![(0.0, 0.9)]);
+        assert_eq!(detect(&[(0.1, 50), (0.0, 100)]), vec![(0.6, 1.5)]);
+        assert!(detect(&[]).is_empty());
+        assert!(detect_silences(480, |_, _| Err("decode failed".into())).is_err());
+    }
 
     #[test]
     fn finished_queue_drains_samples_pushed_after_an_empty_poll() {

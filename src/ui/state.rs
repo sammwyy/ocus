@@ -15,7 +15,8 @@ use crate::playback::{self, Session};
 use crate::project::export_settings::{
     AudioCodec, Container, EncodingSpeed, ExportSettings, LastExport, VideoCodec,
 };
-use crate::project::{Command, Editor, Project, recovery, store};
+use crate::project::interchange::{self, Format, Imported};
+use crate::project::{Command, Editor, FrameRate, Project, VideoSettings, recovery, store};
 use crate::settings::{self, Settings, ThemeMode};
 use crate::timeline::{Clip, ClipContent, Playback, Title, TrackKind, Transform};
 use creamui::core::{Modifiers, Point, Rect, RgbaImage};
@@ -75,6 +76,11 @@ enum UnsavedChoice {
 }
 
 type AfterSave = Box<dyn FnOnce(&UiState)>;
+
+enum TimelineImport {
+    ChooseEdlRate { drop: bool },
+    Ready(Box<Imported>),
+}
 
 enum ExportEvent {
     Destination(PathBuf),
@@ -318,6 +324,7 @@ pub(crate) struct UiState {
     last_playback_monitor: Rc<Cell<PlaybackMonitor>>,
     pub preview_available: Signal<bool>,
     pub project_path: Signal<Option<PathBuf>>,
+    pub edl_rate_prompt: Signal<Option<(PathBuf, bool)>>,
     pub title_text: TextController,
     pub rename_track: Signal<Option<u64>>,
     pub track_name: TextController,
@@ -485,6 +492,7 @@ impl UiState {
             last_playback_monitor: Rc::new(Cell::new(PlaybackMonitor::Program)),
             preview_available: Signal::new(false),
             project_path: Signal::new(None),
+            edl_rate_prompt: Signal::new(None),
             title_text: TextController::default(),
             rename_track: Signal::new(None),
             track_name: TextController::default(),
@@ -889,6 +897,116 @@ impl UiState {
         } else {
             format!("{status} · {checkpoint}")
         });
+    }
+
+    pub(super) fn remove_silences(&self) {
+        if self.busy.peek() {
+            return;
+        }
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let editor = self.editor.borrow();
+        let project = editor.project();
+        let mut jobs = Vec::new();
+        for (track_id, clip_id) in self.selected.peek() {
+            let Some(track) = project
+                .tracks()
+                .iter()
+                .find(|track| track.id == track_id && !track.locked)
+            else {
+                continue;
+            };
+            let Some(clip) = track.clips.iter().find(|clip| clip.id == clip_id) else {
+                continue;
+            };
+            let ClipContent::Media { media_id } = clip.content else {
+                continue;
+            };
+            let Some(media) = project.media().iter().find(|media| media.id == media_id) else {
+                continue;
+            };
+            if carries_sound(track.kind, clip, media)
+                && clip.playback != crate::timeline::Playback::Freeze
+            {
+                jobs.push((media.path.clone(), clip.clone()));
+            }
+        }
+        if jobs.is_empty() {
+            return;
+        }
+        let fps = self.frame_rate();
+        let revision = self.revision.peek();
+        drop(editor);
+        self.busy.set(true);
+        self.status.set("Analyzing silences…".into());
+        let state = self.clone();
+        app.spawn_background(
+            move || {
+                let mut ranges = Vec::new();
+                let rate = f64::from(fps.0) / f64::from(fps.1);
+                for (path, clip) in jobs {
+                    for (start, end) in
+                        audio::silences(&path, clip.source_start_frame, clip.source_span(), fps)?
+                    {
+                        let (start, end) = if clip.playback == crate::timeline::Playback::Reverse {
+                            (
+                                clip.duration_frames as f64 - end * rate / clip.speed,
+                                clip.duration_frames as f64 - start * rate / clip.speed,
+                            )
+                        } else {
+                            (start * rate / clip.speed, end * rate / clip.speed)
+                        };
+                        let start = start.ceil().max(0.0) as u64;
+                        let end = (end.floor().max(0.0) as u64).min(clip.duration_frames);
+                        if start < end {
+                            ranges.push((clip.start_frame + start, clip.start_frame + end));
+                        }
+                    }
+                }
+                Ok(ranges)
+            },
+            move |result| state.finish_silence_removal(revision, result),
+        );
+    }
+
+    fn finish_silence_removal(&self, revision: u64, result: Result<Vec<(u64, u64)>, String>) {
+        self.busy.set(false);
+        if self.revision.peek() != revision {
+            self.status
+                .set("Silence removal cancelled: project changed".into());
+            return;
+        }
+        match result {
+            Ok(mut ranges) => {
+                ranges.sort_unstable();
+                let mut merged: Vec<(u64, u64)> = Vec::new();
+                for (start, end) in ranges {
+                    if let Some(last) = merged.last_mut()
+                        && start <= last.1
+                    {
+                        last.1 = last.1.max(end);
+                    } else {
+                        merged.push((start, end));
+                    }
+                }
+                if merged.is_empty() {
+                    self.status.set("No silence found".into());
+                } else {
+                    let count = merged.len();
+                    let frames: u64 = merged.iter().map(|(start, end)| end - start).sum();
+                    let fps = self.frame_rate();
+                    if self.edit(Command::RemoveSilences(merged)) {
+                        let part = if count == 1 { "part" } else { "parts" };
+                        self.status.set(format!(
+                            "Removed {count} silent {part} ({:.1} s)",
+                            frames as f64 * f64::from(fps.1) / f64::from(fps.0)
+                        ));
+                    }
+                }
+            }
+            Err(error) => self.status.set(format!("Cannot remove silences: {error}")),
+        }
     }
 
     pub(super) fn normalize_loudness(&self) {
@@ -2322,6 +2440,228 @@ impl UiState {
             if self.settle_unsaved_changes(move |state| state.load_path(retry)) {
                 self.load_path(path);
             }
+        }
+    }
+
+    pub(super) fn import_timeline_dialog(&self) {
+        if self.busy.peek() {
+            return;
+        }
+        let Some(path) = FileDialog::new()
+            .set_title("Import timeline as a new project")
+            .add_filter("Timeline interchange", &["otio", "edl"])
+            .pick_file()
+        else {
+            return;
+        };
+        self.import_timeline(path, None);
+    }
+
+    pub(super) fn select_edl_rate(&self, numerator: u32, denominator: u32) {
+        if let Some((path, _)) = self.edl_rate_prompt.peek() {
+            self.edl_rate_prompt.set(None);
+            self.import_timeline(
+                path,
+                Some(FrameRate {
+                    numerator,
+                    denominator,
+                }),
+            );
+        }
+    }
+
+    pub(super) fn cancel_edl_rate_prompt(&self) {
+        self.edl_rate_prompt.set(None);
+        self.status.set("Timeline import cancelled".into());
+    }
+
+    fn import_timeline(&self, path: PathBuf, rate: Option<FrameRate>) {
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let revision = self.revision.peek();
+        self.busy.set(true);
+        self.status.set("Importing timeline…".into());
+        let state = self.clone();
+        app.spawn_background(
+            {
+                let path = path.clone();
+                move || {
+                    if rate.is_none()
+                        && let Some(drop) = interchange::edl_rate_needed(&path)?
+                    {
+                        return Ok(TimelineImport::ChooseEdlRate { drop });
+                    }
+                    interchange::load(
+                        &path,
+                        &rate.unwrap_or_else(|| VideoSettings::default().frame_rate),
+                    )
+                    .map(|imported| TimelineImport::Ready(Box::new(imported)))
+                }
+            },
+            move |result| {
+                state.busy.set(false);
+                match result {
+                    Ok(TimelineImport::ChooseEdlRate { drop })
+                        if state.revision.peek() == revision =>
+                    {
+                        state.edl_rate_prompt.set(Some((path, drop)));
+                        state.status.set("Choose the EDL frame rate".into());
+                    }
+                    Ok(TimelineImport::Ready(imported)) if state.revision.peek() == revision => {
+                        if !state.dirty.peek() {
+                            state.install_imported_timeline(*imported);
+                        } else {
+                            match state.ask_unsaved_changes() {
+                                UnsavedChoice::Discard => {
+                                    state.install_imported_timeline(*imported)
+                                }
+                                UnsavedChoice::Save => {
+                                    state.save_then(Some(Box::new(move |state| {
+                                        state.install_imported_timeline(*imported);
+                                    })))
+                                }
+                                UnsavedChoice::Cancel => {
+                                    state.status.set("Timeline import cancelled".into())
+                                }
+                            }
+                        }
+                    }
+                    Ok(_) => state
+                        .status
+                        .set("Import cancelled: project changed while loading".into()),
+                    Err(error) => {
+                        state.show_file_error("Timeline import failed", error.clone());
+                        state.status.set(format!("Timeline import failed: {error}"));
+                    }
+                }
+            },
+        );
+    }
+
+    fn install_imported_timeline(&self, imported: Imported) {
+        let missing = imported.missing.len();
+        let mut notes = imported.notes;
+        if missing > 0 {
+            notes.push(format!(
+                "{missing} media files not found. Relink them from the Media bin."
+            ));
+        }
+        self.install_project(
+            imported.project,
+            None,
+            true,
+            imported.missing.into_iter().collect(),
+        );
+        self.update_recovery();
+        self.status.set(if missing == 0 {
+            "Timeline imported · Save as an Ocus project to keep it".into()
+        } else {
+            format!("Timeline imported · {missing} media files missing")
+        });
+        self.timeline_file_notes("Timeline imported", notes);
+    }
+
+    pub(super) fn export_timeline_dialog(&self, format: Format) {
+        if self.busy.peek() || self.sequence_end() == 0 {
+            return;
+        }
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let extension = format.extension();
+        let mut dialog = FileDialog::new()
+            .set_title(format!("Export {} timeline", format.label()))
+            .add_filter(format.label(), &[extension])
+            .set_file_name(format!("timeline.{extension}"));
+        if let Some(directory) = self.project_path.peek().as_deref().and_then(Path::parent) {
+            dialog = dialog.set_directory(directory);
+        }
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+        match path.extension().and_then(|ext| ext.to_str()) {
+            Some(ext) if ext.eq_ignore_ascii_case(extension) => self.export_timeline(path, format),
+            None if path.extension().is_none() => {
+                let path = path.with_extension(extension);
+                self.busy.set(true);
+                let state = self.clone();
+                app.spawn_background(
+                    {
+                        let path = path.clone();
+                        move || path.exists()
+                    },
+                    move |exists| {
+                        state.busy.set(false);
+                        if !exists
+                            || MessageDialog::new()
+                                .set_level(MessageLevel::Warning)
+                                .set_title("Replace timeline file?")
+                                .set_description(format!(
+                                    "{} already exists. Replace it?",
+                                    path.display()
+                                ))
+                                .set_buttons(MessageButtons::YesNo)
+                                .show()
+                                == MessageDialogResult::Yes
+                        {
+                            state.export_timeline(path, format);
+                        }
+                    },
+                );
+            }
+            _ => self.show_file_error(
+                "Wrong file extension",
+                format!("Use .{extension} for a {} timeline.", format.label()),
+            ),
+        }
+    }
+
+    fn export_timeline(&self, path: PathBuf, format: Format) {
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let project = self.editor.borrow().project().clone();
+        self.busy.set(true);
+        self.status
+            .set(format!("Exporting {} timeline…", format.label()));
+        let state = self.clone();
+        let output = path.display().to_string();
+        app.spawn_background(
+            move || interchange::save(&path, &project, format),
+            move |result| {
+                state.busy.set(false);
+                match result {
+                    Ok(notes) => {
+                        state
+                            .status
+                            .set(format!("Exported {} timeline: {output}", format.label()));
+                        state.timeline_file_notes("Timeline exported", notes);
+                    }
+                    Err(error) => {
+                        state.show_file_error("Timeline export failed", error.clone());
+                        state.status.set(format!("Timeline export failed: {error}"));
+                    }
+                }
+            },
+        );
+    }
+
+    fn timeline_file_notes(&self, title: &'static str, notes: Vec<String>) {
+        if !notes.is_empty()
+            && let Some(app) = self.app.borrow().clone()
+        {
+            app.spawn_background(
+                move || {
+                    MessageDialog::new()
+                        .set_level(MessageLevel::Warning)
+                        .set_title(title)
+                        .set_description(notes.join("\n"))
+                        .set_buttons(MessageButtons::Ok)
+                        .show()
+                },
+                |_| {},
+            );
         }
     }
 
@@ -4153,6 +4493,72 @@ mod tests {
         assert_eq!(volume(), 1.0);
         assert!(state.status.peek().contains("silent"));
         state.finish_normalization(revision, track_id, clip_id, Err("decode failed".into()));
+        assert!(state.status.peek().contains("decode failed"));
+    }
+
+    #[test]
+    fn silence_removal_real_audio_ripples_and_undoes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pauses.wav");
+        assert!(
+            std::process::Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=d=3:r=48000",
+                    "-af",
+                    "volume=0:enable='between(t,1,2)'",
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (_, info, _) = inspect_source(&path).unwrap();
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: path.clone(),
+            kind: info.kind,
+            duration_us: info.duration_us,
+            has_audio: true,
+        })));
+        state.insert_media_at(1, None).unwrap();
+        let original = state.editor.borrow().project().tracks().to_vec();
+        let fps = state.frame_rate();
+        let duration = original
+            .iter()
+            .flat_map(|track| &track.clips)
+            .next()
+            .unwrap()
+            .duration_frames;
+        let ranges = audio::silences(&path, 0, duration, fps).unwrap();
+        assert_eq!(ranges.len(), 1);
+        let rate = f64::from(fps.0) / f64::from(fps.1);
+        let ranges = ranges
+            .into_iter()
+            .map(|(start, end)| ((start * rate).ceil() as u64, (end * rate).floor() as u64))
+            .collect();
+        let revision = state.revision.peek();
+        state.finish_silence_removal(revision, Ok(ranges));
+        assert!(state.status.peek().contains("Removed 1 silent part ("));
+        let edited = state.editor.borrow().project().tracks().to_vec();
+        let clips: Vec<_> = edited.iter().flat_map(|track| &track.clips).collect();
+        assert_eq!(clips.len(), 2);
+        assert_eq!(
+            clips[0].start_frame + clips[0].duration_frames,
+            clips[1].start_frame
+        );
+        state.undo();
+        assert_eq!(state.editor.borrow().project().tracks(), original);
+        state.redo();
+        assert_eq!(state.editor.borrow().project().tracks(), edited);
+        state.finish_silence_removal(state.revision.peek(), Ok(vec![]));
+        assert_eq!(state.status.peek(), "No silence found");
+        state.finish_silence_removal(state.revision.peek(), Err("decode failed".into()));
         assert!(state.status.peek().contains("decode failed"));
     }
 

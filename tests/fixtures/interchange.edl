@@ -1,0 +1,9 @@
+TITLE: CAMERA CUTS
+FCM: NON-DROP FRAME
+
+001  AX       V     C        00:00:00:12 00:00:02:12 01:00:00:03 01:00:02:03
+* FROM CLIP NAME: shot.mov
+
+002  AX       AA/V  C        00:00:02:12 00:00:03:12 01:00:03:00 01:00:04:00
+* FROM CLIP NAME: shot.mov
+* SOURCE FILE: media/shot with sound.mov

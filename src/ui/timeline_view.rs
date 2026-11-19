@@ -23,12 +23,45 @@ const LANE_GAP: f32 = 3.0;
 const MARKER_REACH: f32 = 6.0;
 const CLIP_HEADER: f32 = 17.0;
 
-fn paint_keyframe_marker(painter: &mut dyn Painter, x: f32, bounds: Rect) {
+fn paint_keyframe_marker(
+    painter: &mut dyn Painter,
+    x: f32,
+    bounds: Rect,
+    easing: crate::timeline::Easing,
+) {
     if bounds.width < 10.0 || bounds.height < 10.0 {
         return;
     }
     let x = x.clamp(bounds.x + 5.0, bounds.x + bounds.width - 5.0);
     let y = bounds.y + bounds.height - 10.0;
+    if !easing.is_linear() {
+        let radius = if easing == crate::timeline::Easing::Hold {
+            0.0
+        } else {
+            5.0
+        };
+        painter.fill_rect(
+            Rect {
+                x: x - 5.0,
+                y,
+                width: 10.0,
+                height: 10.0,
+            },
+            Color::rgb(24, 24, 28),
+            radius,
+        );
+        painter.fill_rect(
+            Rect {
+                x: x - 4.0,
+                y: y + 1.0,
+                width: 8.0,
+                height: 8.0,
+            },
+            Color::rgb(255, 232, 145),
+            radius.min(4.0),
+        );
+        return;
+    }
     for (row, width) in [2.0, 4.0, 6.0, 8.0, 10.0, 10.0, 8.0, 6.0, 4.0, 2.0]
         .into_iter()
         .enumerate()
@@ -97,7 +130,7 @@ impl ClipLook {
 }
 
 pub(super) struct LaneClip {
-    pub keyframes: Vec<u64>,
+    pub keyframes: Vec<(u64, crate::timeline::Easing)>,
     pub playback: crate::timeline::Playback,
     pub transition_frames: u64,
     pub transition_out_frames: u64,
@@ -883,10 +916,10 @@ impl TimelineView {
             }
             _ => {}
         }
-        for frame in &clip.keyframes {
+        for (frame, easing) in &clip.keyframes {
             let x = geometry.x(*frame);
             if x >= left && x < right {
-                paint_keyframe_marker(painter, x, content);
+                paint_keyframe_marker(painter, x, content, *easing);
             }
         }
         for (frames, out) in [
@@ -1971,9 +2004,19 @@ mod tests {
             width: 100.0,
             height: 20.0,
         };
+        for easing in [
+            crate::timeline::Easing::Hold,
+            crate::timeline::Easing::EASE_IN_OUT,
+        ] {
+            let mut painter = MarkerPainter::default();
+            paint_keyframe_marker(&mut painter, 20.0, bounds, easing);
+            assert_eq!(painter.0.len(), 2);
+            assert_eq!(painter.0[0].1, Color::rgb(24, 24, 28));
+            assert_eq!(painter.0[1].1, Color::rgb(255, 232, 145));
+        }
         for x in [20.0, 70.0, 119.0] {
             let mut painter = MarkerPainter::default();
-            paint_keyframe_marker(&mut painter, x, bounds);
+            paint_keyframe_marker(&mut painter, x, bounds, crate::timeline::Easing::Linear);
             assert_eq!(painter.0.len(), 18);
             assert_eq!(
                 painter
@@ -1998,6 +2041,7 @@ mod tests {
                     height,
                     ..bounds
                 },
+                crate::timeline::Easing::Linear,
             );
             assert!(painter.0.is_empty());
         }

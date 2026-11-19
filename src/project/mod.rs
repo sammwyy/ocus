@@ -6,6 +6,7 @@ use std::collections::HashSet;
 pub(crate) mod edit;
 pub mod export_settings;
 pub mod format;
+pub mod interchange;
 pub mod recovery;
 pub mod store;
 

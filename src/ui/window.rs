@@ -691,8 +691,38 @@ fn upsert_keyframe(
     keyframe: crate::timeline::Keyframe,
 ) {
     match keyframes.binary_search_by_key(&keyframe.frame, |key| key.frame) {
-        Ok(index) => keyframes[index] = keyframe,
+        Ok(index) => {
+            keyframes[index] = crate::timeline::Keyframe {
+                easing: keyframes[index].easing,
+                ..keyframe
+            }
+        }
         Err(index) => keyframes.insert(index, keyframe),
+    }
+}
+
+fn easing_segment(clip: &Clip, position: u64) -> Option<usize> {
+    let frame = keyframe_offset(clip, position)?;
+    clip.keyframes
+        .windows(2)
+        .position(|pair| pair[0].frame <= frame && frame < pair[1].frame)
+}
+
+fn set_keyframe_easing(state: &UiState, easing: crate::timeline::Easing) {
+    let Some((track_id, clip)) = selected_clip(state) else {
+        return;
+    };
+    let Some(index) = easing_segment(&clip, state.program.position.get()) else {
+        return;
+    };
+    let mut keyframes = clip.keyframes.clone();
+    keyframes[index].easing = easing;
+    if state.edit(Command::SetClipKeyframes {
+        track_id,
+        clip_id: clip.id,
+        keyframes,
+    }) {
+        state.request_preview();
     }
 }
 
@@ -966,6 +996,54 @@ fn transform_rows(state: &UiState, transform: Transform, inner: f32) -> Vec<Boxe
     ));
     keys = keys.child(navigation(true));
     rows.push(Box::new(keys) as BoxedWidget);
+    if let Some((clip, index)) = selected
+        .as_ref()
+        .and_then(|clip| easing_segment(clip, position).map(|index| (clip, index)))
+    {
+        use crate::timeline::Easing;
+        let choices = [
+            ("Linear", Easing::Linear),
+            ("Ease in", Easing::EASE_IN),
+            ("Ease out", Easing::EASE_OUT),
+            ("Ease in-out", Easing::EASE_IN_OUT),
+            ("Hold", Easing::Hold),
+        ];
+        let current = clip.keyframes[index].easing;
+        rows.push(text(
+            if choices.iter().any(|(_, easing)| *easing == current) {
+                "Easing"
+            } else {
+                "Easing · Custom"
+            },
+            muted(),
+            11.0,
+        ));
+        for pair in choices.chunks(2) {
+            let mut row = Flex::row().gap(4.0);
+            for &(label, easing) in pair {
+                row = row.child(with_help(
+                    export_choice(
+                        label,
+                        current == easing,
+                        (inner - 4.0) / 2.0,
+                        state,
+                        move |state| set_keyframe_easing(state, easing),
+                    ),
+                    Help::new(match easing {
+                        Easing::Linear => "Move at a steady speed to the next keyframe.",
+                        Easing::Hold => "Keep this value until the next keyframe.",
+                        Easing::EASE_IN => "Start slowly, then speed up toward the next keyframe.",
+                        Easing::EASE_OUT => {
+                            "Start quickly, then slow down toward the next keyframe."
+                        }
+                        _ => "Start slowly, speed up, then slow down at the next keyframe.",
+                    }),
+                    state,
+                ));
+            }
+            rows.push(Box::new(row));
+        }
+    }
     for field in fields {
         let animated = !field.label.starts_with("Crop");
         let mut current = transform;
@@ -3234,6 +3312,19 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         ),
                         state,
                     )),
+                    inline(with_help(
+                        secondary_button(
+                            None,
+                            "Remove silences",
+                            !state.busy.get(),
+                            state,
+                            UiState::remove_silences,
+                        ),
+                        Help::new(
+                            "Remove pauses of at least half a second, keeping a little breathing room. Ripples unlocked tracks to keep picture and sound together.",
+                        ),
+                        state,
+                    )),
                     fade_row(state, &clip, true),
                     fade_row(state, &clip, false),
                     if clip.linked_audio {
@@ -3667,7 +3758,7 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                             .keyframes
                             .iter()
                             .filter(|key| key.frame < clip.duration_frames)
-                            .map(|key| clip.start_frame + key.frame)
+                            .map(|key| (clip.start_frame + key.frame, key.easing))
                             .collect(),
                         transition_frames,
                         playback: clip.playback,
@@ -3791,6 +3882,23 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                 .child(Box::new(Flex::row().width(10.0)))
                 .child(divider())
                 .child(Box::new(Flex::row().width(6.0)))
+                .child(if narrow {
+                    icon_button(
+                        Glyph::List,
+                        Help::new("Timeline files (OTIO / EDL)"),
+                        !busy,
+                        state,
+                        UiState::open_timeline_files_menu,
+                    )
+                } else {
+                    tool_button(
+                        Some(Glyph::ChevronDown),
+                        "Timeline files",
+                        !busy,
+                        state,
+                        UiState::open_timeline_files_menu,
+                    )
+                })
                 .child(file_button(Glyph::Document, "New", UiState::new_project))
                 .child(file_button(Glyph::Folder, "Open", UiState::open_dialog))
                 .child(file_button(Glyph::Save, "Save", UiState::save))
@@ -4526,6 +4634,10 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
             })
             .child(match state.menu.get() {
                 Some(menu) => context_menu(state, menu, viewport),
+                None => Box::new(Flex::row().size(0.0, 0.0)),
+            })
+            .child(match state.edl_rate_prompt.get() {
+                Some((_, drop)) => edl_rate_modal(state, viewport, drop),
                 None => Box::new(Flex::row().size(0.0, 0.0)),
             })
             .child(if state.export_modal.get() {
@@ -5928,6 +6040,75 @@ fn settings_modal(state: &UiState, viewport: Size) -> BoxedWidget {
                                 )),
                         )),
                 )],
+            }),
+        ],
+    })
+}
+
+fn edl_rate_modal(state: &UiState, viewport: Size, drop: bool) -> BoxedWidget {
+    let rates: &[&[(u32, u32)]] = if drop {
+        &[&[(30_000, 1001), (60_000, 1001)]]
+    } else {
+        &[
+            &[(24_000, 1001), (24, 1), (25, 1)],
+            &[(30_000, 1001), (30, 1), (50, 1)],
+            &[(60_000, 1001), (60, 1)],
+        ]
+    };
+    let width = 290.0;
+    let height = 128.0 + rates.len() as f32 * 36.0;
+    let mut content = Flex::column()
+        .size(width, height)
+        .padding(16.0)
+        .gap(9.0)
+        .background(panel_raised())
+        .border(border(), 1.0)
+        .corner_radius(12.0)
+        .child(heading("Choose the EDL frame rate", text_color(), 16.0))
+        .child(text(
+            "Match the original timeline's frame rate.",
+            muted(),
+            12.0,
+        ));
+    for row in rates {
+        let mut buttons = Flex::row().gap(6.0);
+        for &(num, den) in *row {
+            buttons = buttons.child(secondary_button(
+                None,
+                &frame_rate_label((num, den)),
+                true,
+                state,
+                move |state| {
+                    state.select_edl_rate(num, den);
+                },
+            ));
+        }
+        content = content.child(Box::new(buttons));
+    }
+    content = content
+        .child(spacer())
+        .child(Box::new(Flex::row().child(spacer()).child(
+            secondary_button(None, "Cancel", true, state, UiState::cancel_edl_rate_prompt),
+        )));
+    let cancel = state.clone();
+    Box::new(Layer {
+        style: Layer::at(0.0, 0.0, viewport.width, viewport.height),
+        on_click: Some(Rc::new(move || cancel.cancel_edl_rate_prompt())),
+        children: vec![
+            Box::new(
+                Flex::row()
+                    .size(viewport.width, viewport.height)
+                    .background(Color::rgba(0, 0, 0, 180)),
+            ),
+            Box::new(Layer {
+                style: Layer::at(
+                    (viewport.width - width) / 2.0,
+                    (viewport.height - height) / 2.0,
+                    width,
+                    height,
+                ),
+                on_click: Some(Rc::new(|| {})),
+                children: vec![Box::new(content)],
             }),
         ],
     })
@@ -8451,10 +8632,69 @@ mod tests {
         let animated = selected_clip(&state).unwrap().1;
         assert_eq!(animated.keyframes.len(), 2);
         assert_eq!(animated.transform_at(5).x, 0.25);
+        state.program.position.set(5);
+        set_keyframe_easing(&state, crate::timeline::Easing::EASE_IN);
+        assert_eq!(
+            selected_clip(&state).unwrap().1.keyframes[0].easing,
+            crate::timeline::Easing::EASE_IN
+        );
+        state.undo();
+        assert_eq!(
+            selected_clip(&state).unwrap().1.keyframes,
+            animated.keyframes
+        );
+        state.program.position.set(10);
         creamui::reactive::with_context_scope(|| {
             creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
                 creamui::Theme::dark(),
             ));
+            state.program.position.set(5);
+            let easing_help = [
+                "Move at a steady speed to the next keyframe.",
+                "Start slowly, then speed up toward the next keyframe.",
+                "Start quickly, then slow down toward the next keyframe.",
+                "Start slowly, speed up, then slow down at the next keyframe.",
+                "Keep this value until the next keyframe.",
+            ];
+            let draw_easing = || {
+                let mut painter = TestPainter::default();
+                Renderer::new().render(
+                    Box::new(append(
+                        Flex::column(),
+                        transform_rows(&state, animated.transform_at(5), 280.0),
+                    )),
+                    Size {
+                        width: 300.0,
+                        height: 900.0,
+                    },
+                    &mut painter,
+                );
+                painter
+            };
+            draw_easing();
+            for help in easing_help {
+                assert!(state.tooltips.borrow().contains_key(&(help, 0)));
+                state.tooltip_controller((help, 0)).focus(true);
+                let painter = draw_easing();
+                assert_eq!(
+                    painter
+                        .labels
+                        .iter()
+                        .filter(|label| easing_help.contains(&label.as_str()))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    painter
+                        .labels
+                        .iter()
+                        .filter(|label| label.as_str() == help)
+                        .count(),
+                    1
+                );
+            }
+            state.tooltip_controller((easing_help[4], 0)).focus(false);
+            state.program.position.set(10);
             let labels = Rc::new(std::cell::RefCell::new(Vec::new()));
             let renders = Rc::new(std::cell::Cell::new(0));
             let observed = labels.clone();

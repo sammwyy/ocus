@@ -53,6 +53,8 @@ pub(super) fn accent_text() -> Color {
     colors().selection_text
 }
 pub(super) const PLAYHEAD: Color = Color::rgb(255, 94, 94);
+pub(super) const MARKER: Color = Color::rgb(242, 190, 70);
+pub(super) const MARKER_LINE: Color = Color::rgba(242, 190, 70, 110);
 pub(super) const VIDEO: Color = Color::rgb(84, 146, 232);
 pub(super) const AUDIO: Color = Color::rgb(70, 194, 132);
 pub(super) const TITLE: Color = Color::rgb(172, 130, 242);
@@ -136,6 +138,7 @@ pub(crate) enum Glyph {
     Trash,
     Ripple,
     Title,
+    Marker,
     Undo,
     Redo,
     Plus,
@@ -348,6 +351,16 @@ pub(super) fn draw_glyph(painter: &mut dyn Painter, glyph: Glyph, rect: Rect, co
             pen.line(&[(5.0, 8.0), (5.0, 5.0), (19.0, 5.0), (19.0, 8.0)]);
             pen.line(&[(12.0, 5.0), (12.0, 19.5)]);
             pen.line(&[(9.0, 19.5), (15.0, 19.5)]);
+        }
+        Glyph::Marker => {
+            pen.line(&[
+                (7.0, 4.5),
+                (17.0, 4.5),
+                (17.0, 19.0),
+                (12.0, 14.5),
+                (7.0, 19.0),
+                (7.0, 4.5),
+            ]);
         }
         Glyph::Undo | Glyph::Redo => {
             let flip = |(x, y): (f32, f32)| {
@@ -617,7 +630,7 @@ impl Help {
     }
 }
 
-fn with_help(widget: BoxedWidget, help: Help, state: &UiState) -> BoxedWidget {
+pub(super) fn with_help(widget: BoxedWidget, help: Help, state: &UiState) -> BoxedWidget {
     let controller = state.tooltip_controller((help.label, help.instance));
     controller.set_viewport(state.tooltip_viewport.get());
     let layout = widget.style().layout;
@@ -855,6 +868,7 @@ pub(super) struct Thumb {
     pub width: Option<f32>,
     pub height: f32,
     pub badge: Option<String>,
+    pub placeholder: Option<&'static str>,
 }
 
 impl Widget for Thumb {
@@ -900,12 +914,27 @@ impl Widget for Thumb {
                 kind_glyph(self.kind),
                 Rect {
                     x: rect.x + (rect.width - side) / 2.0,
-                    y: rect.y + (rect.height - side) / 2.0,
+                    y: rect.y + (rect.height - side) / 2.0
+                        - if self.placeholder.is_some() { 7.0 } else { 0.0 },
                     width: side,
                     height: side,
                 },
                 color.mix(STAGE, 0.25),
             );
+            if let Some(label) = self.placeholder {
+                painter.fill_text(
+                    Rect {
+                        x: rect.x,
+                        y: rect.y + rect.height - 15.0,
+                        width: rect.width,
+                        height: 14.0,
+                    },
+                    label,
+                    muted(),
+                    9.0,
+                    TextAlign::Center,
+                );
+            }
         }
         painter.fill_rect(
             Rect {
@@ -920,7 +949,11 @@ impl Widget for Thumb {
             let width = badge.chars().count() as f32 * 6.0 + 10.0;
             let pill = Rect {
                 x: rect.x + rect.width - width - 4.0,
-                y: rect.y + rect.height - 20.0,
+                y: if self.placeholder.is_some() {
+                    rect.y + 4.0
+                } else {
+                    rect.y + rect.height - 20.0
+                },
                 width,
                 height: 15.0,
             };

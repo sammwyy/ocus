@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Sender};
+use std::sync::Mutex;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 const FILE: &str = "unsaved.ocus-recovery";
@@ -26,30 +27,43 @@ pub fn directory() -> Option<PathBuf> {
     ProjectDirs::from("", "", "Ocus").map(|dirs| dirs.data_local_dir().join("recovery"))
 }
 
-pub fn read(dir: &Path) -> Option<Snapshot> {
-    let result = (|| -> Option<Snapshot> {
+pub fn read(dir: &Path) -> Result<Option<Snapshot>, String> {
+    read_with_repairs(dir).map(|result| result.map(|(snapshot, _)| snapshot))
+}
+
+pub fn read_with_repairs(dir: &Path) -> Result<Option<(Snapshot, usize)>, String> {
+    (|| -> io::Result<Option<(Snapshot, usize)>> {
         let mut bytes = Vec::new();
-        fs::File::open(dir.join(FILE))
-            .ok()?
-            .take(store::MAX_PROJECT_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .ok()?;
+        let file = match fs::File::open(dir.join(FILE)) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        file.take(store::MAX_PROJECT_BYTES + 1)
+            .read_to_end(&mut bytes)?;
         if bytes.len() as u64 > store::MAX_PROJECT_BYTES {
-            return None;
+            return Err(io::Error::other("Recovery file is too large"));
         }
-        let document: Document = serde_json::from_slice(&bytes).ok()?;
+        let document: Document = serde_json::from_slice(&bytes)?;
         if document.version != 1 {
-            return None;
+            return Err(io::Error::other(format!(
+                "Unsupported recovery version: {}",
+                document.version
+            )));
         }
-        Some(Snapshot {
-            original_path: document.original_path,
-            project: format::from_json(&document.project).ok()?,
-        })
-    })();
-    if result.is_none() {
-        let _ = clear(dir);
-    }
-    result
+        let (mut project, mut repaired) =
+            format::from_json_with_repairs(&document.project).map_err(io::Error::other)?;
+        repaired += store::migrate_media(&mut project, document.original_path.as_deref())
+            .map_err(io::Error::other)?;
+        Ok(Some((
+            Snapshot {
+                original_path: document.original_path,
+                project,
+            },
+            repaired,
+        )))
+    })()
+    .map_err(|error| error.to_string())
 }
 
 pub fn clear(dir: &Path) -> io::Result<()> {
@@ -84,29 +98,37 @@ enum Message {
 pub struct Autosaver {
     sender: Option<Sender<Message>>,
     worker: Option<JoinHandle<()>>,
+    results: Mutex<Option<Receiver<Result<(), String>>>>,
 }
 
 impl Autosaver {
     pub fn new(dir: PathBuf) -> Self {
         let (sender, receiver) = mpsc::channel();
+        let (report, results) = mpsc::channel();
         let worker = thread::spawn(move || {
             while let Ok(mut message) = receiver.recv() {
                 while let Ok(next) = receiver.try_recv() {
                     message = next;
                 }
+                let writing = matches!(message, Message::Write(_));
                 let result = match message {
                     Message::Write(snapshot) => write(&dir, snapshot),
                     Message::Clear => clear(&dir),
                 };
-                if let Err(error) = result {
-                    eprintln!("Could not update recovery file: {error}");
+                if writing || result.is_err() {
+                    let _ = report.send(result.map_err(|error| error.to_string()));
                 }
             }
         });
         Self {
             sender: Some(sender),
             worker: Some(worker),
+            results: Mutex::new(Some(results)),
         }
+    }
+
+    pub fn take_results(&self) -> Option<Receiver<Result<(), String>>> {
+        self.results.lock().unwrap().take()
     }
 
     pub fn write(&self, snapshot: Snapshot) {
@@ -142,6 +164,40 @@ mod tests {
     }
 
     #[test]
+    fn recovery_repairs_stale_sound_and_resolves_paths_beside_original_project() {
+        let dir = test_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let mut document: serde_json::Value =
+            serde_json::from_str(&format::to_json(&Project::new("Recovered")).unwrap()).unwrap();
+        document["media"] = serde_json::json!([{
+            "id": 4, "path": "missing.mp4", "kind": "video"
+        }]);
+        document["tracks"][0]["clips"] = serde_json::json!([{
+            "id": 1, "start_frame": 0, "source_start_frame": 0,
+            "duration_frames": 30, "content": {"media": {"media_id": 4}},
+            "volume": 1.0, "muted": false, "linked_audio": true
+        }]);
+        fs::write(
+            dir.join(FILE),
+            serde_json::json!({
+                "version": 1, "original_path": dir.join("projects/film.ocus"),
+                "project": document.to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (snapshot, repaired) = read_with_repairs(&dir).unwrap().unwrap();
+        assert_eq!(repaired, 1);
+        assert_eq!(
+            snapshot.project.media()[0].path,
+            dir.join("projects/missing.mp4")
+        );
+        assert!(!snapshot.project.tracks()[0].clips[0].linked_audio);
+        assert!(super::super::Editor::recovered(snapshot.project).is_dirty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn round_trip_never_touches_original() {
         let root = test_dir();
         fs::create_dir_all(&root).unwrap();
@@ -155,7 +211,7 @@ mod tests {
         let saver = Autosaver::new(dir.clone());
         saver.write(snapshot.clone());
         drop(saver);
-        assert_eq!(read(&dir), Some(snapshot));
+        assert_eq!(read(&dir).unwrap(), Some(snapshot));
         assert_eq!(fs::read_to_string(original).unwrap(), "keep me");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
         assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
@@ -163,9 +219,9 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_unsupported_and_invalid_projects_are_removed() {
+    fn corrupt_unsupported_and_invalid_projects_are_preserved_for_warning() {
         let dir = test_dir();
-        assert_eq!(read(&dir), None);
+        assert_eq!(read(&dir).unwrap(), None);
         fs::create_dir_all(&dir).unwrap();
         for data in [
             "broken".to_owned(),
@@ -173,10 +229,31 @@ mod tests {
             serde_json::json!({"version":1,"original_path":null,"project":"{}"}).to_string(),
         ] {
             fs::write(dir.join(FILE), data).unwrap();
-            assert_eq!(read(&dir), None);
-            assert!(!dir.join(FILE).exists());
+            assert!(!read(&dir).unwrap_err().is_empty());
+            assert!(dir.join(FILE).exists());
         }
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn autosaver_reports_failure_and_next_success() {
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let dir = root.join("blocked");
+        fs::write(&dir, "not a directory").unwrap();
+        let saver = Autosaver::new(dir.clone());
+        let results = saver.take_results().unwrap();
+        let snapshot = Snapshot {
+            original_path: None,
+            project: Project::new("Film"),
+        };
+        saver.write(snapshot.clone());
+        assert!(results.recv().unwrap().is_err());
+        fs::remove_file(&dir).unwrap();
+        saver.write(snapshot);
+        assert_eq!(results.recv().unwrap(), Ok(()));
+        drop(saver);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

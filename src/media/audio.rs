@@ -12,6 +12,64 @@ use std::time::Duration;
 pub const RATE: u32 = 48_000;
 pub const CHANNELS: usize = 2;
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Loudness {
+    pub integrated: f64,
+    pub peak: f64,
+}
+
+impl Loudness {
+    pub(crate) fn gain(self) -> Option<(f32, bool)> {
+        if !self.integrated.is_finite() || self.peak <= 0.0 {
+            return None;
+        }
+        let gain = 10.0_f64
+            .powf((-14.0 - self.integrated) / 20.0)
+            .min(10.0_f64.powf(-1.0 / 20.0) / self.peak);
+        Some((gain.clamp(0.0, 2.0) as f32, gain > 2.0))
+    }
+}
+
+pub(crate) fn loudness(
+    path: &Path,
+    start: u64,
+    duration: u64,
+    fps: (u32, u32),
+) -> Result<Loudness, String> {
+    ffmpeg::init().map_err(|error| error.to_string())?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut reader = AudioReader::open(path, start, fps, cancelled.clone())?
+        .ok_or("This source has no audio")?;
+    let mut meter = ebur128::EbuR128::new(
+        CHANNELS as u32,
+        RATE,
+        ebur128::Mode::I | ebur128::Mode::TRUE_PEAK,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut remaining =
+        u128::from(duration) * u128::from(fps.1) * u128::from(RATE) / u128::from(fps.0);
+    let mut samples = Vec::new();
+    while remaining > 0 {
+        samples.clear();
+        let requested = remaining.min(CHUNK as u128) as usize;
+        let count = reader.read(&mut samples, requested, &cancelled)?;
+        meter
+            .add_frames_f32(&samples)
+            .map_err(|error| error.to_string())?;
+        if count < requested {
+            break;
+        }
+        remaining -= count as u128;
+    }
+    Ok(Loudness {
+        integrated: meter.loudness_global().map_err(|error| error.to_string())?,
+        peak: meter
+            .true_peak(0)
+            .map_err(|error| error.to_string())?
+            .max(meter.true_peak(1).map_err(|error| error.to_string())?),
+    })
+}
+
 /// Samples held ahead of playback; caps decode memory and restart latency.
 const CAPACITY: usize = RATE as usize / 4 * CHANNELS;
 const CHUNK: usize = 2_048;
@@ -107,6 +165,8 @@ pub struct AudioSource {
     pub source_start: u64,
     pub duration: u64,
     pub volume: f32,
+    pub fade_in_frames: u64,
+    pub fade_out_frames: u64,
 }
 
 #[derive(Debug, PartialEq)]
@@ -141,6 +201,8 @@ impl AudioPlan {
                         source_start: clip.source_start_frame,
                         duration: clip.duration_frames,
                         volume: clip.volume,
+                        fade_in_frames: clip.fade_in_frames,
+                        fade_out_frames: clip.fade_out_frames,
                     })
                 })
             })
@@ -287,6 +349,10 @@ pub fn feed(
         begin: u64,
         end: u64,
         volume: f32,
+        clip_begin: u64,
+        clip_end: u64,
+        fade_in: u64,
+        fade_out: u64,
     }
     let mut slots: Vec<Slot> = plan
         .sources
@@ -301,6 +367,10 @@ pub fn feed(
                 begin: to_samples(from),
                 end: to_samples(until),
                 volume: source.volume,
+                clip_begin: to_samples(source.start),
+                clip_end: to_samples(source.start.saturating_add(source.duration)),
+                fade_in: to_samples(source.fade_in_frames),
+                fade_out: to_samples(source.fade_out_frames),
             })
         })
         .collect();
@@ -341,8 +411,20 @@ pub fn feed(
                 Ok(_) => {
                     for (index, frame) in sound.as_chunks::<CHANNELS>().0.iter().enumerate() {
                         let offset = (from - position) as usize * CHANNELS + index * CHANNELS;
-                        mix[offset] += frame[0] * slot.volume;
-                        mix[offset + 1] += frame[1] * slot.volume;
+                        let sample = from + index as u64;
+                        let fade_in = if slot.fade_in == 0 {
+                            1.0
+                        } else {
+                            ((sample - slot.clip_begin) as f32 / slot.fade_in as f32).min(1.0)
+                        };
+                        let fade_out = if slot.fade_out == 0 {
+                            1.0
+                        } else {
+                            ((slot.clip_end - sample) as f32 / slot.fade_out as f32).min(1.0)
+                        };
+                        let gain = slot.volume * fade_in * fade_out;
+                        mix[offset] += frame[0] * gain;
+                        mix[offset + 1] += frame[1] * gain;
                     }
                 }
                 Err(error) => {
@@ -744,6 +826,8 @@ mod tests {
     fn timeline_audio_plan_preserves_sources_and_clock() {
         let project = mixed_project();
         let source = |path: &str, start, volume| AudioSource {
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             path: path.into(),
             start,
             source_start: 2,
@@ -827,6 +911,8 @@ mod tests {
             let queue = Arc::new(AudioQueue::new());
             let plan = AudioPlan {
                 sources: vec![AudioSource {
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
                     path,
                     start: 0,
                     source_start: 0,
@@ -891,6 +977,72 @@ mod tests {
             bytes.extend(sample.to_le_bytes());
         }
         fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn measures_only_the_trimmed_range_and_handles_silence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("loudness.wav");
+        let samples = (0..RATE * 6)
+            .flat_map(|frame| {
+                let amplitude = if frame < RATE * 2 {
+                    0.0
+                } else if frame < RATE * 4 {
+                    0.1
+                } else {
+                    0.8
+                };
+                let sample = (amplitude
+                    * (f64::from(frame) * 1000.0 * std::f64::consts::TAU / f64::from(RATE)).sin()
+                    * 32767.0) as i16;
+                [sample, sample]
+            })
+            .collect::<Vec<_>>();
+        write_wav(&path, RATE, 2, &samples);
+        let silent = loudness(&path, 0, 60, (30, 1)).unwrap();
+        assert!(silent.gain().is_none());
+        let trimmed = loudness(&path, 60, 60, (30, 1)).unwrap();
+        assert!((trimmed.integrated - -20.0).abs() < 0.1, "{trimmed:?}");
+        assert!((trimmed.peak - 0.1).abs() < 0.001);
+        let loud = loudness(&path, 120, 60, (30, 1)).unwrap();
+        assert!((loud.integrated - trimmed.integrated - 18.06).abs() < 0.1);
+        assert!(loudness(&dir.path().join("missing.wav"), 0, 30, (30, 1)).is_err());
+    }
+
+    #[test]
+    fn normalization_gain_targets_limits_and_clamps() {
+        let (gain, clamped) = Loudness {
+            integrated: -18.0,
+            peak: 0.1,
+        }
+        .gain()
+        .unwrap();
+        assert!((gain - 10.0_f32.powf(4.0 / 20.0)).abs() < 0.0001);
+        assert!(!clamped);
+        let (gain, clamped) = Loudness {
+            integrated: -30.0,
+            peak: 0.8,
+        }
+        .gain()
+        .unwrap();
+        assert!((gain * 0.8 - 10.0_f32.powf(-1.0 / 20.0)).abs() < 0.0001);
+        assert!(!clamped);
+        assert_eq!(
+            Loudness {
+                integrated: -40.0,
+                peak: 0.01
+            }
+            .gain(),
+            Some((2.0, true))
+        );
+        assert!(
+            Loudness {
+                integrated: f64::NEG_INFINITY,
+                peak: 0.0
+            }
+            .gain()
+            .is_none()
+        );
     }
 
     #[test]
@@ -970,6 +1122,8 @@ mod tests {
             let plan = Arc::new(AudioPlan {
                 sources: (0..clips)
                     .map(|index| AudioSource {
+                        fade_in_frames: 0,
+                        fade_out_frames: 0,
                         path: path.clone(),
                         start: index * 240,
                         source_start: 0,
@@ -1032,6 +1186,8 @@ mod tests {
         let plan = AudioPlan {
             sources: vec![
                 AudioSource {
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
                     path: mono.clone(),
                     start: 0,
                     source_start: 0,
@@ -1039,6 +1195,8 @@ mod tests {
                     volume: 1.0,
                 },
                 AudioSource {
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
                     path: stereo.clone(),
                     start: 5,
                     source_start: 6,
@@ -1046,6 +1204,8 @@ mod tests {
                     volume: 0.5,
                 },
                 AudioSource {
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
                     path: silent.clone(),
                     start: 0,
                     source_start: 0,
@@ -1083,6 +1243,8 @@ mod tests {
         let queue = Arc::new(AudioQueue::new());
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 path: path.clone(),
                 start: 0,
                 source_start: 0,
@@ -1138,6 +1300,8 @@ mod tests {
         let queue = Arc::new(AudioQueue::new());
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 path: path.clone(),
                 start: 0,
                 source_start: 3,
@@ -1205,6 +1369,8 @@ mod tests {
             let queue = Arc::new(AudioQueue::new());
             let plan = AudioPlan {
                 sources: vec![AudioSource {
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
                     path: path.clone(),
                     start: 0,
                     source_start: 0,
@@ -1352,6 +1518,8 @@ mod tests {
             );
             let plan = Arc::new(AudioPlan {
                 sources: vec![AudioSource {
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
                     path,
                     start: 0,
                     source_start: 0,
@@ -1399,6 +1567,8 @@ mod tests {
             .collect();
         write_wav(&stereo, 48_000, 2, &stereo_samples);
         let source = |path: &PathBuf, start, source_start, duration, volume| AudioSource {
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             path: path.clone(),
             start,
             source_start,
@@ -1465,6 +1635,8 @@ mod tests {
         assert!(made.unwrap().success());
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 path: path.clone(),
                 start: 0,
                 source_start: 0,
@@ -1496,6 +1668,8 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(true));
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 path: PathBuf::from("missing.wav"),
                 start: 0,
                 source_start: 0,
@@ -1515,5 +1689,41 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         assert!(reached.is_err());
+    }
+
+    #[test]
+    fn fades_follow_clip_time_including_seeks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("constant.wav");
+        write_wav(&path, RATE, 2, &vec![16_384; RATE as usize * 4 * CHANNELS]);
+        let plan = Arc::new(AudioPlan {
+            sources: vec![AudioSource {
+                path,
+                start: 30,
+                source_start: 0,
+                duration: 120,
+                volume: 1.0,
+                fade_in_frames: 30,
+                fade_out_frames: 30,
+            }],
+            end: 150,
+            fps: (30, 1),
+        });
+        for start in [0, 30, 45, 60, 135] {
+            let heard = play(&plan, start, None);
+            for frame in [30, 45, 60, 90, 120, 135, 149] {
+                if frame < start {
+                    continue;
+                }
+                let index = (frame - start) as usize * RATE as usize / 30 * CHANNELS;
+                let gain =
+                    ((frame - 30) as f32 / 30.0).min(1.0) * ((150 - frame) as f32 / 30.0).min(1.0);
+                assert!(
+                    (heard[index] - 0.5 * gain).abs() < 0.002,
+                    "start {start}, frame {frame}: {}",
+                    heard[index]
+                );
+            }
+        }
     }
 }

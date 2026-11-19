@@ -21,6 +21,7 @@ src/
     recovery.rs     ordered background autosave in the app data directory, with startup restore
   media.rs          source references, probing and thumbnail decoding
   media/preview.rs  background video decoding and frame-accurate seek
+  media/cache.rs    bounded persistent thumbnail and storyboard RGBA cache
   media/composite.rs  shared preview/export visual composition
   media/audio.rs    background audio decoding, mixing and the playback clock
   playback.rs       default output device and monitor sound sessions
@@ -54,15 +55,26 @@ and the in-memory project. It rejects missing or unsupported versions and
 round-trips media references and title clips. Project load validates settings,
 IDs, clip ranges and reference existence. `project::store` loads and saves on
 background jobs, with same-directory temporary files, sync, and rename for
-atomic writes. Imported media paths are absolute. Format migrations do not
-exist yet; optional probe metadata and title style/parse flags keep version 1
-files readable. Media
+atomic writes. Imported media paths are absolute; loaded relative paths resolve
+against the project file's directory, not the working directory. The JSON
+format stays path-agnostic and clears stale linked-audio flags before validation.
+On the existing open/recovery worker, the store probes present sources and
+adopts matching-kind metadata only if the repaired project still validates.
+Failed probes and incompatible metadata retain the stored values. Repairs are
+not undo steps and normal opens remain clean; the status line reports unlinked
+clips alongside missing files. Relink commands repair linked flags atomically
+with the source replacement, so undo restores both. Optional probe metadata and
+title style/parse flags keep version 1 files readable. Media
 probing and bounded first-frame thumbnails use the `ffmpeg-next` library on
 workers. `media/preview.rs` decodes and scales frames off the UI thread,
 maintaining a small frame buffer during playback and seeking to source frames
 after an edit. It also generates three representative thumbnails per video
 clip's current source range on workers; `ui::state` keeps a bounded, transient
-cache and drops obsolete entries when clips change. `media/audio.rs` also
+cache and drops obsolete entries when clips change. Thumbnails and complete
+storyboards also persist in the platform `Ocus` cache directory, under
+`thumbnails/` and `frames/`, with a shared 512 MiB LRU limit. Source metadata
+invalidates stale entries; corrupt or unavailable entries are decoded again.
+`media/audio.rs` also
 extracts bounded waveform peaks on a worker. The timeline and Source monitor
 share the project's transient, per-source peak cache. The UI transfers decoded
 frames to textures on CreamUI's own GPU device and presents them through its
@@ -115,6 +127,16 @@ default output device; video pacing follows the consumed-sample clock so
 picture and sound stay aligned, skipping late video frames instead of delaying
 the timeline when composition is slower than playback. Source preview decodes
 one clip; the Program monitor and export share the layered composition rules.
+Video clips may store an optional fade, dissolve, or slide into their start.
+The shared compositor clamps transition length to the clip duration and uses
+the adjacent previous clip's continued picture (holding at source EOF), or
+the lower tracks, as the outgoing picture. Fade dips through black only at an
+adjacent cut; otherwise the incoming clip fades in over the lower tracks.
+Transitions are edited through
+`SetTransition`; splitting leaves the transition only on the left piece.
+The optional field remains compatible with version 1 projects. The Inspector
+offers transition choices and quarter-second duration steps; the timeline
+marks the effective transition range with a ramp at the clip start.
 
 ## Where new work belongs
 

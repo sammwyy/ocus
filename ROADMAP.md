@@ -107,20 +107,20 @@ The smallest version that can take raw footage and produce a finished video.
 Feature-complete for most everyday editing, with a focus on polish and stability. Work is grouped into rough milestones.
 
 ### v0.5: Timeline and motion
-- [ ] Transitions: fade, dissolve, slide
+- [x] Transitions: fade, dissolve, slide
 - [ ] Speed control from 0.25x to 4x
 - [ ] Reverse clip and freeze frame
 - [ ] Transforms: scale, position, rotation, crop, opacity
 - [ ] Picture-in-picture
 - [x] Snapping and timeline zoom
-- [ ] Timeline markers
+- [x] Timeline markers
 
 ### v0.6: Color and audio
 - [x] Brightness, contrast and saturation
 - [ ] LUT support (.cube)
 - [x] Audio waveforms on the timeline and in the Source monitor
-- [ ] Audio fade in and fade out
-- [ ] Loudness normalization
+- [x] Audio fade in and fade out
+- [x] Loudness normalization
 - [ ] Noise reduction
 
 ### v0.7: Subtitles and keyframes
@@ -132,7 +132,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 ### v0.8: Performance and safety
 - [ ] Hardware accelerated encoding and decoding (NVENC, VAAPI, VideoToolbox)
 - [ ] Proxy media for smooth 4K editing
-- [ ] Frame and thumbnail cache
+- [x] Frame and thumbnail cache
 - [x] Autosave
 - [x] Crash recovery
 

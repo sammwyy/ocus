@@ -789,6 +789,9 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 color: Default::default(),
+                transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             }
         }));
@@ -845,6 +848,9 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 color: Default::default(),
+                transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             },
         }));
@@ -915,6 +921,9 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 color: Default::default(),
+                transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             },
         }));
@@ -1031,6 +1040,9 @@ mod tests {
                 volume: 0.5,
                 muted: false,
                 color: Default::default(),
+                transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             },
         }));
@@ -1096,6 +1108,9 @@ mod tests {
             volume: 1.0,
             muted: false,
             color: Default::default(),
+            transition: None,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             linked_audio: false,
         }];
         layered[1].clips = vec![Clip {
@@ -1107,6 +1122,9 @@ mod tests {
             volume: 1.0,
             muted: false,
             color: Default::default(),
+            transition: None,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             linked_audio: false,
         }];
         layered.push(Track {
@@ -1127,6 +1145,9 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 color: Default::default(),
+                transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             }],
         });
@@ -1233,6 +1254,9 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 color: Default::default(),
+                transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             },
         }));
@@ -1314,6 +1338,9 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 color: Default::default(),
+                transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             },
         }));
@@ -1475,6 +1502,9 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 color: Default::default(),
+                transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             },
         }));
@@ -1597,6 +1627,9 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 color: Default::default(),
+                transition: None,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false,
             },
         }));

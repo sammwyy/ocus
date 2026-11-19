@@ -163,10 +163,9 @@ testing another release. These scripts refuse to replace existing installs;
 run them on disposable test machines. AppImages are extracted and run without
 FUSE, then removed. The macOS app bundle itself is the desktop launch entry.
 
-The packaging workflow builds and smoke-tests all three platforms and retains
-their installers as artifacts. macOS and Windows installer execution has not
-yet been verified locally; the roadmap checkbox remains open until all three
-platforms have actually passed.
+The Package installers workflow runs installer smoke tests on Linux, macOS and
+Windows in CI and retains their installers as artifacts. All three platforms
+passed at commit `1582834` in [workflow run 44580639268](https://github.com/sammwyy/ocus/actions/runs/44580639268).
 
 ## Checks and troubleshooting
 

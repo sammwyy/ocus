@@ -4,7 +4,27 @@ use serde::{Deserialize, Serialize};
 pub struct Track {
     pub id: u64,
     pub kind: TrackKind,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
     pub clips: Vec<Clip>,
+}
+
+impl Track {
+    pub fn valid_name(name: &str) -> bool {
+        name == name.trim() && name.chars().count() <= 32 && !name.chars().any(char::is_control)
+    }
+
+    pub fn display_name(&self, positional: &str) -> String {
+        if self.name.is_empty() {
+            positional.to_owned()
+        } else {
+            self.name.clone()
+        }
+    }
 }
 
 /// A point in the sequence the editor can jump and snap to.
@@ -24,6 +44,8 @@ pub enum TrackKind {
 pub struct Clip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<Transition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition_out: Option<Transition>,
     pub id: u64,
     pub start_frame: u64,
     pub source_start_frame: u64,
@@ -47,6 +69,24 @@ pub struct Clip {
 pub struct Transition {
     pub kind: TransitionKind,
     pub duration_frames: u64,
+    #[serde(default, skip_serializing_if = "SlideDirection::is_default")]
+    pub direction: SlideDirection,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlideDirection {
+    Left,
+    #[default]
+    Right,
+    Up,
+    Down,
+}
+
+impl SlideDirection {
+    fn is_default(&self) -> bool {
+        *self == Self::Right
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,6 +1,7 @@
 use super::MediaKind;
 use super::audio::Clock;
 use super::composite::{Compositor, VisualPlan};
+use crate::timeline::ColorAdjust;
 use ffmpeg_next as ffmpeg;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -11,6 +12,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone)]
 pub struct FrameSource {
     pub lut: Option<PathBuf>,
+    pub color: ColorAdjust,
     pub clip_id: u64,
     pub path: PathBuf,
     pub kind: MediaKind,
@@ -50,6 +52,7 @@ pub fn storyboard(
     };
     let source = FrameSource {
         lut: None,
+        color: Default::default(),
         clip_id: 0,
         path: key.path.clone(),
         kind: key.kind,
@@ -512,6 +515,7 @@ mod tests {
             assert!(reference.status.success());
             let source = FrameSource {
                 lut: None,
+                color: Default::default(),
                 clip_id: 1,
                 path: path.clone(),
                 kind: MediaKind::Video,
@@ -549,6 +553,7 @@ mod tests {
         for name in ["late", "zero"] {
             let source = FrameSource {
                 lut: None,
+                color: Default::default(),
                 clip_id: 1,
                 path: root.join(format!("{name}.mp4")),
                 kind: MediaKind::Video,
@@ -597,6 +602,7 @@ mod tests {
         fs::write(&path, data).unwrap();
         let source = FrameSource {
             lut: None,
+            color: Default::default(),
             clip_id: 1,
             path: path.clone(),
             kind: MediaKind::Image,
@@ -640,6 +646,7 @@ mod tests {
             let frames = u64::from(fps.0 / fps.1);
             let source = FrameSource {
                 lut: None,
+                color: Default::default(),
                 clip_id: 1,
                 path,
                 kind: MediaKind::Video,
@@ -700,6 +707,7 @@ mod tests {
         );
         let source = FrameSource {
             lut: None,
+            color: Default::default(),
             clip_id: 1,
             path: path.clone(),
             kind: MediaKind::Video,
@@ -771,6 +779,7 @@ mod tests {
             };
             let source = FrameSource {
                 lut: None,
+                color: Default::default(),
                 clip_id: 1,
                 path: path.clone(),
                 kind: MediaKind::Video,
@@ -828,6 +837,7 @@ mod tests {
             fs::write(&path, data).unwrap();
             let source = FrameSource {
                 lut: None,
+                color: Default::default(),
                 clip_id: 1,
                 path: path.clone(),
                 kind: MediaKind::Image,
@@ -914,6 +924,7 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         let source = FrameSource {
             lut: None,
+            color: Default::default(),
             clip_id: 1,
             path,
             kind: MediaKind::Video,
@@ -948,6 +959,7 @@ mod tests {
         fs::write(&path, source).unwrap();
         let clips = [FrameSource {
             lut: None,
+            color: Default::default(),
             clip_id: 1,
             path: path.clone(),
             kind: MediaKind::Video,
@@ -1041,6 +1053,7 @@ mod tests {
         let cut = PreviewPlan {
             sources: vec![FrameSource {
                 lut: None,
+                color: Default::default(),
                 clip_id: 2,
                 path: path.clone(),
                 kind: MediaKind::Video,

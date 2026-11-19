@@ -64,7 +64,14 @@ Failed probes and incompatible metadata retain the stored values. Repairs are
 not undo steps and normal opens remain clean; the status line reports unlinked
 clips alongside missing files. Relink commands repair linked flags atomically
 with the source replacement, so undo restores both. Optional probe metadata and
-title style/parse flags keep version 1 files readable. Media
+title style/parse flags keep version 1 files readable. Track names, locked and
+hidden flags are optional version 1 fields and are omitted when empty/false.
+Names are trimmed, limited to 32 Unicode characters and cannot contain control
+characters. Track metadata and same-kind reordering use undoable commands.
+Locked tracks reject clip edits and removal, including through `ReplaceTracks`;
+ripple delete leaves them untouched. Hidden tracks are excluded from both
+shared visual composition and audio plans (including linked video audio), so
+preview and export agree. Media
 probing and bounded first-frame thumbnails use the `ffmpeg-next` library on
 workers. `media/preview.rs` decodes and scales frames off the UI thread,
 maintaining a small frame buffer during playback and seeking to source frames
@@ -112,7 +119,7 @@ Markdown syntax when their respective switches are enabled. The preview
 composites simultaneous video layers; title edits, split/move/trim/delete,
 audio clip settings, track creation/removal and ripple delete use project
 commands. Ripple delete merges the original selected time ranges and closes
-them across every track; clips spanning a removed range split with distinct IDs,
+them across every unlocked track; clips spanning a removed range split with distinct IDs,
 preserving both source ranges in one undoable edit. A video with sound is
 inserted as one clip with `linked_audio`, an optional field that keeps version 1
 files readable (absent means false), so any edit of the clip also edits its
@@ -141,8 +148,10 @@ marks the effective transition range with a ramp at the clip start.
 Video and image clips may reference a `.cube` color LUT through an optional
 version 1 field (absent means no LUT). `SetClipLut` changes it undoably; splits
 and copies preserve it. The Inspector validates chosen files on a worker.
-The shared compositor loads and caches LUTs by path on its worker, applying
-them before transitions and layer blending. Missing or malformed LUTs report
+The shared compositor applies per-clip brightness, contrast and saturation
+first, then loads and caches LUTs by path on its worker. Both adjustments run
+before transitions and layer blending. The Inspector exposes both color
+adjustments and LUT selection. Missing or malformed LUTs report
 errors in preview and export. Each cached LUT keeps its floating-point lattice
 and three 256-entry domain index/weight tables for per-pixel trilinear
 interpolation (1D LUTs use per-channel linear tables). Extreme lattice values

@@ -71,6 +71,21 @@ impl Project {
         std::mem::replace(&mut self.name, name)
     }
 
+    pub(crate) fn repair_linked_audio(&mut self) -> usize {
+        let mut repaired = 0;
+        for clip in self.tracks.iter_mut().flat_map(|track| &mut track.clips) {
+            if clip.linked_audio
+                && matches!(clip.content, ClipContent::Media { media_id }
+                    if self.media.iter().any(|media| media.id == media_id
+                        && (media.kind != MediaKind::Video || !media.has_audio)))
+            {
+                clip.linked_audio = false;
+                repaired += 1;
+            }
+        }
+        repaired
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.name.trim().is_empty()
             || self.settings.width == 0

@@ -513,9 +513,9 @@ impl UiState {
         let state = self.clone();
         app.spawn_background(
             move || {
-                let snapshot = recovery::read(&dir)?;
+                let (snapshot, repaired) = recovery::read_with_repairs(&dir)?;
                 let missing = missing_sources(&snapshot.project);
-                Some((snapshot, missing))
+                Some((snapshot, missing, repaired))
             },
             move |result| {
                 state.finish_recovery(revision, result);
@@ -523,11 +523,15 @@ impl UiState {
         );
     }
 
-    fn finish_recovery(&self, revision: u64, result: Option<(recovery::Snapshot, HashSet<u64>)>) {
+    fn finish_recovery(
+        &self,
+        revision: u64,
+        result: Option<(recovery::Snapshot, HashSet<u64>, usize)>,
+    ) {
         if self.busy.peek() || self.revision.peek() != revision {
             return;
         }
-        if let Some((snapshot, missing)) = result {
+        if let Some((snapshot, missing, repaired)) = result {
             let result = MessageDialog::new()
                 .set_level(MessageLevel::Warning)
                 .set_title("Recover unsaved work?")
@@ -544,6 +548,7 @@ impl UiState {
                 || result == MessageDialogResult::Custom("Restore".into());
             if restore {
                 self.install_project(snapshot.project, snapshot.original_path, true, missing);
+                self.report_repairs(repaired);
             } else {
                 self.clear_recovery();
             }
@@ -1710,17 +1715,18 @@ impl UiState {
             {
                 let path = path.clone();
                 move || {
-                    store::load(&path).map(|project| {
+                    store::load_with_repairs(&path).map(|(project, repaired)| {
                         let missing = missing_sources(&project);
-                        (project, missing)
+                        (project, missing, repaired)
                     })
                 }
             },
             move |result| {
                 state.busy.set(false);
                 match result {
-                    Ok((project, missing)) if state.revision.peek() == revision => {
+                    Ok((project, missing, repaired)) if state.revision.peek() == revision => {
                         state.install_project(project, Some(path), false, missing);
+                        state.report_repairs(repaired);
                     }
                     Ok(_) => state
                         .status
@@ -1780,6 +1786,17 @@ impl UiState {
         self.load_thumbnails(sources);
         self.queue_storyboards();
         self.request_preview();
+    }
+
+    fn report_repairs(&self, repaired: usize) {
+        if repaired > 0 {
+            self.status.update(|status| {
+                let clips = if repaired == 1 { "clip" } else { "clips" };
+                status.push_str(&format!(
+                    " · {repaired} linked {clips} unlinked (source has no sound)"
+                ));
+            });
+        }
     }
 
     fn save_then(&self, after_save: Option<AfterSave>) {
@@ -3063,6 +3080,23 @@ mod tests {
     }
 
     #[test]
+    fn open_repairs_keep_missing_files_note_and_clean_history() {
+        let state = UiState::new();
+        state.install_project(Project::new("Repair"), None, false, HashSet::from([4]));
+        state.report_repairs(2);
+        assert_eq!(
+            state.status.peek(),
+            "Project opened · 1 media files missing · 2 linked clips unlinked (source has no sound)"
+        );
+        assert!(!state.dirty.peek());
+        assert!(!state.editor.borrow().is_dirty());
+        assert!(!state.editor.borrow().can_undo());
+        let status = state.status.peek();
+        state.report_repairs(0);
+        assert_eq!(state.status.peek(), status);
+    }
+
+    #[test]
     fn empty_recovery_check_leaves_editor_available_and_does_not_finish_other_work() {
         let state = UiState::new();
         state.finish_recovery(state.revision.peek(), None);
@@ -3086,6 +3120,7 @@ mod tests {
                     project: Project::new("Previous"),
                 },
                 HashSet::new(),
+                0,
             )),
         );
         assert_eq!(state.editor.borrow().project().name(), "Untitled");

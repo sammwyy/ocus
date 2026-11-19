@@ -6,7 +6,7 @@ clip commands do not complete the corresponding editor workflows.
 
 ## Project and editing foundation
 
-- [ ] Extend existing settings/ID/range/compatibility and probed duration
+- [x] Extend existing settings/ID/range/compatibility and probed duration
   checks with linked AV clips and media path migration/repair.
 - [x] Add project file open/save with atomic writes, external media paths,
   useful errors, and round-trip tests; retain explicit schema-version handling.

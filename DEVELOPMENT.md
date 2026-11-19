@@ -66,8 +66,8 @@ Install a C compiler, `pkg-config`, FFmpeg and `libclang`:
 
 ```sh
 sudo apt update
-sudo apt install build-essential pkg-config libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev libavfilter-dev libclang-dev
-pkg-config --modversion libavformat libavcodec libavutil libswscale libswresample libavfilter
+sudo apt install build-essential pkg-config libavformat-dev libavcodec-dev libavfilter-dev libavutil-dev libswscale-dev libswresample-dev libclang-dev
+pkg-config --modversion libavformat libavcodec libavfilter libavutil libswscale libswresample
 ```
 
 Use a Wayland or X11 desktop session to launch the window. Depending on the

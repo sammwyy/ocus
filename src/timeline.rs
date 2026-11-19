@@ -7,6 +7,12 @@ pub struct Track {
     pub clips: Vec<Clip>,
 }
 
+/// A point in the sequence the editor can jump and snap to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Marker {
+    pub frame: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrackKind {
@@ -16,6 +22,8 @@ pub enum TrackKind {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Clip {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition: Option<Transition>,
     pub id: u64,
     pub start_frame: u64,
     pub source_start_frame: u64,
@@ -24,6 +32,10 @@ pub struct Clip {
     pub speed: f64,
     pub content: ClipContent,
     pub volume: f32,
+    #[serde(default, skip_serializing_if = "zero")]
+    pub fade_in_frames: u64,
+    #[serde(default, skip_serializing_if = "zero")]
+    pub fade_out_frames: u64,
     pub muted: bool,
     /// A video clip that also carries its source's audio. The audio is cut,
     /// moved and trimmed with the picture; `volume` and `muted` apply to it.
@@ -54,6 +66,38 @@ impl Clip {
 
     pub fn valid_speed(&self) -> bool {
         self.speed.is_finite() && (0.25..=4.0).contains(&self.speed)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Transition {
+    pub kind: TransitionKind,
+    pub duration_frames: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitionKind {
+    Fade,
+    Dissolve,
+    Slide,
+}
+
+fn zero(value: &u64) -> bool {
+    *value == 0
+}
+
+impl Clip {
+    pub(crate) fn clamp_fades(&mut self) {
+        self.fade_in_frames = self.fade_in_frames.min(self.duration_frames);
+        self.fade_out_frames = self
+            .fade_out_frames
+            .min(self.duration_frames - self.fade_in_frames);
+    }
+
+    pub(crate) fn valid_fades(&self) -> bool {
+        self.fade_in_frames <= self.duration_frames
+            && self.fade_out_frames <= self.duration_frames - self.fade_in_frames
     }
 }
 

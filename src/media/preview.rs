@@ -1,7 +1,7 @@
 use super::MediaKind;
 use super::audio::Clock;
 use super::composite::{Compositor, VisualPlan};
-use crate::timeline::ColorAdjust;
+use crate::timeline::{ColorAdjust, Transform};
 use ffmpeg_next as ffmpeg;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,10 +19,12 @@ pub struct FrameSource {
     pub start: u64,
     pub source_start: u64,
     pub duration: u64,
+    pub transform: Transform,
 }
 
 #[derive(Clone)]
 pub struct FrameImage {
+    pub picture: (u32, u32, u32, u32),
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
@@ -60,6 +62,7 @@ pub fn storyboard(
         start: 0,
         source_start: key.source_start,
         duration: key.duration,
+        transform: Transform::default(),
     };
     let mut frames = Vec::new();
     for offset in offsets {
@@ -144,6 +147,7 @@ impl VideoLayers {
         }
         self.retain(&active);
         Ok((!active.is_empty()).then_some(FrameImage {
+            picture: (0, 0, self.output.0, self.output.1),
             width: self.output.0,
             height: self.output.1,
             pixels,
@@ -464,6 +468,7 @@ impl FrameReader {
                 .copy_from_slice(&scaled.pixels[start..start + row_size]);
         }
         let image = Arc::new(FrameImage {
+            picture: (left as u32, top as u32, scaled.width, scaled.height),
             width: self.output.0,
             height: self.output.1,
             pixels,
@@ -541,6 +546,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration,
+            transform: Transform::default(),
         }
     }
 
@@ -827,6 +833,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 30,
+                transform: Transform::default(),
             };
             let cancelled = Arc::new(AtomicBool::new(false));
             let frame = FrameReader::open(&source, 0, (30, 1), (64, 64), cancelled.clone())
@@ -865,6 +872,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 1800,
+                transform: Transform::default(),
             };
             for target in [0, 300, 901, 1500, 1790] {
                 let mut runs = Vec::new();
@@ -914,6 +922,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 300,
+            transform: Transform::default(),
         };
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut reader =
@@ -958,6 +967,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: frames,
+                transform: Transform::default(),
             };
             let cancelled = Arc::new(AtomicBool::new(false));
             let mut reader =
@@ -1019,6 +1029,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 1,
+            transform: Transform::default(),
         };
         let cancelled = Arc::new(AtomicBool::new(false));
         let image = FrameReader::open(&source, 0, (1, 1), (1280, 720), cancelled.clone())
@@ -1091,6 +1102,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 1,
+                transform: Transform::default(),
             };
             let cancelled = Arc::new(AtomicBool::new(false));
             let image = FrameReader::open(&source, 0, (1, 1), output, cancelled.clone())
@@ -1149,6 +1161,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 1,
+                transform: Transform::default(),
             };
             let cancelled = Arc::new(AtomicBool::new(false));
             let image = VideoLayers::new((30, 1), output)
@@ -1237,6 +1250,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 120,
+            transform: Transform::default(),
         };
         let mut reader =
             FrameReader::open(&source, 0, (30, 1), (32, 32), cancelled.clone()).unwrap();
@@ -1272,6 +1286,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 6,
+            transform: Transform::default(),
         }];
         let plan = PreviewPlan {
             use_proxies: false,
@@ -1369,6 +1384,7 @@ mod tests {
                 start: 3,
                 source_start: 2,
                 duration: 2,
+                transform: Transform::default(),
             }],
             visual: None,
             end: 5,

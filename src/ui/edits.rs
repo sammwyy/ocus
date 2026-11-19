@@ -5,7 +5,7 @@ use super::state::media_frames;
 use crate::media::MediaKind;
 use crate::project::edit::split_tracks;
 use crate::project::{Command, Editor, Project};
-use crate::timeline::{Clip, ClipContent, Track, TrackKind};
+use crate::timeline::{Clip, ClipContent, Track, TrackKind, Transform};
 use std::collections::HashSet;
 
 /// A clip identity: `(track_id, clip_id)`.
@@ -269,6 +269,7 @@ pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Op
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            transform: Transform::default(),
         },
     ))
 }
@@ -413,6 +414,7 @@ pub(crate) fn insert_media(
         fade_out_frames: 0,
         noise_reduction: false,
         linked_audio: media.kind == MediaKind::Video && media.has_audio,
+        transform: Transform::default(),
     };
     let end = start.checked_add(duration).ok_or("Clip range overflows")?;
     if track
@@ -648,6 +650,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            transform: Transform::default(),
         }
     }
 

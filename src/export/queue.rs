@@ -256,7 +256,7 @@ fn unused_export_path(mut path: PathBuf) -> PathBuf {
 mod tests {
     use super::*;
     use crate::project::{Command, Editor, format};
-    use crate::timeline::{Clip, ClipContent, Title};
+    use crate::timeline::{Clip, ClipContent, Title, Transform};
     use ffmpeg_next as ffmpeg;
     use std::fs;
 
@@ -283,7 +283,9 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
+                transform: Transform::default(),
             },
         }));
         let settings = super::super::presets::builtins(editor.project())

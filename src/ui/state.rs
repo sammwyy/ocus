@@ -384,6 +384,8 @@ pub(crate) struct UiState {
     pub gesture: Rc<RefCell<Gesture>>,
     pub drag: Signal<Option<DragState>>,
     pub trim_draft: Signal<Option<Command>>,
+    pub stabilization_drag: Signal<Option<(u64, u64, crate::timeline::Stabilization)>>,
+    pub stabilization_analyzing: Signal<bool>,
     pub trim_hover: Signal<bool>,
     pub marquee: Signal<Option<Rect>>,
     pub timeline_rect: Rc<Cell<Rect>>,
@@ -558,6 +560,8 @@ impl UiState {
             gesture: Rc::new(RefCell::new(Gesture::Idle)),
             drag: Signal::new(None),
             trim_draft: Signal::new(None),
+            stabilization_drag: Signal::new(None),
+            stabilization_analyzing: Signal::new(false),
             trim_hover: Signal::new(false),
             marquee: Signal::new(None),
             timeline_rect: Rc::new(Cell::new(Rect::default())),
@@ -1195,6 +1199,93 @@ impl UiState {
         app.spawn_background(
             move || audio::loudness(&path, clip.source_start_frame, clip.source_span(), fps),
             move |result| state.finish_normalization(revision, track_id, clip_id, result),
+        );
+    }
+
+    pub(super) fn stabilize_clip(&self) {
+        if self.stabilization_analyzing.peek() {
+            return;
+        }
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let Some((track_id, clip_id)) = self.primary_clip() else {
+            return;
+        };
+        let editor = self.editor.borrow();
+        let project = editor.project();
+        let Some(track) = project
+            .tracks()
+            .iter()
+            .find(|t| t.id == track_id && t.kind == TrackKind::Video && !t.locked)
+        else {
+            return;
+        };
+        let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) else {
+            return;
+        };
+        let ClipContent::Media { media_id } = clip.content else {
+            return;
+        };
+        let Some(media) = project
+            .media()
+            .iter()
+            .find(|m| m.id == media_id && m.kind == MediaKind::Video)
+        else {
+            return;
+        };
+        let source = crate::media::preview::FrameSource {
+            chroma_key: None,
+            stabilization: None,
+            playback: crate::timeline::Playback::Forward,
+            lut: None,
+            color: Default::default(),
+            clip_id,
+            path: media.path.clone(),
+            kind: media.kind,
+            start: 0,
+            source_start: clip.source_start_frame,
+            duration: clip.source_span().max(1),
+            speed: 1.0,
+            transform: Default::default(),
+            keyframes: Vec::new(),
+        };
+        let fps = self.frame_rate();
+        let revision = self.revision.peek();
+        drop(editor);
+        self.status.set("Analyzing camera shake…".into());
+        self.stabilization_analyzing.set(true);
+        let state = self.clone();
+        app.spawn_background(
+            move || crate::media::stabilize::analyze(source, fps),
+            move |result| {
+                state.stabilization_analyzing.set(false);
+                if state.revision.peek() != revision {
+                    state.status.set(
+                        "Stabilization discarded because the project changed. Try again.".into(),
+                    );
+                    return;
+                }
+                match result {
+                    Ok(stabilization) => {
+                        if state.busy.peek() {
+                            state.status.set(
+                                "Analysis finished, but the editor is busy. Try again.".into(),
+                            );
+                            return;
+                        }
+                        state.edit(Command::SetClipStabilization {
+                            track_id,
+                            clip_id,
+                            stabilization: Some(stabilization),
+                        });
+                        state
+                            .status
+                            .set("Video stabilized. Adjust Strength to taste.".into());
+                    }
+                    Err(error) => state.status.set(format!("Cannot stabilize video: {error}")),
+                }
+            },
         );
     }
 
@@ -1851,6 +1942,12 @@ impl UiState {
                         start: clip.start_frame,
                         source_start: clip.source_start_frame,
                         duration: clip.duration_frames,
+                        stabilization: clip.stabilization.as_ref().map(|s| {
+                            (
+                                s.analysis.start_frame,
+                                std::sync::Arc::new(crate::media::stabilize::corrections(s)),
+                            )
+                        }),
                         keyframes: clip.keyframes.clone(),
                         transform: clip.transform,
                     });
@@ -1924,6 +2021,7 @@ impl UiState {
                     start: 0,
                     source_start: range.source_start,
                     duration: range.duration,
+                    stabilization: None,
                     keyframes: Vec::new(),
                     transform: Transform::default(),
                 })
@@ -5227,6 +5325,7 @@ mod tests {
                     fade_out_frames: 0,
                     noise_reduction: false,
                     linked_audio: false,
+                    stabilization: None,
                     keyframes: Vec::new(),
                     transform: Transform::default(),
                 })
@@ -6111,6 +6210,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             })

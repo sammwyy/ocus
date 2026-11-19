@@ -58,6 +58,11 @@ pub(crate) fn split_tracks(
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
+    SetClipStabilization {
+        track_id: u64,
+        clip_id: u64,
+        stabilization: Option<crate::timeline::Stabilization>,
+    },
     SetClipKeyframes {
         track_id: u64,
         clip_id: u64,
@@ -494,6 +499,7 @@ mod playback_tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Box::new(Clip {
+                stabilization: None,
                 keyframes: Vec::new(),
                 speed: 1.0,
                 transform: crate::timeline::Transform::default(),
@@ -536,6 +542,7 @@ mod playback_tests {
             assert!(editor.apply(Command::InsertClip {
                 track_id: 1,
                 clip: Box::new(Clip {
+                    stabilization: None,
                     keyframes: Vec::new(),
                     speed: 1.0,
                     transform: crate::timeline::Transform::default(),
@@ -757,6 +764,7 @@ mod playback_tests {
         }));
         let mut tracks = editor.project().tracks().to_vec();
         tracks[1].clips.push(Clip {
+            stabilization: None,
             keyframes: Vec::new(),
             speed: 1.0,
             transform: crate::timeline::Transform::default(),
@@ -853,6 +861,7 @@ impl Editor {
             | Command::SetPlayback { track_id, .. }
             | Command::SetClipTransform { track_id, .. }
             | Command::SetClipKeyframes { track_id, .. }
+            | Command::SetClipStabilization { track_id, .. }
             | Command::SetClipLut { track_id, .. }
             | Command::SetClipChromaKey { track_id, .. }
             | Command::SetClipFades { track_id, .. }
@@ -1295,6 +1304,33 @@ impl Editor {
                 clip.duration_frames = duration_frames;
                 clip.clamp_fades();
                 self.execute(Command::ReplaceTracks(tracks))
+            }
+            Command::SetClipStabilization {
+                track_id,
+                clip_id,
+                stabilization,
+            } => {
+                if stabilization.as_ref().is_some_and(|s| !s.valid()) {
+                    return None;
+                }
+                let media = &self.project.media;
+                let track = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|t| t.id == track_id && t.kind == TrackKind::Video)?;
+                let clip = track.clips.iter_mut().find(|c| c.id == clip_id)?;
+                if !matches!(clip.content, ClipContent::Media { media_id } if media.iter().any(|m| m.id == media_id && m.kind == crate::media::MediaKind::Video))
+                    || clip.stabilization == stabilization
+                {
+                    return None;
+                }
+                let old = std::mem::replace(&mut clip.stabilization, stabilization);
+                Some(Command::SetClipStabilization {
+                    track_id,
+                    clip_id,
+                    stabilization: old,
+                })
             }
             Command::SetClipKeyframes {
                 track_id,
@@ -1939,6 +1975,7 @@ mod tests {
             muted: false,
             noise_reduction: false,
             linked_audio: false,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         };
@@ -2622,6 +2659,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         };
@@ -2860,6 +2898,7 @@ mod tests {
                 transition: None,
                 linked_audio: true,
                 color: Default::default(),
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             })
@@ -2934,6 +2973,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             };
@@ -3020,6 +3060,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         };
@@ -3109,6 +3150,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         };
@@ -3165,6 +3207,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             }),
@@ -3554,6 +3597,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         };
@@ -3652,6 +3696,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         };
@@ -3763,6 +3808,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         };
@@ -3863,6 +3909,7 @@ mod tests {
                     fade_out_frames: 0,
                     noise_reduction: false,
                     linked_audio: id == 2,
+                    stabilization: None,
                     keyframes: Vec::new(),
                     transform: Transform::default(),
                 }),
@@ -3927,6 +3974,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         };
@@ -3959,6 +4007,7 @@ mod tests {
                     fade_out_frames: 0,
                     noise_reduction: false,
                     linked_audio: false,
+                    stabilization: None,
                     keyframes: Vec::new(),
                     transform: Transform::default(),
                 },
@@ -4039,6 +4088,7 @@ mod tests {
                     fade_out_frames: 0,
                     noise_reduction: false,
                     linked_audio: false,
+                    stabilization: None,
                     keyframes: Vec::new(),
                     transform: Transform::default(),
                 }),
@@ -4081,6 +4131,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         };
@@ -4132,6 +4183,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             }),
@@ -4162,6 +4214,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             }),
@@ -4207,6 +4260,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             }),
@@ -4308,6 +4362,7 @@ mod tests {
             fade_out_frames: 0,
             linked_audio: false,
             color: Default::default(),
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         };

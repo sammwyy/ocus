@@ -231,6 +231,20 @@ keyframe at the playhead, jump between visible keys and edit interpolated
 values. Once keyed, animated-property edits upsert a key at the playhead;
 crop edits continue to update the base transform.
 
+Video clips can store optional version 1 `stabilization` data: strength and a
+normalized translation path indexed by source frame, with its analyzed start
+frame. Absence preserves the old unstabilized behavior. Splits, trims, reverse,
+speed changes and freezes retain the path and use the existing source mapping.
+`SetClipStabilization` validates changes and supports undo/redo. The Inspector
+analyzes the selected source range on a background worker using the linked
+FFmpeg decoder, small grayscale frames and median block-matched translations.
+It discards results if the project changed during analysis. Strength smooths
+the existing path without decoding again. Preview and export apply the same
+correction before user transforms and transitions, with uniform zoom capped
+at 1.25 and bounded translation. This corrects translation, not rolling shutter
+or rotation; motion outside the analyzed range is left untouched. Analysis is
+limited to 216,000 source frames to bound saved data and worker memory.
+
 ## Where new work belongs
 
 | Work | Place it when implemented | Boundary |

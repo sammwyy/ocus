@@ -55,6 +55,7 @@ fn project(path: &Path) -> Editor {
                 playback: Playback::Forward,
                 color: Default::default(),
                 transform: Transform::default(),
+                stabilization: None,
                 keyframes: Vec::new(),
                 lut: None,
                 chroma_key: None,

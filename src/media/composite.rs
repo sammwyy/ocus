@@ -112,6 +112,14 @@ impl VisualPlan {
                                 start: clip.start_frame,
                                 source_start: clip.source_start_frame,
                                 duration: clip.duration_frames,
+                                stabilization: clip.stabilization.as_ref().map(|s| {
+                                    (
+                                        s.analysis.start_frame,
+                                        std::sync::Arc::new(crate::media::stabilize::corrections(
+                                            s,
+                                        )),
+                                    )
+                                }),
                                 keyframes: clip.keyframes.clone(),
                                 transform: clip.transform,
                             }))
@@ -284,6 +292,8 @@ impl Compositor {
                             source.color,
                         );
                         let image = apply_lut(&mut self.luts, source, image)?;
+                        let image =
+                            super::stabilize::apply(image, source.stabilization_at(position));
                         let transform = source.transform_at(position);
                         let opaque = transform.is_identity()
                             && image.width == self.width
@@ -375,6 +385,7 @@ impl Compositor {
                     source.color,
                 );
                 let image = apply_lut(&mut self.luts, source, image)?;
+                let image = super::stabilize::apply(image, source.stabilization_at(position));
                 let transform = source.transform_at(position);
                 if !transform.is_identity() {
                     draw_transformed(pixels, self.width, self.height, &image, transform);
@@ -1023,6 +1034,7 @@ mod tests {
             tga.extend([rgb[2], rgb[1], rgb[0], 255].repeat(8));
             fs::write(&path, tga).unwrap();
             VisualClip::Media(FrameSource {
+                stabilization: None,
                 speed: 1.0,
                 playback: Default::default(),
                 lut: None,
@@ -1102,6 +1114,7 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         assert!(crate::media::proxy::generate(&path, &cancelled).unwrap());
         let source = FrameSource {
+            stabilization: None,
             keyframes: Vec::new(),
             speed: 1.0,
             playback: crate::timeline::Playback::Forward,
@@ -1212,6 +1225,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 30,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             })]],
@@ -1318,6 +1332,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 10,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             })]],
@@ -1461,6 +1476,7 @@ mod tests {
             lut: None,
             chroma_key: None,
             transform: Transform::default(),
+            stabilization: None,
             keyframes: vec![
                 Keyframe::new(0, Transform::default()),
                 Keyframe::new(
@@ -1826,6 +1842,7 @@ mod tests {
                 source_start: 0,
                 duration: 90,
                 color: Default::default(),
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             }
@@ -1934,6 +1951,7 @@ mod tests {
         let lut_path = dir.path().join("invert.cube");
         fs::write(&lut_path, "LUT_1D_SIZE 2\n1 1 1\n0 0 0\n").unwrap();
         let source = FrameSource {
+            stabilization: None,
             keyframes: Vec::new(),
             speed: 1.0,
             playback: crate::timeline::Playback::Forward,
@@ -2036,6 +2054,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 10,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         };
@@ -2138,6 +2157,7 @@ mod tests {
                 start,
                 source_start: 0,
                 duration,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             })
@@ -2440,6 +2460,7 @@ mod tests {
                     start: 0,
                     source_start: 0,
                     duration: 2,
+                    stabilization: None,
                     keyframes: Vec::new(),
                     transform: Transform::default(),
                 }),
@@ -2455,6 +2476,7 @@ mod tests {
                     start: 2,
                     source_start: 0,
                     duration: 5,
+                    stabilization: None,
                     keyframes: Vec::new(),
                     transform: Transform::default(),
                 }),
@@ -2769,6 +2791,7 @@ mod tests {
             tga.extend([color[2], color[1], color[0], color[3]].repeat(8));
             fs::write(&path, tga).unwrap();
             VisualClip::Media(FrameSource {
+                stabilization: None,
                 keyframes: Vec::new(),
                 speed: 1.0,
                 playback: Playback::Forward,
@@ -2864,6 +2887,7 @@ mod tests {
                 start,
                 source_start: 0,
                 duration,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             })
@@ -3076,6 +3100,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 300,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             })]],
@@ -3132,6 +3157,7 @@ mod tests {
                     start: 0,
                     source_start: 0,
                     duration: frames,
+                    stabilization: None,
                     keyframes: Vec::new(),
                     transform: Transform::default(),
                 })]],
@@ -3235,6 +3261,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 3,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             })
@@ -3456,6 +3483,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 3,
+                stabilization: None,
                 keyframes: Vec::new(),
                 transform: Transform::default(),
             })

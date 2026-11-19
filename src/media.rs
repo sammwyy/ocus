@@ -13,6 +13,7 @@ pub mod hardware;
 pub mod lut;
 pub mod preview;
 pub mod proxy;
+pub mod stabilize;
 pub mod transcribe;
 
 fn seek_timestamp(input: &ffmpeg::format::context::Input, micros: u128) -> Option<i64> {

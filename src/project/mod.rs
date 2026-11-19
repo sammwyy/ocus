@@ -188,6 +188,10 @@ impl Project {
                     || clip.start_frame < end
                     || !clip_ids.insert(clip.id)
                     || !clip.transform.valid()
+                    || clip.stabilization.as_ref().is_some_and(|s| !s.valid()
+                        || track.kind != TrackKind::Video
+                        || !matches!(clip.content, ClipContent::Media { media_id }
+                            if self.media.iter().any(|m| m.id == media_id && m.kind == MediaKind::Video)))
                     || !crate::timeline::valid_keyframes(&clip.keyframes)
                     || (!clip.keyframes.is_empty()
                         && (track.kind != TrackKind::Video

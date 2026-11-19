@@ -272,6 +272,7 @@ pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Op
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         },
@@ -421,6 +422,7 @@ pub(crate) fn insert_media(
         fade_out_frames: 0,
         noise_reduction: false,
         linked_audio: media.kind == MediaKind::Video && media.has_audio,
+        stabilization: None,
         keyframes: Vec::new(),
         transform: Transform::default(),
     };
@@ -533,6 +535,7 @@ pub(crate) fn detach_audio(project: &Project, selection: &[ClipRef]) -> Option<P
         detached.push(Clip {
             id,
             lut: None,
+            stabilization: None,
             chroma_key: None,
             ..clip.clone()
         });
@@ -664,6 +667,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            stabilization: None,
             keyframes: Vec::new(),
             transform: Transform::default(),
         }
@@ -855,6 +859,43 @@ mod tests {
         assert!(editor.undo());
         assert_eq!(editor.project().tracks()[0].clips[0].start_frame, 20);
         assert_eq!(editor.project().tracks()[1].clips[1].start_frame, 80);
+    }
+
+    #[test]
+    fn detaching_stabilized_video_keeps_motion_only_on_the_picture() {
+        let mut editor = Editor::new(Project::new("Stabilized video"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "shake.mkv".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(3_000_000),
+            has_audio: true,
+        })));
+        let insertion = insert_media(editor.project(), 1, Some((0, 0))).unwrap();
+        assert!(editor.apply(insertion.command));
+        let data = crate::timeline::Stabilization::new(0, vec![[0.0, 0.0]; 90]);
+        assert!(editor.apply(Command::SetClipStabilization {
+            track_id: 0,
+            clip_id: 1,
+            stabilization: Some(data.clone())
+        }));
+        let detached = detach_audio(editor.project(), &[(0, 1)]).unwrap();
+        assert!(editor.apply(Command::ReplaceTracks(detached.tracks)));
+        assert_eq!(
+            editor.project().tracks()[0].clips[0].stabilization,
+            Some(data)
+        );
+        assert!(
+            editor
+                .project()
+                .tracks()
+                .iter()
+                .filter(|t| t.kind == TrackKind::Audio)
+                .flat_map(|t| &t.clips)
+                .all(|c| c.stabilization.is_none())
+        );
+        assert!(editor.undo());
+        assert!(editor.project().tracks()[0].clips[0].linked_audio);
     }
 
     #[test]

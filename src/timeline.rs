@@ -91,6 +91,8 @@ pub enum TrackKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Clip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stabilization: Option<Stabilization>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lut: Option<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chroma_key: Option<crate::timeline::ChromaKey>,
@@ -125,6 +127,44 @@ pub struct Clip {
     pub transform: Transform,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keyframes: Vec<Keyframe>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Stabilization {
+    pub strength: f32,
+    #[serde(flatten)]
+    pub analysis: Box<StabilizationMotion>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StabilizationMotion {
+    pub start_frame: u64,
+    pub motion: Vec<[f32; 2]>,
+}
+
+impl Stabilization {
+    pub fn new(start_frame: u64, motion: Vec<[f32; 2]>) -> Self {
+        Self {
+            strength: 0.5,
+            analysis: Box::new(StabilizationMotion {
+                start_frame,
+                motion,
+            }),
+        }
+    }
+
+    pub fn valid(&self) -> bool {
+        self.strength.is_finite()
+            && (0.0..=1.0).contains(&self.strength)
+            && !self.analysis.motion.is_empty()
+            && self.analysis.motion.len() <= 216_000
+            && self
+                .analysis
+                .start_frame
+                .checked_add(self.analysis.motion.len() as u64)
+                .is_some()
+            && self.analysis.motion.iter().flatten().all(|v| v.is_finite())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]

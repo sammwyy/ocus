@@ -327,6 +327,86 @@ fn set_clip_audio(state: &UiState, change: impl FnOnce(&Clip) -> (f32, bool)) {
     }
 }
 
+fn set_clip_color(state: &UiState, change: impl FnOnce(&mut crate::timeline::ColorAdjust)) {
+    if let Some((track_id, clip)) = selected_clip(state) {
+        let mut color = clip.color;
+        change(&mut color);
+        state.edit(Command::SetClipColor {
+            track_id,
+            clip_id: clip.id,
+            color,
+        });
+    }
+}
+
+fn color_control(state: &UiState, inner: f32, index: usize, value: f32) -> BoxedWidget {
+    let label = ["Brightness", "Contrast", "Saturation"][index];
+    let min = if index == 0 { -1.0 } else { 0.0 };
+    let max = if index == 0 { 1.0 } else { 2.0 };
+    let step = if index == 0 { 0.05 } else { 0.1 };
+    let mut row = Flex::row()
+        .gap(6.0)
+        .align(Align::Center)
+        .child(Box::new(Flex::row().width(68.0).child(text(
+            label,
+            muted(),
+            11.0,
+        ))))
+        .child(Box::new(
+            Flex::row()
+                .width((inner - 184.0).max(8.0))
+                .height(6.0)
+                .background(surface())
+                .corner_radius(3.0)
+                .child(Box::new(
+                    Flex::row()
+                        .width(((inner - 184.0).max(8.0) * (value - min) / (max - min)).max(0.0))
+                        .height(6.0)
+                        .background(accent())
+                        .corner_radius(3.0),
+                )),
+        ))
+        .child(Box::new(Flex::row().width(38.0).child(text(
+            if index == 0 {
+                format!("{:+.0}", value * 100.0)
+            } else {
+                format!("{:.0}%", value * 100.0)
+            },
+            text_color(),
+            11.0,
+        ))))
+        .child(spacer());
+    for increase in [false, true] {
+        row = row.child(sized_icon_button(
+            if increase { Glyph::Plus } else { Glyph::Minus },
+            Help::new(match (index, increase) {
+                (0, false) => "Decrease brightness",
+                (0, true) => "Increase brightness",
+                (1, false) => "Decrease contrast",
+                (1, true) => "Increase contrast",
+                (_, false) => "Decrease saturation",
+                (_, true) => "Increase saturation",
+            }),
+            24.0,
+            if increase { value < max } else { value > min },
+            false,
+            state,
+            move |s| {
+                set_clip_color(s, |color| {
+                    let field = match index {
+                        0 => &mut color.brightness,
+                        1 => &mut color.contrast,
+                        _ => &mut color.saturation,
+                    };
+                    *field = (((*field / step).round() + if increase { 1.0 } else { -1.0 }) * step)
+                        .clamp(min, max);
+                })
+            },
+        ));
+    }
+    Box::new(row)
+}
+
 fn media_name(media: &Media) -> String {
     media.path.file_name().map_or_else(
         || media.path.display().to_string(),
@@ -1808,6 +1888,26 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     title_toggle(state, "Parse Markdown", title.parse_markdown, |title| {
                         title.parse_markdown = !title.parse_markdown
                     }),
+                ],
+            ));
+        }
+        if track_kind == TrackKind::Video
+            && media.is_some_and(|media| media.kind != MediaKind::Audio)
+        {
+            rows.push(section(
+                "Color",
+                vec![
+                    color_control(state, inner, 0, clip.color.brightness),
+                    color_control(state, inner, 1, clip.color.contrast),
+                    color_control(state, inner, 2, clip.color.saturation),
+                    inline(secondary_button(
+                        None,
+                        "Reset color",
+                        !clip.color.neutral(),
+                        state,
+                        |s| set_clip_color(s, |color| *color = Default::default()),
+                    )),
+                    text("Color affects playback and export.", faint(), 10.0),
                 ],
             ));
         }
@@ -4111,6 +4211,7 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 1.0,
             muted: false,
+            color: Default::default(),
             linked_audio: false,
         }
     }
@@ -4219,6 +4320,57 @@ mod tests {
             Renderer::new().render(build(state, viewport), viewport, &mut painter);
         });
         painter
+    }
+
+    #[test]
+    fn inspector_color_controls_for_video_media_only() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/color.png".into(),
+            kind: MediaKind::Image,
+            duration_us: None,
+            has_audio: false
+        })));
+        let mut clip = destination_clip(0, 30);
+        clip.content = ClipContent::Media { media_id: 1 };
+        let id = clip.id;
+        assert!(state.edit(Command::InsertClip { track_id: 0, clip }));
+        state.select_clip(Some((0, id)));
+        let painter = render(&state, 1280.0, 1600.0);
+        for label in [
+            "COLOR",
+            "Brightness",
+            "Contrast",
+            "Saturation",
+            "Reset color",
+            "Color affects playback and export.",
+        ] {
+            assert!(painter.labels.iter().any(|text| text == label), "{label}");
+        }
+        set_clip_color(&state, |color| {
+            color.brightness = 0.2;
+            color.contrast = 1.3;
+            color.saturation = 0.0;
+        });
+        let painter = render(&state, 1280.0, 1600.0);
+        for label in ["+20", "130%", "0%"] {
+            assert!(painter.labels.iter().any(|text| text == label), "{label}");
+        }
+        state.select_clip(None);
+        assert!(
+            !render(&state, 1280.0, 900.0)
+                .labels
+                .iter()
+                .any(|text| text == "Reset color")
+        );
+        assert!(state.add_title());
+        assert!(
+            !render(&state, 1280.0, 900.0)
+                .labels
+                .iter()
+                .any(|text| text == "Reset color")
+        );
     }
 
     #[test]
@@ -5357,6 +5509,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                color: Default::default(),
                 linked_audio: false
             }
         }));

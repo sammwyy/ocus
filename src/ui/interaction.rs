@@ -1703,6 +1703,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                color: Default::default(),
                 linked_audio: true,
             },
         }));
@@ -1846,6 +1847,7 @@ mod tests {
                     content: ClipContent::Media { media_id: 1 },
                     volume: 1.0,
                     muted: false,
+                    color: Default::default(),
                     linked_audio: false,
                 },
             }));
@@ -1900,6 +1902,7 @@ mod tests {
             content: ClipContent::Media { media_id: 1 },
             volume: 0.5,
             muted: false,
+            color: Default::default(),
             linked_audio: false,
         };
         assert!(state.edit(Command::InsertClip {
@@ -2119,6 +2122,7 @@ mod tests {
                     content: ClipContent::Title(crate::timeline::Title::default()),
                     volume: 1.0,
                     muted: false,
+                    color: Default::default(),
                     linked_audio: false,
                 },
             }));

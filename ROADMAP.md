@@ -116,7 +116,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [ ] Timeline markers
 
 ### v0.6: Color and audio
-- [ ] Brightness, contrast and saturation
+- [x] Brightness, contrast and saturation
 - [ ] LUT support (.cube)
 - [x] Audio waveforms on the timeline and in the Source monitor
 - [ ] Audio fade in and fade out

@@ -92,6 +92,14 @@ cache and drops obsolete entries when clips change. Thumbnails and complete
 storyboards also persist in the platform `Ocus` cache directory, under
 `thumbnails/` and `frames/`, with a shared 512 MiB LRU limit. Source metadata
 invalidates stale entries; corrupt or unavailable entries are decoded again.
+High-resolution video also gets a display-oriented, square-pixel 720p MJPEG
+proxy on one cancellable worker using the linked FFmpeg decoder, scaler,
+encoder and NUT muxer in-process. Atomic files in `proxies/` share the cache's
+512 MiB eviction budget and source identity keys. The persisted "Use proxies
+for preview" setting defaults on; Program, Source and storyboard decoding may
+use ready proxies, while audio and export always open original media. Proxy
+timestamps retain offsets from the original container origin; NUT keeps their
+time-base precision even for fractional frame rates.
 `media/audio.rs` also
 extracts bounded waveform peaks on a worker. The timeline and Source monitor
 share the project's transient, per-source peak cache. The UI transfers decoded

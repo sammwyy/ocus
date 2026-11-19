@@ -25,6 +25,11 @@ worker stream API. Do not replace it with a sibling checkout.
   from GitHub on the first build.
 - Use a graphical desktop session for `cargo run`; build and tests can run
   headlessly.
+- Proxy generation uses the linked FFmpeg libraries, with the native MJPEG
+  encoder and NUT muxer enabled. No command-line executable is needed at runtime.
+  Preview falls back to originals if proxy generation is unavailable. The NUT
+  container preserves source timestamp precision (unlike Matroska's default
+  millisecond time base).
 
 Run from the repository root (the directory containing `Cargo.toml`):
 

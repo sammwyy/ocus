@@ -439,6 +439,56 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    #[ignore = "release-mode held-video-frame benchmark; requires ffmpeg"]
+    fn benchmark_video_frame_rates() {
+        let root = std::env::temp_dir().join(format!("ocus-video-bench-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        for (rate, fps) in [(5, (30, 1)), (24, (60, 1)), (30, (30, 1))] {
+            let path = root.join(format!("{rate}fps.mp4"));
+            assert!(
+                std::process::Command::new("ffmpeg")
+                    .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+                    .arg(format!("testsrc2=size=1920x1080:rate={rate}:duration=10"))
+                    .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-threads", "1"])
+                    .arg(&path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let frames = 10 * u64::from(fps.0 / fps.1);
+            let plan = VisualPlan {
+                resolution: (1920, 1080),
+                tracks: vec![vec![VisualClip::Media(FrameSource {
+                    clip_id: 1,
+                    path,
+                    kind: MediaKind::Video,
+                    start: 0,
+                    source_start: 0,
+                    duration: frames,
+                })]],
+            };
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let mut compositor = Compositor::new(plan, 1920, 1080, fps);
+            let mut elapsed = std::time::Duration::ZERO;
+            let mut hash = 0xcbf29ce484222325u64;
+            for position in 0..frames {
+                let started = std::time::Instant::now();
+                let frame = compositor.frame(position, &cancelled).unwrap().unwrap();
+                elapsed += started.elapsed();
+                for byte in &frame.pixels {
+                    hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
+                }
+            }
+            println!(
+                "video source_fps={rate} sequence_fps={} frames={frames} elapsed_ms={} fnv1a={hash:016x}",
+                fps.0,
+                elapsed.as_millis()
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn full_blend(plan: &VisualPlan, position: u64) -> Vec<u8> {
         let (width, height) = plan.resolution;
         let mut pixels = [0, 0, 0, 255].repeat(width as usize * height as usize);

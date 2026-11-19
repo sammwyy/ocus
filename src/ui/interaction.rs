@@ -1696,6 +1696,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                transform: crate::timeline::Transform::default(),
                 id: 1,
                 start_frame: 45,
                 source_start_frame: 0,
@@ -1839,6 +1840,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id,
                 clip: Clip {
+                    transform: crate::timeline::Transform::default(),
                     id: clip_id,
                     start_frame: 0,
                     source_start_frame: 0,
@@ -1893,6 +1895,7 @@ mod tests {
             has_audio: true,
         })));
         let detached = Clip {
+            transform: crate::timeline::Transform::default(),
             id: 1,
             start_frame: 0,
             source_start_frame: 15,
@@ -2112,6 +2115,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id,
                 clip: Clip {
+                    transform: crate::timeline::Transform::default(),
                     id,
                     start_frame,
                     source_start_frame: 0,

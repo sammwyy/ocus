@@ -43,6 +43,11 @@ pub(crate) fn split_tracks(
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
+    SetClipTransform {
+        track_id: u64,
+        clip_id: u64,
+        transform: crate::timeline::Transform,
+    },
     RenameProject(String),
     SetLastExport(Option<LastExport>),
     InsertClip {
@@ -355,6 +360,7 @@ impl Editor {
                         .source_start_frame
                         .checked_add(clip.duration_frames)
                         .is_none()
+                    || !clip.transform.valid()
                     || !clip.volume.is_finite()
                     || !(0.0..=2.0).contains(&clip.volume)
                     || self
@@ -537,6 +543,32 @@ impl Editor {
                 clip.source_start_frame = source_start_frame;
                 clip.duration_frames = duration_frames;
                 self.execute(Command::ReplaceTracks(tracks))
+            }
+            Command::SetClipTransform {
+                track_id,
+                clip_id,
+                transform,
+            } => {
+                if !transform.valid() {
+                    return None;
+                }
+                let track = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|t| t.id == track_id && t.kind == TrackKind::Video)?;
+                let clip = track.clips.iter_mut().find(|c| c.id == clip_id)?;
+                if !matches!(clip.content, ClipContent::Media { .. }) || clip.transform == transform
+                {
+                    return None;
+                }
+                let inverse = Command::SetClipTransform {
+                    track_id,
+                    clip_id,
+                    transform: clip.transform,
+                };
+                clip.transform = transform;
+                Some(inverse)
             }
             Command::SetClipAudio {
                 track_id,
@@ -762,6 +794,7 @@ mod tests {
             })));
             let track_id = if kind == MediaKind::Audio { 2 } else { 0 };
             let clip = Clip {
+                transform: crate::timeline::Transform::default(),
                 id: 1,
                 start_frame: 100,
                 source_start_frame: 0,
@@ -835,6 +868,7 @@ mod tests {
             has_audio: false
         })));
         let clip = Clip {
+            transform: crate::timeline::Transform::default(),
             id: 1,
             start_frame: 40,
             source_start_frame: 20,
@@ -903,6 +937,7 @@ mod tests {
         use crate::timeline::Title;
         let mut editor = Editor::new(Project::new("Film"));
         let title = Clip {
+            transform: crate::timeline::Transform::default(),
             id: 1,
             start_frame: 0,
             source_start_frame: 0,
@@ -954,6 +989,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                transform: crate::timeline::Transform::default(),
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1007,6 +1043,7 @@ mod tests {
     fn clip_insertion_rejects_invalid_ranges_overlap_and_missing_media() {
         let mut editor = Editor::new(Project::new("Film"));
         let title = Clip {
+            transform: crate::timeline::Transform::default(),
             id: 1,
             start_frame: 10,
             source_start_frame: 0,
@@ -1094,6 +1131,7 @@ mod tests {
     fn split_fixture() -> Vec<Track> {
         let mut project = Project::new("Split");
         let clip = Clip {
+            transform: crate::timeline::Transform::default(),
             id: 1,
             start_frame: 10,
             source_start_frame: 40,
@@ -1184,6 +1222,7 @@ mod tests {
     fn split_move_trim_and_ripple_delete_are_atomic_and_undoable() {
         let mut editor = Editor::new(Project::new("Film"));
         let make_clip = |id, start_frame| Clip {
+            transform: crate::timeline::Transform::default(),
             id,
             start_frame,
             source_start_frame: 0,
@@ -1276,6 +1315,7 @@ mod tests {
             assert!(editor.apply(Command::InsertClip {
                 track_id,
                 clip: Clip {
+                    transform: crate::timeline::Transform::default(),
                     id,
                     start_frame,
                     duration_frames,
@@ -1332,6 +1372,7 @@ mod tests {
             has_audio: true,
         })));
         let title = |id, start_frame, duration_frames| Clip {
+            transform: crate::timeline::Transform::default(),
             id,
             start_frame,
             source_start_frame: 0,
@@ -1352,6 +1393,7 @@ mod tests {
             (
                 2,
                 Clip {
+                    transform: crate::timeline::Transform::default(),
                     id: 6,
                     start_frame: 0,
                     source_start_frame: 0,
@@ -1417,6 +1459,7 @@ mod tests {
             assert!(editor.apply(Command::InsertClip {
                 track_id,
                 clip: Clip {
+                    transform: crate::timeline::Transform::default(),
                     id,
                     start_frame,
                     source_start_frame: 0,
@@ -1447,6 +1490,7 @@ mod tests {
             has_audio: true,
         })));
         let clip = Clip {
+            transform: crate::timeline::Transform::default(),
             id: 2,
             start_frame: 0,
             source_start_frame: 0,
@@ -1486,6 +1530,7 @@ mod tests {
         assert!(!editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Clip {
+                transform: crate::timeline::Transform::default(),
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1504,6 +1549,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Clip {
+                transform: crate::timeline::Transform::default(),
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1537,6 +1583,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Clip {
+                transform: crate::timeline::Transform::default(),
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1572,5 +1619,90 @@ mod tests {
         assert!(!editor.project().tracks()[2].clips[0].muted);
         assert!(editor.redo());
         assert!(editor.project().tracks()[2].clips[0].muted);
+    }
+
+    #[test]
+    fn media_transforms_validate_and_survive_history_and_split() {
+        use crate::timeline::Transform;
+        let mut editor = Editor::new(Project::new("Transforms"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "image.png".into(),
+            kind: MediaKind::Image,
+            duration_us: None,
+            has_audio: false
+        })));
+        let clip = Clip {
+            id: 1,
+            start_frame: 0,
+            source_start_frame: 0,
+            duration_frames: 30,
+            content: ClipContent::Media { media_id: 1 },
+            volume: 1.0,
+            muted: false,
+            linked_audio: false,
+            transform: Transform::default(),
+        };
+        assert!(editor.apply(Command::InsertClip { track_id: 0, clip }));
+        let change = |transform| Command::SetClipTransform {
+            track_id: 0,
+            clip_id: 1,
+            transform,
+        };
+        assert!(!editor.apply(change(Transform::default())));
+        for transform in [
+            Transform {
+                scale: 0.0,
+                ..Default::default()
+            },
+            Transform {
+                x: f32::INFINITY,
+                ..Default::default()
+            },
+            Transform {
+                crop_top: 0.5,
+                crop_bottom: 0.5,
+                ..Default::default()
+            },
+        ] {
+            assert!(!editor.apply(change(transform)));
+        }
+        assert!(!editor.apply(Command::SetClipTransform {
+            track_id: 2,
+            clip_id: 1,
+            transform: Transform {
+                scale: 0.5,
+                ..Default::default()
+            }
+        }));
+        let transformed = Transform {
+            scale: 0.5,
+            x: 0.1,
+            rotation: 90.0,
+            crop_left: 0.1,
+            opacity: 0.5,
+            ..Default::default()
+        };
+        assert!(editor.apply(change(transformed)));
+        assert!(editor.undo());
+        assert!(
+            editor.project().tracks()[0].clips[0]
+                .transform
+                .is_identity()
+        );
+        assert!(editor.redo());
+        assert_eq!(editor.project().tracks()[0].clips[0].transform, transformed);
+        assert!(editor.apply(Command::Split {
+            track_id: 0,
+            clip_id: 1,
+            at_frame: 15,
+            new_id: 2
+        }));
+        assert!(
+            editor.project().tracks()[0]
+                .clips
+                .iter()
+                .all(|c| c.transform == transformed)
+        );
     }
 }

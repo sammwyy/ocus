@@ -1222,6 +1222,7 @@ impl UiState {
                 };
                 if track.kind == TrackKind::Video {
                     sources.push(FrameSource {
+                        transform: crate::timeline::Transform::default(),
                         clip_id: clip.id,
                         path: media.path.clone(),
                         kind: media.kind,
@@ -1277,6 +1278,7 @@ impl UiState {
                 .iter()
                 .filter(|range| range.kind != MediaKind::Audio)
                 .map(|range| FrameSource {
+                    transform: crate::timeline::Transform::default(),
                     clip_id: 0,
                     path: range.path.clone(),
                     kind: range.kind,
@@ -3455,6 +3457,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id: 0,
                 clip: Clip {
+                    transform: crate::timeline::Transform::default(),
                     id: index,
                     start_frame: index * 30,
                     source_start_frame: index * 30,
@@ -4324,6 +4327,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 2,
             clip: Clip {
+                transform: crate::timeline::Transform::default(),
                 id: 0,
                 start_frame: 0,
                 source_start_frame: 0,

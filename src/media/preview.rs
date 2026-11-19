@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct FrameSource {
+    pub transform: crate::timeline::Transform,
     pub clip_id: u64,
     pub path: PathBuf,
     pub kind: MediaKind,
@@ -20,6 +21,7 @@ pub struct FrameSource {
 
 #[derive(Clone)]
 pub struct FrameImage {
+    pub picture: (u32, u32, u32, u32),
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
@@ -48,6 +50,7 @@ pub fn storyboard(
         vec![0, key.duration / 2, key.duration - 1]
     };
     let source = FrameSource {
+        transform: crate::timeline::Transform::default(),
         clip_id: 0,
         path: key.path.clone(),
         kind: key.kind,
@@ -128,6 +131,7 @@ impl VideoLayers {
         }
         self.retain(&active);
         Ok((!active.is_empty()).then_some(FrameImage {
+            picture: (0, 0, self.output.0, self.output.1),
             width: self.output.0,
             height: self.output.1,
             pixels,
@@ -385,6 +389,7 @@ impl FrameReader {
                 .copy_from_slice(&scaled.pixels[start..start + row_size]);
         }
         let image = Arc::new(FrameImage {
+            picture: (left as u32, top as u32, scaled.width, scaled.height),
             width: self.output.0,
             height: self.output.1,
             pixels,
@@ -509,6 +514,7 @@ mod tests {
                 .unwrap();
             assert!(reference.status.success());
             let source = FrameSource {
+                transform: crate::timeline::Transform::default(),
                 clip_id: 1,
                 path: path.clone(),
                 kind: MediaKind::Video,
@@ -545,6 +551,7 @@ mod tests {
         let root = PathBuf::from(std::env::var("OCUS_SEEK_FIXTURES").unwrap());
         for name in ["late", "zero"] {
             let source = FrameSource {
+                transform: crate::timeline::Transform::default(),
                 clip_id: 1,
                 path: root.join(format!("{name}.mp4")),
                 kind: MediaKind::Video,
@@ -592,6 +599,7 @@ mod tests {
         data.extend((0..8 * 6 * 3).map(|value| value as u8));
         fs::write(&path, data).unwrap();
         let source = FrameSource {
+            transform: crate::timeline::Transform::default(),
             clip_id: 1,
             path: path.clone(),
             kind: MediaKind::Image,
@@ -634,6 +642,7 @@ mod tests {
             );
             let frames = u64::from(fps.0 / fps.1);
             let source = FrameSource {
+                transform: crate::timeline::Transform::default(),
                 clip_id: 1,
                 path,
                 kind: MediaKind::Video,
@@ -693,6 +702,7 @@ mod tests {
                 .success()
         );
         let source = FrameSource {
+            transform: crate::timeline::Transform::default(),
             clip_id: 1,
             path: path.clone(),
             kind: MediaKind::Video,
@@ -763,6 +773,7 @@ mod tests {
                 (180, 320)
             };
             let source = FrameSource {
+                transform: crate::timeline::Transform::default(),
                 clip_id: 1,
                 path: path.clone(),
                 kind: MediaKind::Video,
@@ -819,6 +830,7 @@ mod tests {
             data.extend(vec![255; width * height * 3]);
             fs::write(&path, data).unwrap();
             let source = FrameSource {
+                transform: crate::timeline::Transform::default(),
                 clip_id: 1,
                 path: path.clone(),
                 kind: MediaKind::Image,
@@ -904,6 +916,7 @@ mod tests {
         ffmpeg::init().unwrap();
         let cancelled = Arc::new(AtomicBool::new(false));
         let source = FrameSource {
+            transform: crate::timeline::Transform::default(),
             clip_id: 1,
             path,
             kind: MediaKind::Video,
@@ -937,6 +950,7 @@ mod tests {
         }
         fs::write(&path, source).unwrap();
         let clips = [FrameSource {
+            transform: crate::timeline::Transform::default(),
             clip_id: 1,
             path: path.clone(),
             kind: MediaKind::Video,
@@ -1029,6 +1043,7 @@ mod tests {
         assert!(storyboard_frames[2].pixels[center] > 140);
         let cut = PreviewPlan {
             sources: vec![FrameSource {
+                transform: crate::timeline::Transform::default(),
                 clip_id: 2,
                 path: path.clone(),
                 kind: MediaKind::Video,

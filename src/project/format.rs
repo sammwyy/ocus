@@ -63,6 +63,7 @@ mod tests {
             has_audio: false,
         }]);
         fixture["tracks"][0]["clips"] = serde_json::json!([Clip {
+            transform: crate::timeline::Transform::default(),
             id: 8,
             start_frame: 0,
             source_start_frame: 24,
@@ -73,6 +74,7 @@ mod tests {
             linked_audio: false,
         }]);
         fixture["tracks"][1]["clips"] = serde_json::json!([Clip {
+            transform: crate::timeline::Transform::default(),
             id: 9,
             start_frame: 10,
             source_start_frame: 0,
@@ -155,6 +157,7 @@ mod tests {
         let mut document: serde_json::Value =
             serde_json::from_str(&to_json(&Project::new("Legacy title")).unwrap()).unwrap();
         let mut clip = serde_json::to_value(Clip {
+            transform: crate::timeline::Transform::default(),
             id: 1,
             start_frame: 0,
             source_start_frame: 0,
@@ -215,6 +218,7 @@ mod tests {
             has_audio: true,
         }]);
         let clip = Clip {
+            transform: crate::timeline::Transform::default(),
             id: 9,
             start_frame: 0,
             source_start_frame: 0,
@@ -229,6 +233,26 @@ mod tests {
         let project = from_json(&document.to_string()).unwrap();
         assert_eq!(from_json(&to_json(&project).unwrap()).unwrap(), project);
         assert!(!to_json(&project).unwrap().contains("linked_audio"));
+        assert!(!to_json(&project).unwrap().contains("transform"));
+        document["tracks"][0]["clips"][0]["transform"] =
+            serde_json::json!(crate::timeline::Transform {
+                scale: 0.5,
+                rotation: 90.0,
+                crop_left: 0.1,
+                opacity: 0.5,
+                ..Default::default()
+            });
+        let transformed = from_json(&document.to_string()).unwrap();
+        assert_eq!(
+            from_json(&to_json(&transformed).unwrap()).unwrap(),
+            transformed
+        );
+        document["tracks"][0]["clips"][0]["transform"]["opacity"] = serde_json::json!(2.0);
+        assert!(from_json(&document.to_string()).is_err());
+        document["tracks"][0]["clips"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("transform");
 
         document["tracks"][2]["clips"] = serde_json::json!([]);
         document["tracks"][0]["clips"][0]["linked_audio"] = serde_json::json!(true);

@@ -39,6 +39,8 @@ clip commands do not complete the corresponding editor workflows.
 - [x] Present video and still-image frames through CreamUI's GPU viewport.
 - [x] Composite overlapping video layers and titles consistently between
   preview and export.
+- [x] Transform video and still-image clips with scale, position, rotation,
+  crop and opacity through undoable Inspector controls and the shared compositor.
 
 ## Audio, titles, and export
 

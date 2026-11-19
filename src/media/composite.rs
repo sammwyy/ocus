@@ -9,6 +9,85 @@ use std::sync::atomic::AtomicBool;
 use swash::scale::{Render, ScaleContext, Source, image::Image};
 use swash::zeno::{Format, Join, Stroke};
 
+fn draw_transformed(
+    dst: &mut [u8],
+    width: u32,
+    height: u32,
+    image: &FrameImage,
+    t: crate::timeline::Transform,
+) {
+    let (left, top, pw, ph) = image.picture;
+    let cx = left as f32 + pw as f32 / 2.0;
+    let cy = top as f32 + ph as f32 / 2.0;
+    let x0 = left as f32 + pw as f32 * t.crop_left;
+    let x1 = left as f32 + pw as f32 * (1.0 - t.crop_right);
+    let y0 = top as f32 + ph as f32 * t.crop_top;
+    let y1 = top as f32 + ph as f32 * (1.0 - t.crop_bottom);
+    let (sin, cos) = t.rotation.to_radians().sin_cos();
+    let ox = cx + t.x * width as f32;
+    let oy = cy + t.y * height as f32;
+    let mut bounds = [
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    ];
+    for (x, y) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
+        let x = (x - cx) * t.scale;
+        let y = (y - cy) * t.scale;
+        let (x, y) = (ox + cos * x - sin * y, oy + sin * x + cos * y);
+        bounds[0] = bounds[0].min(x);
+        bounds[1] = bounds[1].min(y);
+        bounds[2] = bounds[2].max(x);
+        bounds[3] = bounds[3].max(y);
+    }
+    for y in
+        (bounds[1].floor().max(0.0) as u32)..(bounds[3].ceil().min(height as f32).max(0.0) as u32)
+    {
+        for x in (bounds[0].floor().max(0.0) as u32)
+            ..(bounds[2].ceil().min(width as f32).max(0.0) as u32)
+        {
+            let dx = x as f32 + 0.5 - ox;
+            let dy = y as f32 + 0.5 - oy;
+            let sx = cx + (cos * dx + sin * dy) / t.scale;
+            let sy = cy + (-sin * dx + cos * dy) / t.scale;
+            if sx < x0 || sx >= x1 || sy < y0 || sy >= y1 {
+                continue;
+            }
+            let fx = (sx - 0.5).clamp(left as f32, (left + pw - 1) as f32);
+            let fy = (sy - 0.5).clamp(top as f32, (top + ph - 1) as f32);
+            let ix = fx.floor() as u32;
+            let iy = fy.floor() as u32;
+            let mut sample = [0.0; 4];
+            for (px, wx) in [
+                (ix, 1.0 - (fx - ix as f32)),
+                ((ix + 1).min(left + pw - 1), fx - ix as f32),
+            ] {
+                for (py, wy) in [
+                    (iy, 1.0 - (fy - iy as f32)),
+                    ((iy + 1).min(top + ph - 1), fy - iy as f32),
+                ] {
+                    let p = ((py * image.width + px) * 4) as usize;
+                    let a = image.pixels[p + 3] as f32 / 255.0;
+                    for (c, v) in sample.iter_mut().enumerate() {
+                        *v += image.pixels[p + c] as f32 * wx * wy * if c == 3 { 1.0 } else { a };
+                    }
+                }
+            }
+            let alpha = sample[3];
+            let mut rgba = [0; 4];
+            if alpha > 0.0 {
+                for c in 0..3 {
+                    rgba[c] = (sample[c] * 255.0 / alpha).round() as u8;
+                }
+            }
+            rgba[3] = (alpha * t.opacity).round() as u8;
+            let p = ((y * width + x) * 4) as usize;
+            blend(&mut dst[p..p + 4], &rgba);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct VisualPlan {
     tracks: Vec<Vec<VisualClip>>,
@@ -46,6 +125,7 @@ impl VisualPlan {
                             let media =
                                 project.media().iter().find(|media| media.id == *media_id)?;
                             Some(VisualClip::Media(FrameSource {
+                                transform: clip.transform,
                                 clip_id: clip.id,
                                 path: media.path.clone(),
                                 kind: media.kind,
@@ -98,7 +178,7 @@ pub struct Compositor {
 }
 
 enum Layer<'a> {
-    Media(Arc<FrameImage>),
+    Media(Arc<FrameImage>, crate::timeline::Transform),
     Title(&'a Title),
 }
 
@@ -135,7 +215,8 @@ impl Compositor {
                         visible = true;
                         active.push(source.clip_id);
                         let image = self.layers.layer_at(source, position, cancelled)?;
-                        let opaque = image.width == self.width
+                        let opaque = source.transform.is_identity()
+                            && image.width == self.width
                             && image.height == self.height
                             && image.pixels.len() == pixels.len()
                             && image
@@ -144,7 +225,7 @@ impl Compositor {
                                 .0
                                 .iter()
                                 .all(|pixel| pixel[3] == 255);
-                        pending.push(Layer::Media(image));
+                        pending.push(Layer::Media(image, source.transform));
                         if opaque {
                             break 'layers;
                         }
@@ -164,7 +245,11 @@ impl Compositor {
         }
         for layer in pending.into_iter().rev() {
             match layer {
-                Layer::Media(image) => {
+                Layer::Media(image, transform) => {
+                    if !transform.is_identity() {
+                        draw_transformed(&mut pixels, self.width, self.height, &image, transform);
+                        continue;
+                    }
                     for (dest, src) in pixels
                         .as_chunks_mut::<4>()
                         .0
@@ -188,6 +273,7 @@ impl Compositor {
         }
         self.layers.retain(&active);
         Ok(visible.then_some(FrameImage {
+            picture: (0, 0, self.width, self.height),
             width: self.width,
             height: self.height,
             pixels,
@@ -413,6 +499,7 @@ mod tests {
         let plan = VisualPlan {
             resolution: (1920, 1080),
             tracks: vec![vec![VisualClip::Media(FrameSource {
+                transform: crate::timeline::Transform::default(),
                 clip_id: 1,
                 path,
                 kind: MediaKind::Image,
@@ -460,6 +547,7 @@ mod tests {
             let plan = VisualPlan {
                 resolution: (1920, 1080),
                 tracks: vec![vec![VisualClip::Media(FrameSource {
+                    transform: crate::timeline::Transform::default(),
                     clip_id: 1,
                     path,
                     kind: MediaKind::Video,
@@ -501,6 +589,10 @@ mod tests {
                     if source.start <= position && position - source.start < source.duration =>
                 {
                     let image = layers.layer_at(source, position, &cancelled).unwrap();
+                    if !source.transform.is_identity() {
+                        draw_transformed(&mut pixels, width, height, &image, source.transform);
+                        continue;
+                    }
                     for (dest, src) in pixels
                         .as_chunks_mut::<4>()
                         .0
@@ -552,6 +644,7 @@ mod tests {
         let transparent = fixture("transparent.tga", 16, 9, 0);
         let source = |id, path| {
             VisualClip::Media(FrameSource {
+                transform: crate::timeline::Transform::default(),
                 clip_id: id,
                 path,
                 kind: MediaKind::Image,
@@ -570,10 +663,37 @@ mod tests {
                 ..Title::default()
             },
         };
+        let transformed = |transform| {
+            let mut clip = source(1, opaque.clone());
+            if let VisualClip::Media(source) = &mut clip {
+                source.transform = transform;
+            }
+            (vec![vec![source(0, opaque.clone())], vec![clip]], 2)
+        };
         let stacked: Vec<_> = (0..10).map(|id| vec![source(id, opaque.clone())]).collect();
         let mut titled = stacked.clone();
         titled.push(vec![title.clone()]);
         let scenarios = [
+            transformed(crate::timeline::Transform {
+                scale: 0.5,
+                ..Default::default()
+            }),
+            transformed(crate::timeline::Transform {
+                x: 0.2,
+                ..Default::default()
+            }),
+            transformed(crate::timeline::Transform {
+                rotation: 90.0,
+                ..Default::default()
+            }),
+            transformed(crate::timeline::Transform {
+                crop_left: 0.2,
+                ..Default::default()
+            }),
+            transformed(crate::timeline::Transform {
+                opacity: 0.5,
+                ..Default::default()
+            }),
             (stacked, 1),
             (titled, 1),
             (
@@ -735,6 +855,7 @@ mod tests {
         .unwrap();
         let source = |id, path| {
             VisualClip::Media(FrameSource {
+                transform: crate::timeline::Transform::default(),
                 clip_id: id,
                 path,
                 kind: MediaKind::Image,
@@ -856,5 +977,110 @@ mod tests {
         fs::remove_file(red).unwrap();
         fs::remove_file(blue).unwrap();
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod transform_pixels {
+    use super::*;
+    use crate::timeline::Transform;
+
+    #[test]
+    fn scale_offset_rotation_crop_and_opacity() {
+        let image = FrameImage {
+            picture: (0, 0, 4, 4),
+            width: 4,
+            height: 4,
+            pixels: (0..16)
+                .flat_map(|i| {
+                    if i < 8 {
+                        [255, 0, 0, 255]
+                    } else {
+                        [0, 255, 0, 255]
+                    }
+                })
+                .collect(),
+        };
+        let render = |t| {
+            let mut dst = [0, 0, 255, 255].repeat(16);
+            draw_transformed(&mut dst, 4, 4, &image, t);
+            dst
+        };
+        let scaled = render(Transform {
+            scale: 0.5,
+            ..Default::default()
+        });
+        assert_eq!(&scaled[..4], &[0, 0, 255, 255]);
+        assert_eq!(&scaled[20..24], &[255, 0, 0, 255]);
+        let moved = render(Transform {
+            x: 0.5,
+            ..Default::default()
+        });
+        assert_eq!(&moved[..4], &[0, 0, 255, 255]);
+        assert_eq!(&moved[8..12], &[255, 0, 0, 255]);
+        let rotated = render(Transform {
+            rotation: 90.0,
+            ..Default::default()
+        });
+        assert_eq!(&rotated[..4], &[0, 255, 0, 255]);
+        assert_eq!(&rotated[12..16], &[255, 0, 0, 255]);
+        let cropped = render(Transform {
+            crop_left: 0.5,
+            ..Default::default()
+        });
+        assert_eq!(&cropped[..4], &[0, 0, 255, 255]);
+        assert_eq!(&cropped[8..12], &[255, 0, 0, 255]);
+        let faded = render(Transform {
+            opacity: 0.5,
+            ..Default::default()
+        });
+        assert_eq!(&faded[..4], &[128, 0, 127, 255]);
+        assert_eq!(render(Transform::default()), image.pixels);
+        let mut black = [0, 0, 0, 255].repeat(16);
+        draw_transformed(
+            &mut black,
+            4,
+            4,
+            &image,
+            Transform {
+                scale: 0.5,
+                ..Default::default()
+            },
+        );
+        assert_eq!(&black[..4], &[0, 0, 0, 255]);
+        assert_eq!(
+            render(Transform {
+                opacity: 0.0,
+                ..Default::default()
+            }),
+            [0, 0, 255, 255].repeat(16)
+        );
+        let fitted = FrameImage {
+            width: 4,
+            height: 4,
+            picture: (1, 0, 2, 4),
+            pixels: (0..16)
+                .flat_map(|i| {
+                    if i % 4 == 1 || i % 4 == 2 {
+                        [255, 0, 0, 255]
+                    } else {
+                        [0, 0, 0, 0]
+                    }
+                })
+                .collect(),
+        };
+        let mut dst = [0, 0, 255, 255].repeat(16);
+        draw_transformed(
+            &mut dst,
+            4,
+            4,
+            &fitted,
+            Transform {
+                crop_left: 0.5,
+                ..Default::default()
+            },
+        );
+        assert_eq!(&dst[4..8], &[0, 0, 255, 255]);
+        assert_eq!(&dst[8..12], &[255, 0, 0, 255]);
     }
 }

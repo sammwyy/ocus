@@ -233,6 +233,7 @@ pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Op
     Some((
         track.id,
         Clip {
+            transform: crate::timeline::Transform::default(),
             id,
             start_frame,
             source_start_frame: 0,
@@ -372,6 +373,7 @@ pub(crate) fn insert_media(
         None => track.clips.iter().map(clip_end).max().unwrap_or(0),
     };
     let clip = Clip {
+        transform: crate::timeline::Transform::default(),
         id: next_clip_id(project).ok_or("Clip ID limit reached")?,
         start_frame: start,
         source_start_frame: 0,
@@ -570,6 +572,7 @@ mod tests {
 
     fn title(id: u64, start_frame: u64) -> Clip {
         Clip {
+            transform: crate::timeline::Transform::default(),
             id,
             start_frame,
             source_start_frame: 0,

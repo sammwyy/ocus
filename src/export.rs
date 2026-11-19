@@ -796,7 +796,7 @@ impl AudioEncoder {
                     if let Some(right) = queue.pop() {
                         break right;
                     }
-                    if queue.is_done() {
+                    if queue.is_drained() {
                         return Err("Incomplete stereo audio".into());
                     }
                     thread::yield_now();
@@ -806,7 +806,7 @@ impl AudioEncoder {
                 if self.pending.len() == self.chunk_samples * 2 {
                     self.encode(output)?;
                 }
-            } else if queue.is_done() {
+            } else if queue.is_drained() {
                 return Err("Audio ended before the timeline".into());
             } else {
                 thread::yield_now();
@@ -1052,6 +1052,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                speed: 1.0,
                 transform: crate::timeline::Transform::default(),
                 noise_reduction: false,
                 lut: None,
@@ -1261,6 +1262,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 color: Default::default(),
                 lut: None,
@@ -1370,6 +1372,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 color: Default::default(),
                 transition: None,
                 transition_out: None,
@@ -1528,6 +1531,7 @@ mod tests {
                 content: ClipContent::Title(Title::default()),
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 color: Default::default(),
                 transition: None,
                 transition_out: None,
@@ -1606,6 +1610,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 color: Default::default(),
                 transition: None,
                 transition_out: None,
@@ -1730,6 +1735,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 2 },
                 volume: 0.5,
                 muted: false,
+                speed: 1.0,
                 color: Default::default(),
                 transition: None,
                 transition_out: None,
@@ -1803,6 +1809,7 @@ mod tests {
             content: ClipContent::Media { media_id: 1 },
             volume: 1.0,
             muted: false,
+            speed: 1.0,
             color: Default::default(),
             transition: None,
             transition_out: None,
@@ -1822,6 +1829,7 @@ mod tests {
             content: ClipContent::Media { media_id: 3 },
             volume: 1.0,
             muted: false,
+            speed: 1.0,
             color: Default::default(),
             transition: None,
             transition_out: None,
@@ -1854,6 +1862,7 @@ mod tests {
                 }),
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 color: Default::default(),
                 transition: None,
                 transition_out: None,
@@ -1968,6 +1977,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 color: Default::default(),
                 transition: None,
                 transition_out: None,
@@ -2057,6 +2067,7 @@ mod tests {
                 }),
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 color: Default::default(),
                 transition: None,
                 transition_out: None,
@@ -2226,6 +2237,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 color: Default::default(),
                 transition: None,
                 transition_out: None,
@@ -2356,6 +2368,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 color: Default::default(),
                 transition: None,
                 transition_out: None,

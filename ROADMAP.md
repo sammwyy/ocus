@@ -108,7 +108,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 
 ### v0.5: Timeline and motion
 - [x] Transitions: fade, dissolve, slide
-- [ ] Speed control from 0.25x to 4x
+- [x] Speed control from 0.25x to 4x
 - [ ] Reverse clip and freeze frame
 - [x] Transforms: scale, position, rotation, crop, opacity
 - [x] Picture-in-picture

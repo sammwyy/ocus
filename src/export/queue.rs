@@ -270,6 +270,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 id: 1,
                 start_frame: 0,

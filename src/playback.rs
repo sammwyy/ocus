@@ -71,7 +71,7 @@ impl Iterator for QueueSource {
         match self.queue.pop() {
             Some(sample) => Some(sample),
             None => {
-                if self.queue.is_done() {
+                if self.queue.is_drained() {
                     self.queue.note_played();
                 }
                 Some(0.0)

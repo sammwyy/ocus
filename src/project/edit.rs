@@ -146,6 +146,11 @@ pub enum Command {
         volume: f32,
         muted: bool,
     },
+    SetClipSpeed {
+        track_id: u64,
+        clip_id: u64,
+        speed: f64,
+    },
     SetClipFades {
         track_id: u64,
         clip_id: u64,
@@ -333,6 +338,7 @@ pub fn freeze_at(project: &Project, track_id: u64, clip_id: u64, frame: u64) -> 
         .iter_mut()
         .find(|c| c.id == if offset == 0 { clip_id } else { new_id })?;
     right.playback = Playback::Freeze;
+    right.speed = 1.0;
     right.source_start_frame = held;
     Some(Command::ReplaceTracks(tracks))
 }
@@ -373,6 +379,7 @@ pub(crate) fn trim_edge(
                 media.duration_us.map(|duration| {
                     (u128::from(duration) * u128::from(project.settings().frame_rate.numerator)
                         / (1_000_000 * u128::from(project.settings().frame_rate.denominator)))
+                    .max(u128::from(duration > 0))
                     .min(u128::from(u64::MAX)) as u64
                 })
             }),
@@ -390,11 +397,12 @@ pub(crate) fn trim_edge(
             let extension = if clip.playback == Playback::Reverse {
                 available
                     .unwrap_or(u64::MAX)
-                    .saturating_sub(clip.source_start_frame + clip.duration_frames)
+                    .saturating_sub(clip.source_start_frame + clip.source_span())
             } else {
                 clip.source_start_frame
             };
-            clip.start_frame.saturating_sub(extension)
+            clip.start_frame
+                .saturating_sub(clip.timeline_span(extension))
         } else {
             0
         }
@@ -404,19 +412,22 @@ pub(crate) fn trim_edge(
             clip.source_start_frame
         } else if start >= clip.start_frame {
             clip.source_start_frame
-                .saturating_add(start - clip.start_frame)
+                .saturating_add(clip.source_offset(start - clip.start_frame))
         } else {
             clip.source_start_frame
-                .saturating_sub(clip.start_frame - start)
+                .saturating_sub(clip.source_offset(clip.start_frame - start))
         };
         (start, source, end - start)
     } else {
         let maximum = if clip.playback == Playback::Reverse {
-            end.saturating_add(clip.source_start_frame)
+            clip.start_frame.saturating_add(
+                clip.timeline_span(clip.source_start_frame.checked_add(clip.source_span())?),
+            )
         } else {
             available.map_or(u64::MAX, |frames| {
-                clip.start_frame
-                    .saturating_add(frames.saturating_sub(clip.source_start_frame))
+                clip.start_frame.saturating_add(
+                    clip.timeline_span(frames.saturating_sub(clip.source_start_frame)),
+                )
             })
         }
         .min(next);
@@ -424,8 +435,8 @@ pub(crate) fn trim_edge(
         (
             clip.start_frame,
             if clip.playback == Playback::Reverse {
-                (clip.source_start_frame + clip.duration_frames)
-                    .checked_sub(end - clip.start_frame)?
+                (clip.source_start_frame + clip.source_span())
+                    .checked_sub(((end - clip.start_frame) as f64 * clip.speed).ceil() as u64)?
             } else {
                 clip.source_start_frame
             },
@@ -457,6 +468,7 @@ mod playback_tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                speed: 1.0,
                 transform: crate::timeline::Transform::default(),
                 noise_reduction: false,
                 lut: None,
@@ -496,6 +508,7 @@ mod playback_tests {
             assert!(editor.apply(Command::InsertClip {
                 track_id: 1,
                 clip: Clip {
+                    speed: 1.0,
                     transform: crate::timeline::Transform::default(),
                     noise_reduction: false,
                     lut: None,
@@ -714,6 +727,7 @@ mod playback_tests {
         }));
         let mut tracks = editor.project().tracks().to_vec();
         tracks[1].clips.push(Clip {
+            speed: 1.0,
             transform: crate::timeline::Transform::default(),
             noise_reduction: false,
             lut: None,
@@ -750,6 +764,16 @@ impl Editor {
 
     pub fn project(&self) -> &Project {
         &self.project
+    }
+
+    pub fn can_set_clip_speed(&self, track_id: u64, clip_id: u64, speed: f64) -> bool {
+        Self::new(self.project.clone())
+            .execute(Command::SetClipSpeed {
+                track_id,
+                clip_id,
+                speed,
+            })
+            .is_some()
     }
 
     pub fn recovered(project: Project) -> Self {
@@ -791,6 +815,7 @@ impl Editor {
             | Command::RemoveClip { track_id, .. }
             | Command::Split { track_id, .. }
             | Command::Trim { track_id, .. }
+            | Command::SetClipSpeed { track_id, .. }
             | Command::SetClipAudio { track_id, .. }
             | Command::SetClipColor { track_id, .. }
             | Command::SetPlayback { track_id, .. }
@@ -839,6 +864,7 @@ impl Editor {
                 }
                 if playback == Playback::Freeze {
                     clip.source_start_frame = clip.source_frame_at(0)?;
+                    clip.speed = 1.0;
                 } else if clip.playback == Playback::Freeze {
                     let ClipContent::Media { media_id } = clip.content else {
                         return None;
@@ -953,7 +979,7 @@ impl Editor {
                         .checked_add(if clip.playback == Playback::Freeze {
                             0
                         } else {
-                            clip.duration_frames
+                            clip.source_span()
                         })
                         .is_none()
                     || !clip.transform.valid()
@@ -980,6 +1006,7 @@ impl Editor {
                     ClipContent::Title(title) => {
                         kind == TrackKind::Video
                             && title.valid()
+                            && clip.speed == 1.0
                             && clip.playback == Playback::Forward
                     }
                     ClipContent::Media { media_id } => {
@@ -1336,6 +1363,59 @@ impl Editor {
                 clip.volume = volume;
                 clip.muted = muted;
                 Some(inverse)
+            }
+            Command::SetClipSpeed {
+                track_id,
+                clip_id,
+                speed,
+            } => {
+                if !speed.is_finite() || !(0.25..=4.0).contains(&speed) {
+                    return None;
+                }
+                let mut tracks = self.project.tracks.clone();
+                let track = tracks.iter_mut().find(|track| track.id == track_id)?;
+                let index = track.clips.iter().position(|clip| clip.id == clip_id)?;
+                let next = track
+                    .clips
+                    .iter()
+                    .filter(|clip| clip.start_frame > track.clips[index].start_frame)
+                    .map(|clip| clip.start_frame)
+                    .min()
+                    .unwrap_or(u64::MAX);
+                let clip = &mut track.clips[index];
+                let ClipContent::Media { media_id } = clip.content else {
+                    return None;
+                };
+                let media = self
+                    .project
+                    .media
+                    .iter()
+                    .find(|media| media.id == media_id)?;
+                if media.kind == MediaKind::Image
+                    || clip.playback == Playback::Freeze
+                    || clip.speed == speed
+                {
+                    return None;
+                }
+                let source_end = clip.source_start_frame.checked_add(clip.source_span())?;
+                let duration = (clip.duration_frames as f64 * clip.speed / speed).round() as u64;
+                clip.speed = speed;
+                clip.duration_frames = duration.max(1).min(next - clip.start_frame);
+                if clip.playback == Playback::Reverse {
+                    clip.duration_frames = clip.duration_frames.min(clip.timeline_span(source_end));
+                    clip.source_start_frame = source_end.checked_sub(clip.source_span())?;
+                } else if let Some(duration_us) = media.duration_us {
+                    let rate = &self.project.settings.frame_rate;
+                    let frames = (u128::from(duration_us) * u128::from(rate.numerator)
+                        / (1_000_000 * u128::from(rate.denominator)))
+                    .max(1)
+                    .min(u128::from(u64::MAX)) as u64;
+                    clip.duration_frames = clip
+                        .duration_frames
+                        .min(clip.timeline_span(frames.saturating_sub(clip.source_start_frame)));
+                }
+                clip.clamp_fades();
+                self.execute(Command::ReplaceTracks(tracks))
             }
             Command::SetSubtitleStyle { track_id, style } => {
                 if !style.valid() {
@@ -1726,6 +1806,7 @@ mod tests {
         use crate::timeline::{Clip, ClipContent, Title};
         let mut editor = Editor::new(Project::new("Locked"));
         let clip = Clip {
+            speed: 1.0,
             playback: Playback::Forward,
             lut: None,
             color: ColorAdjust::default(),
@@ -1860,6 +1941,403 @@ mod tests {
     }
     use super::*;
 
+    fn speed_project() -> Project {
+        let mut value = serde_json::to_value(Project::new("Speed")).unwrap();
+        value["media"] = serde_json::json!([{
+            "id": 1, "path": "video.mp4", "kind": "video", "duration_us": 10_000_000,
+            "has_audio": true
+        }]);
+        value["tracks"][0]["clips"] = serde_json::json!([{
+            "id": 1, "start_frame": 10, "source_start_frame": 30, "duration_frames": 60,
+            "content": {"media": {"media_id": 1}}, "volume": 1.0, "muted": false,
+            "linked_audio": true
+        }]);
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn reverse_speed_split_trim_ripple_and_gap_keep_playback_source_ranges() {
+        for speed in [0.5, 2.0] {
+            let mut editor = Editor::new(speed_project());
+            assert!(editor.apply(Command::SetPlayback {
+                track_id: 0,
+                clip_id: 1,
+                playback: Playback::Reverse,
+            }));
+            assert!(editor.apply(Command::SetClipSpeed {
+                track_id: 0,
+                clip_id: 1,
+                speed
+            }));
+            let before = editor.project().clone();
+            let original = before.tracks()[0].clips[0].clone();
+            let frames: Vec<_> = (0..original.duration_frames)
+                .map(|offset| original.source_frame_at(offset).unwrap())
+                .collect();
+            assert_eq!(frames[0], 89);
+            assert_eq!(original.source_frame_at(original.duration_frames), None);
+            assert!(
+                original
+                    .source_start_for_range(original.duration_frames, 1)
+                    .is_none()
+            );
+            assert!(editor.apply(Command::Split {
+                track_id: 0,
+                clip_id: 1,
+                at_frame: original.start_frame + original.duration_frames / 2,
+                new_id: 2,
+            }));
+            let split_frames: Vec<_> = editor.project().tracks()[0]
+                .clips
+                .iter()
+                .flat_map(|clip| {
+                    (0..clip.duration_frames).map(|offset| clip.source_frame_at(offset).unwrap())
+                })
+                .collect();
+            assert_eq!(split_frames, frames);
+            assert!(editor.undo());
+            assert_eq!(editor.project(), &before);
+            for left in [false, true] {
+                let frame = if left {
+                    original.start_frame + 4
+                } else {
+                    original.start_frame + original.duration_frames - 4
+                };
+                assert!(editor.apply(trim_edge(editor.project(), 0, 1, left, frame).unwrap()));
+                let clip = &editor.project().tracks()[0].clips[0];
+                let trimmed: Vec<_> = (0..clip.duration_frames)
+                    .map(|offset| clip.source_frame_at(offset).unwrap())
+                    .collect();
+                assert_eq!(
+                    trimmed,
+                    if left {
+                        &frames[4..]
+                    } else {
+                        &frames[..frames.len() - 4]
+                    }
+                );
+                assert!(editor.undo());
+                assert_eq!(editor.project(), &before);
+            }
+            let mut tracks = before.tracks().to_vec();
+            let mut cut = original.clone();
+            cut.id = 99;
+            cut.start_frame += 4;
+            cut.duration_frames = 4;
+            tracks[1].clips.push(cut);
+            assert!(editor.apply(Command::ReplaceTracks(tracks)));
+            assert!(editor.apply(Command::RippleDelete {
+                track_id: 1,
+                clip_id: 99
+            }));
+            let remaining: Vec<_> = editor.project().tracks()[0]
+                .clips
+                .iter()
+                .flat_map(|clip| {
+                    (0..clip.duration_frames).map(|offset| clip.source_frame_at(offset).unwrap())
+                })
+                .collect();
+            assert_eq!(remaining, [&frames[..4], &frames[8..]].concat());
+            assert!(editor.undo());
+            assert!(editor.undo());
+            let mut tracks = before.tracks().to_vec();
+            let mut next = original.clone();
+            next.id = 2;
+            next.start_frame += original.duration_frames;
+            tracks[0].clips.push(next);
+            assert!(editor.apply(Command::ReplaceTracks(tracks)));
+            assert!(editor.apply(Command::SetClipSpeed {
+                track_id: 0,
+                clip_id: 1,
+                speed: speed / 2.0
+            }));
+            let clamped = &editor.project().tracks()[0].clips[0];
+            assert_eq!(clamped.duration_frames, original.duration_frames);
+            assert_eq!(clamped.source_frame_at(0), Some(89));
+            assert_eq!(clamped.source_start_frame + clamped.source_span(), 90);
+            editor.project().validate().unwrap();
+            let freeze = freeze_at(editor.project(), 0, 1, clamped.start_frame + 4).unwrap();
+            assert!(editor.apply(freeze));
+            assert_eq!(editor.project().tracks()[0].clips[1].speed, 1.0);
+        }
+    }
+
+    #[test]
+    fn media_speed_keeps_subtitle_timeline_timing_and_export_unchanged() {
+        let mut editor = Editor::new(speed_project());
+        let cues = crate::subtitles::parse("1\n00:00:00,500 --> 00:00:01,500\nCaption\n").unwrap();
+        let subtitles = crate::subtitles::track(editor.project(), &cues).unwrap();
+        assert!(subtitles.clips.iter().all(|clip| clip.speed == 1.0));
+        let mut tracks = editor.project().tracks().to_vec();
+        tracks.push(subtitles.clone());
+        assert!(editor.apply(Command::ReplaceTracks(tracks)));
+        let before = editor.project().clone();
+        let srt = crate::subtitles::write(&before).unwrap();
+        assert!(editor.apply(Command::SetClipSpeed {
+            track_id: 0,
+            clip_id: 1,
+            speed: 2.0,
+        }));
+        assert_eq!(editor.project().tracks().last().unwrap(), &subtitles);
+        assert_eq!(crate::subtitles::write(editor.project()).unwrap(), srt);
+        assert!(!editor.apply(Command::SetClipSpeed {
+            track_id: subtitles.id,
+            clip_id: subtitles.clips[0].id,
+            speed: 2.0,
+        }));
+        assert!(editor.undo());
+        assert_eq!(editor.project(), &before);
+    }
+
+    #[test]
+    fn speed_availability_matches_commands_without_changing_history() {
+        let original = speed_project();
+        let editor = Editor::new(original.clone());
+        for (track_id, clip_id, speed) in [
+            (0, 1, 0.25),
+            (0, 1, 2.0),
+            (0, 1, 1.0),
+            (0, 1, 0.0),
+            (0, 1, f64::NAN),
+            (0, 99, 2.0),
+            (99, 1, 2.0),
+        ] {
+            let mut trial = Editor::new(original.clone());
+            assert_eq!(
+                editor.can_set_clip_speed(track_id, clip_id, speed),
+                trial.apply(Command::SetClipSpeed {
+                    track_id,
+                    clip_id,
+                    speed
+                }),
+            );
+        }
+        assert_eq!(editor.project(), &original);
+        assert!(!editor.can_undo());
+        assert!(!editor.can_redo());
+    }
+
+    #[test]
+    fn speed_preserves_source_span_and_undo_restores_exact_duration() {
+        for (speed, duration) in [(0.25, 240), (0.5, 120), (1.5, 40), (2.0, 30), (4.0, 15)] {
+            let original = speed_project();
+            let mut editor = Editor::new(original.clone());
+            assert!(editor.apply(Command::SetClipSpeed {
+                track_id: 0,
+                clip_id: 1,
+                speed
+            }));
+            let clip = &editor.project().tracks()[0].clips[0];
+            assert_eq!(
+                (
+                    clip.start_frame,
+                    clip.source_start_frame,
+                    clip.duration_frames
+                ),
+                (10, 30, duration)
+            );
+            assert_eq!(clip.source_span(), 60);
+            assert!(clip.linked_audio);
+            assert!(editor.undo());
+            assert_eq!(editor.project(), &original);
+            assert!(editor.redo());
+            assert_eq!(editor.project().tracks()[0].clips[0].speed, speed);
+        }
+    }
+
+    #[test]
+    fn speed_keeps_transitions_and_clamps_timeline_fades_with_undo() {
+        let mut original = speed_project();
+        let clip = &mut original.tracks[0].clips[0];
+        clip.lut = Some("look.cube".into());
+        clip.color = ColorAdjust {
+            brightness: 0.25,
+            contrast: 1.5,
+            saturation: 0.5,
+        };
+        clip.fade_in_frames = 20;
+        clip.fade_out_frames = 30;
+        clip.transition = Some(Transition {
+            kind: crate::timeline::TransitionKind::Dissolve,
+            duration_frames: 10,
+            direction: crate::timeline::SlideDirection::Left,
+        });
+        clip.transition_out = Some(Transition {
+            kind: crate::timeline::TransitionKind::Slide,
+            duration_frames: 10,
+            direction: crate::timeline::SlideDirection::Down,
+        });
+        for (speed, fades) in [(0.5, (20, 30)), (2.0, (20, 10)), (4.0, (15, 0))] {
+            let mut editor = Editor::new(original.clone());
+            assert!(editor.apply(Command::SetClipSpeed {
+                track_id: 0,
+                clip_id: 1,
+                speed
+            }));
+            let clip = &editor.project().tracks()[0].clips[0];
+            assert_eq!((clip.fade_in_frames, clip.fade_out_frames), fades);
+            assert_eq!(clip.transition, original.tracks[0].clips[0].transition);
+            assert_eq!(
+                clip.transition_out,
+                original.tracks[0].clips[0].transition_out
+            );
+            assert_eq!(clip.color, original.tracks[0].clips[0].color);
+            assert_eq!(clip.lut, original.tracks[0].clips[0].lut);
+            editor.project().validate().unwrap();
+            assert!(editor.undo());
+            assert_eq!(editor.project(), &original);
+        }
+    }
+
+    #[test]
+    fn locked_tracks_reject_speed_changes() {
+        let mut editor = Editor::new(speed_project());
+        assert!(editor.apply(Command::SetTrackLocked {
+            track_id: 0,
+            locked: true,
+        }));
+        let locked = editor.project().clone();
+        assert!(!editor.apply(Command::SetClipSpeed {
+            track_id: 0,
+            clip_id: 1,
+            speed: 2.0,
+        }));
+        assert_eq!(editor.project(), &locked);
+        assert!(editor.undo());
+        assert!(editor.apply(Command::SetClipSpeed {
+            track_id: 0,
+            clip_id: 1,
+            speed: 2.0,
+        }));
+    }
+
+    #[test]
+    fn speed_clamps_to_gap_and_rejects_invalid_or_empty_targets() {
+        let mut project = speed_project();
+        let mut next = project.tracks[0].clips[0].clone();
+        next.id = 2;
+        next.start_frame = 100;
+        project.tracks[0].clips.push(next);
+        let mut editor = Editor::new(project.clone());
+        for speed in [0.0, -1.0, 0.249, 4.001, f64::NAN, f64::INFINITY, 1.0] {
+            assert!(!editor.apply(Command::SetClipSpeed {
+                track_id: 0,
+                clip_id: 1,
+                speed
+            }));
+            assert_eq!(editor.project(), &project);
+        }
+        assert!(!editor.apply(Command::SetClipSpeed {
+            track_id: 0,
+            clip_id: 99,
+            speed: 2.0
+        }));
+        assert!(editor.apply(Command::SetClipSpeed {
+            track_id: 0,
+            clip_id: 1,
+            speed: 0.5
+        }));
+        assert_eq!(editor.project().tracks()[0].clips[0].duration_frames, 90);
+        assert!(editor.undo());
+        assert_eq!(editor.project(), &project);
+    }
+
+    #[test]
+    fn speed_rounds_duration_without_extending_past_media_end() {
+        let mut project = speed_project();
+        project.tracks[0].clips[0].duration_frames = 31;
+        let mut editor = Editor::new(project.clone());
+        assert!(editor.apply(Command::SetClipSpeed {
+            track_id: 0,
+            clip_id: 1,
+            speed: 2.0
+        }));
+        assert_eq!(editor.project().tracks()[0].clips[0].duration_frames, 16);
+        project.tracks[0].clips[0].source_start_frame = 270;
+        project.tracks[0].clips[0].duration_frames = 30;
+        let mut editor = Editor::new(project);
+        assert!(editor.apply(Command::SetClipSpeed {
+            track_id: 0,
+            clip_id: 1,
+            speed: 4.0
+        }));
+        assert_eq!(editor.project().tracks()[0].clips[0].duration_frames, 7);
+        assert!(editor.project().validate().is_ok());
+    }
+
+    #[test]
+    fn split_and_both_trim_edges_use_source_speed() {
+        let mut project = speed_project();
+        project.tracks[0].clips[0].speed = 2.0;
+        let tracks = split_tracks(project.tracks(), &[(0, 1)], 25, 2).unwrap();
+        assert_eq!(tracks[0].clips[1].source_start_frame, 60);
+        let mut editor = Editor::new(project.clone());
+        let command = trim_edge(&project, 0, 1, true, 20).unwrap();
+        assert!(editor.apply(command));
+        let clip = &editor.project().tracks()[0].clips[0];
+        assert_eq!((clip.source_start_frame, clip.duration_frames), (50, 50));
+        assert!(editor.undo());
+        assert!(editor.apply(trim_edge(&project, 0, 1, true, 0).unwrap()));
+        assert_eq!(editor.project().tracks()[0].clips[0].source_start_frame, 10);
+        assert!(editor.undo());
+        assert!(editor.apply(trim_edge(&project, 0, 1, false, 1000).unwrap()));
+        assert_eq!(editor.project().tracks()[0].clips[0].duration_frames, 135);
+    }
+
+    #[test]
+    fn speed_format_round_trip_legacy_and_validation() {
+        let mut project = speed_project();
+        let legacy = super::super::format::to_json(&project).unwrap();
+        assert!(!legacy.contains("\"speed\""));
+        assert_eq!(super::super::format::from_json(&legacy).unwrap(), project);
+        for speed in [0.25, 0.5, 1.5, 2.0, 4.0] {
+            project.tracks[0].clips[0].speed = speed;
+            let json = super::super::format::to_json(&project).unwrap();
+            assert_eq!(super::super::format::from_json(&json).unwrap(), project);
+        }
+        for speed in [0.0, 4.01] {
+            project.tracks[0].clips[0].speed = speed;
+            assert!(
+                super::super::format::from_json(&super::super::format::to_json(&project).unwrap())
+                    .is_err()
+            );
+        }
+        project.tracks[0].clips[0].speed = 2.0;
+        project.media[0].kind = MediaKind::Image;
+        assert!(project.validate().is_err());
+        project.tracks[0].clips[0].content = ClipContent::Title(Title::default());
+        assert!(project.validate().is_err());
+    }
+
+    #[test]
+    fn ripple_delete_preserves_sped_up_source_ranges() {
+        let mut project = speed_project();
+        project.tracks[0].clips[0].speed = 2.0;
+        let mut removed = project.tracks[0].clips[0].clone();
+        removed.id = 2;
+        removed.start_frame = 25;
+        removed.duration_frames = 10;
+        project.tracks[1].clips.push(removed);
+        let mut editor = Editor::new(project.clone());
+        assert!(editor.apply(Command::RippleDelete {
+            track_id: 1,
+            clip_id: 2
+        }));
+        let clips = &editor.project().tracks()[0].clips;
+        assert_eq!(clips.len(), 2);
+        assert_eq!(
+            (
+                clips[0].duration_frames,
+                clips[1].start_frame,
+                clips[1].source_start_frame
+            ),
+            (15, 25, 80)
+        );
+        assert_eq!(clips[1].speed, 2.0);
+        assert!(editor.undo());
+        assert_eq!(editor.project(), &project);
+    }
+
     #[test]
     fn locked_tracks_reject_clip_color_changes() {
         let mut editor = Editor::new(Project::new("Locked color"));
@@ -1926,6 +2404,7 @@ mod tests {
             source_start_frame: 0,
             duration_frames: 30,
             content: ClipContent::Media { media_id: 1 },
+            speed: 1.0,
             lut: None,
             volume: 1.0,
             muted: false,
@@ -2155,6 +2634,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                speed: 1.0,
                 playback: Playback::Forward,
                 lut: None,
                 id: 1,
@@ -2235,6 +2715,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 color: Default::default(),
                 transition: None,
                 transition_out: None,
@@ -2318,6 +2799,7 @@ mod tests {
             content: ClipContent::Media { media_id: 1 },
             volume: 1.0,
             muted: false,
+            speed: 1.0,
             color: Default::default(),
             transition: None,
             transition_out: None,
@@ -2404,6 +2886,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            speed: 1.0,
             color: Default::default(),
             transition: None,
             transition_out: None,
@@ -2457,6 +2940,7 @@ mod tests {
                 content: ClipContent::Title(title.clone()),
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 color: Default::default(),
                 transition: None,
                 transition_out: None,
@@ -2741,6 +3225,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            speed: 1.0,
             color: Default::default(),
             transition: None,
             transition_out: None,
@@ -2832,6 +3317,7 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 0.75,
             muted: true,
+            speed: 1.0,
             color: Default::default(),
             transition: None,
             transition_out: None,
@@ -2940,6 +3426,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            speed: 1.0,
             color: Default::default(),
             transition: None,
             transition_out: None,
@@ -3037,6 +3524,7 @@ mod tests {
                     },
                     volume: if id == 2 { 0.4 } else { 1.0 },
                     muted: id == 2,
+                    speed: 1.0,
                     color: Default::default(),
                     transition: None,
                     transition_out: None,
@@ -3098,6 +3586,7 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 1.0,
             muted: false,
+            speed: 1.0,
             color: Default::default(),
             transition: None,
             transition_out: None,
@@ -3127,6 +3616,7 @@ mod tests {
                     content: ClipContent::Media { media_id: 1 },
                     volume: 0.5,
                     muted: true,
+                    speed: 1.0,
                     color: Default::default(),
                     transition: None,
                     transition_out: None,
@@ -3201,6 +3691,7 @@ mod tests {
                     content: ClipContent::Title(Title::default()),
                     volume: 1.0,
                     muted: false,
+                    speed: 1.0,
                     color: Default::default(),
                     transition: None,
                     transition_out: None,
@@ -3240,6 +3731,7 @@ mod tests {
             content: ClipContent::Media { media_id: 1 },
             volume: 1.0,
             muted: false,
+            speed: 1.0,
             color: Default::default(),
             transition: None,
             transition_out: None,
@@ -3288,6 +3780,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 color: Default::default(),
                 transition: None,
                 transition_out: None,
@@ -3315,6 +3808,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 color: Default::default(),
                 transition: None,
                 transition_out: None,
@@ -3357,6 +3851,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 color: Default::default(),
                 transition: None,
                 transition_out: None,
@@ -3443,6 +3938,7 @@ mod tests {
             has_audio: false
         })));
         let clip = Clip {
+            speed: 1.0,
             playback: crate::timeline::Playback::Forward,
             noise_reduction: false,
             lut: None,

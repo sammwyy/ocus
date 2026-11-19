@@ -327,6 +327,82 @@ fn set_clip_audio(state: &UiState, change: impl FnOnce(&Clip) -> (f32, bool)) {
     }
 }
 
+fn change_clip_fade(state: &UiState, incoming: bool, increase: bool) {
+    if let Some((track_id, clip)) = selected_clip(state) {
+        let fps = state.frame_rate();
+        let step = (f64::from(fps.0) / f64::from(fps.1) / 2.0).round().max(1.0) as u64;
+        let (current, other) = if incoming {
+            (clip.fade_in_frames, clip.fade_out_frames)
+        } else {
+            (clip.fade_out_frames, clip.fade_in_frames)
+        };
+        let value = if increase {
+            current
+                .saturating_add(step)
+                .min(clip.duration_frames.saturating_sub(other))
+        } else {
+            current.saturating_sub(step)
+        };
+        state.edit(Command::SetClipFades {
+            track_id,
+            clip_id: clip.id,
+            fade_in_frames: if incoming { value } else { other },
+            fade_out_frames: if incoming { other } else { value },
+        });
+    }
+}
+
+fn fade_row(state: &UiState, clip: &Clip, incoming: bool) -> Box<dyn Widget> {
+    let (label, value, other) = if incoming {
+        ("Fade in", clip.fade_in_frames, clip.fade_out_frames)
+    } else {
+        ("Fade out", clip.fade_out_frames, clip.fade_in_frames)
+    };
+    let fps = state.frame_rate();
+    let length = if value == 0 {
+        "Off".into()
+    } else {
+        format!(
+            "{:.1} s",
+            value as f64 * f64::from(fps.1) / f64::from(fps.0)
+        )
+    };
+    Box::new(
+        Flex::row()
+            .gap(6.0)
+            .align(Align::Center)
+            .child(text(label, text_color(), 11.0))
+            .child(spacer())
+            .child(text(length, text_color(), 11.0))
+            .child(sized_icon_button(
+                Glyph::Minus,
+                Help::new(if incoming {
+                    "Decrease fade in"
+                } else {
+                    "Decrease fade out"
+                }),
+                24.0,
+                value > 0,
+                false,
+                state,
+                move |s| change_clip_fade(s, incoming, false),
+            ))
+            .child(sized_icon_button(
+                Glyph::Plus,
+                Help::new(if incoming {
+                    "Increase fade in"
+                } else {
+                    "Increase fade out"
+                }),
+                24.0,
+                value < clip.duration_frames.saturating_sub(other),
+                false,
+                state,
+                move |s| change_clip_fade(s, incoming, true),
+            )),
+    )
+}
+
 fn media_name(media: &Media) -> String {
     media.path.file_name().map_or_else(
         || media.path.display().to_string(),
@@ -1893,6 +1969,8 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         state,
                         |s| set_clip_audio(s, |clip| (clip.volume, !clip.muted)),
                     )),
+                    fade_row(state, &clip, true),
+                    fade_row(state, &clip, false),
                     if clip.linked_audio {
                         inline(secondary_button(
                             Some(Glyph::Unlink),
@@ -1912,7 +1990,11 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     } else {
                         Box::new(Flex::row().height(0.0))
                     },
-                    text("Volume and mute affect playback and export.", faint(), 10.0),
+                    text(
+                        "Volume, mute and fades affect playback and export.",
+                        faint(),
+                        10.0,
+                    ),
                 ],
             ));
         }
@@ -2288,6 +2370,8 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                             }),
                         volume: clip.volume,
                         muted: clip.muted,
+                        fade_in_frames: clip.fade_in_frames,
+                        fade_out_frames: clip.fade_out_frames,
                         linked_audio: clip.linked_audio,
                     }
                 })
@@ -4123,6 +4207,8 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 1.0,
             muted: false,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             linked_audio: false,
         }
     }
@@ -5375,6 +5461,8 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 linked_audio: false
             }
         }));
@@ -5411,6 +5499,8 @@ mod tests {
                     waveform: None,
                     volume: 1.0,
                     muted: false,
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
                     linked_audio: false,
                 }],
             }],
@@ -5603,6 +5693,26 @@ mod tests {
         );
         assert!(painter.labels.iter().any(|label| label == "100%"));
         assert!(painter.labels.iter().any(|label| label == "Audio source"));
+        let painter = render(&state, 1440.0, 1600.0);
+        assert!(painter.labels.iter().any(|label| label == "Fade in"));
+        assert!(painter.labels.iter().any(|label| label == "Fade out"));
+        assert!(painter.labels.iter().any(|label| label == "Off"));
+        for (label, rect) in &painter.bounds {
+            if label == "Fade in" || label == "Fade out" {
+                assert!(rect.x >= 0.0 && rect.x + rect.width <= 1440.0);
+                assert!(rect.y >= 0.0 && rect.y + rect.height <= 1600.0);
+            }
+        }
+        change_clip_fade(&state, true, true);
+        change_clip_fade(&state, false, true);
+        change_clip_fade(&state, true, true);
+        let (_, clip) = selected_clip(&state).unwrap();
+        assert_eq!(
+            clip.fade_in_frames + clip.fade_out_frames,
+            clip.duration_frames
+        );
+        let painter = render(&state, 1440.0, 1600.0);
+        assert!(painter.labels.iter().any(|label| label == "0.5 s"));
         set_clip_audio(&state, |clip| (clip.volume - 0.5, true));
         let painter = render(&state, 1440.0, 900.0);
         assert!(painter.labels.iter().any(|label| label == "50%"));

@@ -130,6 +130,12 @@ impl Project {
             }
             let mut end = 0;
             for clip in &track.clips {
+                if clip.lut.is_some()
+                    && (track.kind != TrackKind::Video
+                        || !matches!(clip.content, ClipContent::Media { .. }))
+                {
+                    return Err("LUTs need a video or image clip on a video track".into());
+                }
                 if clip.transition.as_ref().is_some_and(|transition| {
                     track.kind != TrackKind::Video || transition.duration_frames == 0
                 }) {

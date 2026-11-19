@@ -1790,6 +1790,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                lut: None,
                 id: 1,
                 start_frame: 45,
                 source_start_frame: 0,
@@ -1936,6 +1937,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id,
                 clip: Clip {
+                    lut: None,
                     id: clip_id,
                     start_frame: 0,
                     source_start_frame: 0,
@@ -1993,6 +1995,7 @@ mod tests {
             has_audio: true,
         })));
         let detached = Clip {
+            lut: None,
             id: 1,
             start_frame: 0,
             source_start_frame: 15,
@@ -2215,6 +2218,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id,
                 clip: Clip {
+                    lut: None,
                     id,
                     start_frame,
                     source_start_frame: 0,

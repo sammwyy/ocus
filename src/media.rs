@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod audio;
 pub mod composite;
+pub mod lut;
 pub mod preview;
 
 fn seek_timestamp(input: &ffmpeg::format::context::Input, micros: u128) -> Option<i64> {

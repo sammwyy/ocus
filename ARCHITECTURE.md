@@ -133,6 +133,19 @@ The optional field remains compatible with version 1 projects. The Inspector
 offers transition choices and quarter-second duration steps; the timeline
 marks the effective transition range with a ramp at the clip start.
 
+Video and image clips may reference a `.cube` color LUT through an optional
+version 1 field (absent means no LUT). `SetClipLut` changes it undoably; splits
+and copies preserve it. The Inspector validates chosen files on a worker.
+The shared compositor loads and caches LUTs by path on its worker, applying
+them before transitions and layer blending. Missing or malformed LUTs report
+errors in preview and export. Each cached LUT keeps its floating-point lattice
+and three 256-entry domain index/weight tables for per-pixel trilinear
+interpolation (1D LUTs use per-channel linear tables). Extreme lattice values
+use exact interpolation to avoid floating-point cancellation errors. Relative
+LUT paths resolve beside the project file, like media paths. Caches live only
+as long as the compositor. Alpha is unchanged. Source preview and thumbnails
+remain ungraded.
+
 ## Where new work belongs
 
 | Work | Place it when implemented | Boundary |

@@ -1332,6 +1332,7 @@ impl UiState {
                 };
                 if track.kind == TrackKind::Video {
                     sources.push(FrameSource {
+                        lut: clip.lut.clone(),
                         clip_id: clip.id,
                         path: media.path.clone(),
                         kind: media.kind,
@@ -1388,6 +1389,7 @@ impl UiState {
                 .iter()
                 .filter(|range| range.kind != MediaKind::Audio)
                 .map(|range| FrameSource {
+                    lut: None,
                     clip_id: 0,
                     path: range.path.clone(),
                     kind: range.kind,
@@ -1905,6 +1907,48 @@ impl UiState {
         self.dirty.set(false);
         self.revision.update(|revision| *revision += 1);
         self.status.set("New project · Not saved".into());
+    }
+
+    pub fn choose_lut(&self, track_id: u64, clip_id: u64) {
+        if self.busy.peek() {
+            return;
+        }
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        let Some(path) = FileDialog::new()
+            .set_title("Choose a color LUT")
+            .add_filter("Cube color LUT", &["cube"])
+            .pick_file()
+        else {
+            return;
+        };
+        self.busy.set(true);
+        self.status.set("Checking color LUT…".into());
+        let revision = self.revision.peek();
+        let state = self.clone();
+        app.spawn_background(
+            move || crate::media::lut::Lut::load(&path).map(|_| path),
+            move |result| {
+                state.busy.set(false);
+                match result {
+                    Ok(path) if state.revision.peek() == revision => {
+                        state.edit(Command::SetClipLut {
+                            track_id,
+                            clip_id,
+                            path: Some(path),
+                        });
+                    }
+                    Ok(_) => state
+                        .status
+                        .set("LUT selection cancelled: project changed".into()),
+                    Err(error) => {
+                        state.show_file_error("Could not load color LUT", error.clone());
+                        state.status.set(error);
+                    }
+                }
+            },
+        );
     }
 
     pub fn open_dialog(&self) {
@@ -3871,6 +3915,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id: 0,
                 clip: Clip {
+                    lut: None,
                     id: index,
                     start_frame: index * 30,
                     source_start_frame: index * 30,
@@ -4743,6 +4788,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 2,
             clip: Clip {
+                lut: None,
                 id: 0,
                 start_frame: 0,
                 source_start_frame: 0,

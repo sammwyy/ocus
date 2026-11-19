@@ -124,6 +124,10 @@ CreamUI's built-in Blue, Cyan, Green, Pink, Purple, and Orange accent presets;
 Orange is the initial custom accent. Preferences are saved independently of
 project files in `Ocus/settings.toml` under the platform configuration
 directory (XDG config on Linux, AppData on Windows).
+Regenerable media-bin thumbnails and timeline storyboard frames live under
+`thumbnails/` and `frames/` in the platform `Ocus` cache directory
+(`~/.cache/ocus` on Linux), bounded to 512 MiB in total. This directory can
+be deleted safely; missing entries are decoded again in the background.
 
 **Export** (disabled while the timeline is empty) opens a settings dialog with
 built-in presets for the original project, 1080p, 720p, vertical 9:16, square,

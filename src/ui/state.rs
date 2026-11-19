@@ -2,11 +2,12 @@ use super::edits::{self, ClipRef, CopiedClip};
 use super::interaction::{DragState, Gesture, MenuState};
 use crate::export::{self, ExportControl, presets};
 use crate::media::audio::{self, AudioPlan, AudioSource, Clock, Waveform, carries_sound};
+use crate::media::cache::{storyboard, thumbnail};
 use crate::media::composite::VisualPlan;
 use crate::media::preview::{
-    FrameImage, FrameSource, PreviewEvent, PreviewPlan, StoryboardKey, decode_sequence, storyboard,
+    FrameImage, FrameSource, PreviewEvent, PreviewPlan, StoryboardKey, decode_sequence,
 };
-use crate::media::{Media, MediaKind, MediaProbe, Thumbnail, probe, thumbnail};
+use crate::media::{Media, MediaKind, MediaProbe, Thumbnail, probe};
 use crate::playback::{self, Session};
 use crate::project::export_settings::{
     AudioCodec, Container, EncodingSpeed, ExportSettings, LastExport, VideoCodec,

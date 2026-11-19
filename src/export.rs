@@ -722,6 +722,7 @@ mod tests {
     use super::{ExportControl, render_with_settings};
     use crate::media::{Media, MediaKind};
     use crate::project::{Command, Editor, Project, format};
+    use crate::timeline::Transform;
     use crate::timeline::{Clip, ClipContent, Title, Track, TrackKind};
     use ffmpeg_next as ffmpeg;
     use std::fs;
@@ -781,7 +782,6 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id,
             clip: Clip {
-                transform: crate::timeline::Transform::default(),
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -790,6 +790,7 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 linked_audio: false,
+                transform: Transform::default(),
             }
         }));
         let target = dir.join("export.mp4");
@@ -837,7 +838,6 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
-                transform: crate::timeline::Transform::default(),
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -846,6 +846,7 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 linked_audio: false,
+                transform: Transform::default(),
             },
         }));
         let control = Arc::new(ExportControl::default());
@@ -907,7 +908,6 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
-                transform: crate::timeline::Transform::default(),
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -916,6 +916,7 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 linked_audio: false,
+                transform: Transform::default(),
             },
         }));
         let progress = std::sync::Arc::new(super::ExportControl::default());
@@ -1023,7 +1024,6 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Clip {
-                transform: crate::timeline::Transform::default(),
                 id: 3,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1032,6 +1032,7 @@ mod tests {
                 volume: 0.5,
                 muted: false,
                 linked_audio: false,
+                transform: Transform::default(),
             },
         }));
         let with_audio = dir.join("audio.mp4");
@@ -1088,7 +1089,6 @@ mod tests {
         })));
         let mut layered = editor.project().tracks().to_vec();
         layered[0].clips = vec![Clip {
-            transform: crate::timeline::Transform::default(),
             id: 4,
             start_frame: 15,
             source_start_frame: 15,
@@ -1097,9 +1097,9 @@ mod tests {
             volume: 1.0,
             muted: false,
             linked_audio: false,
+            transform: Transform::default(),
         }];
         layered[1].clips = vec![Clip {
-            transform: crate::timeline::Transform::default(),
             id: 5,
             start_frame: 0,
             source_start_frame: 0,
@@ -1108,12 +1108,12 @@ mod tests {
             volume: 1.0,
             muted: false,
             linked_audio: false,
+            transform: Transform::default(),
         }];
         layered.push(Track {
             id: 4,
             kind: TrackKind::Video,
             clips: vec![Clip {
-                transform: crate::timeline::Transform::default(),
                 id: 6,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1128,6 +1128,7 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 linked_audio: false,
+                transform: Transform::default(),
             }],
         });
         assert!(editor.apply(Command::ReplaceTracks(layered)));
@@ -1225,7 +1226,6 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
-                transform: crate::timeline::Transform::default(),
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1234,6 +1234,7 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 linked_audio: false,
+                transform: Transform::default(),
             },
         }));
         super::render(editor.project(), &target).unwrap();
@@ -1300,7 +1301,6 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
-                transform: crate::timeline::Transform::default(),
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1315,6 +1315,7 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 linked_audio: false,
+                transform: Transform::default(),
             },
         }));
         super::render(editor.project(), &target).unwrap();
@@ -1467,7 +1468,6 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id,
             clip: Clip {
-                transform: crate::timeline::Transform::default(),
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1476,6 +1476,7 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 linked_audio: false,
+                transform: Transform::default(),
             },
         }));
         let mut settings = ExportSettings::for_project(
@@ -1589,7 +1590,6 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 2,
             clip: Clip {
-                transform: crate::timeline::Transform::default(),
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -1598,6 +1598,7 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 linked_audio: false,
+                transform: Transform::default(),
             },
         }));
         let mut settings = ExportSettings::for_project(

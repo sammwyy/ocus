@@ -58,6 +58,7 @@ mod tests {
     use super::*;
     use crate::project::export_settings::{ExportSettings, LastExport};
     use crate::project::{Command, Editor};
+    use crate::timeline::Transform;
     use crate::timeline::{Clip, ClipContent, Title};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -109,7 +110,6 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
-                transform: crate::timeline::Transform::default(),
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -126,6 +126,7 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 linked_audio: false,
+                transform: Transform::default(),
             },
         }));
         let last_export = LastExport {

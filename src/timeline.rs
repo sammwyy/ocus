@@ -16,8 +16,6 @@ pub enum TrackKind {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Clip {
-    #[serde(default, skip_serializing_if = "Transform::is_identity")]
-    pub transform: Transform,
     pub id: u64,
     pub start_frame: u64,
     pub source_start_frame: u64,
@@ -29,6 +27,8 @@ pub struct Clip {
     /// moved and trimmed with the picture; `volume` and `muted` apply to it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub linked_audio: bool,
+    #[serde(default, skip_serializing_if = "Transform::is_identity")]
+    pub transform: Transform,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -145,7 +145,7 @@ impl Title {
 }
 
 #[cfg(test)]
-mod transform_tests {
+mod tests {
     use super::*;
 
     #[test]

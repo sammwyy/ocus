@@ -13,7 +13,7 @@ use crate::project::export_settings::{
 };
 use crate::project::{Command, Editor, Project, recovery, store};
 use crate::settings::{self, Settings, ThemeMode};
-use crate::timeline::{ClipContent, Title, TrackKind};
+use crate::timeline::{ClipContent, Title, TrackKind, Transform};
 use creamui::core::{Modifiers, Point, Rect, RgbaImage};
 use creamui::widgets::{
     ColorPickerController, ScrollController, TextController, TooltipController,
@@ -1222,13 +1222,13 @@ impl UiState {
                 };
                 if track.kind == TrackKind::Video {
                     sources.push(FrameSource {
-                        transform: crate::timeline::Transform::default(),
                         clip_id: clip.id,
                         path: media.path.clone(),
                         kind: media.kind,
                         start: clip.start_frame,
                         source_start: clip.source_start_frame,
                         duration: clip.duration_frames,
+                        transform: Transform::default(),
                     });
                 }
             }
@@ -1278,13 +1278,13 @@ impl UiState {
                 .iter()
                 .filter(|range| range.kind != MediaKind::Audio)
                 .map(|range| FrameSource {
-                    transform: crate::timeline::Transform::default(),
                     clip_id: 0,
                     path: range.path.clone(),
                     kind: range.kind,
                     start: 0,
                     source_start: range.source_start,
                     duration: range.duration,
+                    transform: Transform::default(),
                 })
                 .collect(),
             fps,
@@ -3457,7 +3457,6 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id: 0,
                 clip: Clip {
-                    transform: crate::timeline::Transform::default(),
                     id: index,
                     start_frame: index * 30,
                     source_start_frame: index * 30,
@@ -3466,6 +3465,7 @@ mod tests {
                     volume: 1.0,
                     muted: false,
                     linked_audio: false,
+                    transform: Transform::default(),
                 }
             }));
         }
@@ -4327,7 +4327,6 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 2,
             clip: Clip {
-                transform: crate::timeline::Transform::default(),
                 id: 0,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -4336,6 +4335,7 @@ mod tests {
                 volume: 1.0,
                 muted: true,
                 linked_audio: false,
+                transform: Transform::default(),
             }
         }));
         state.play();

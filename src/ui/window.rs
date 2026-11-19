@@ -22,7 +22,7 @@ use crate::media::{Media, MediaKind};
 use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, VideoCodec};
 use crate::project::{Command, Project};
 use crate::settings::ThemeMode;
-use crate::timeline::{Clip, ClipContent, Title, Track, TrackKind};
+use crate::timeline::{Clip, ClipContent, Title, Track, TrackKind, Transform};
 use creamui::core::layout::{Dimension, Style};
 use creamui::core::{Painter, Point, Rect, TextAlign, Widget};
 use creamui::fonts::{FontWeight, HorizontalAlign, LayoutSettings, cached_layout, resolve};
@@ -327,7 +327,7 @@ fn set_clip_audio(state: &UiState, change: impl FnOnce(&Clip) -> (f32, bool)) {
     }
 }
 
-fn set_clip_transform(state: &UiState, change: impl FnOnce(&mut crate::timeline::Transform)) {
+fn set_clip_transform(state: &UiState, change: impl FnOnce(&mut Transform)) {
     if let Some((track_id, clip)) = selected_clip(state) {
         let mut transform = clip.transform;
         change(&mut transform);
@@ -341,109 +341,160 @@ fn set_clip_transform(state: &UiState, change: impl FnOnce(&mut crate::timeline:
     }
 }
 
-fn transform_rows(
-    state: &UiState,
-    transform: crate::timeline::Transform,
-    inner: f32,
-) -> Vec<BoxedWidget> {
-    type Field = fn(&mut crate::timeline::Transform) -> &mut f32;
-    let fields: [(&str, Field, f32, f32, f32, f32); 9] = [
-        ("Scale", |t| &mut t.scale, 0.1, 4.0, 0.05, 100.0),
-        ("Position X", |t| &mut t.x, -1.0, 1.0, 0.01, 100.0),
-        ("Position Y", |t| &mut t.y, -1.0, 1.0, 0.01, 100.0),
-        ("Rotation", |t| &mut t.rotation, -360.0, 360.0, 5.0, 1.0),
-        (
-            "Crop left",
-            |t| &mut t.crop_left,
-            0.0,
-            (0.99 - transform.crop_right).max(0.0),
-            0.01,
-            100.0,
-        ),
-        (
-            "Crop top",
-            |t| &mut t.crop_top,
-            0.0,
-            (0.99 - transform.crop_bottom).max(0.0),
-            0.01,
-            100.0,
-        ),
-        (
-            "Crop right",
-            |t| &mut t.crop_right,
-            0.0,
-            (0.99 - transform.crop_left).max(0.0),
-            0.01,
-            100.0,
-        ),
-        (
-            "Crop bottom",
-            |t| &mut t.crop_bottom,
-            0.0,
-            (0.99 - transform.crop_top).max(0.0),
-            0.01,
-            100.0,
-        ),
-        ("Opacity", |t| &mut t.opacity, 0.0, 1.0, 0.05, 100.0),
+#[derive(Clone, Copy)]
+struct TransformField {
+    label: &'static str,
+    accessor: fn(&mut Transform) -> &mut f32,
+    min: f32,
+    max: f32,
+    step: f32,
+    display_unit: &'static str,
+    display_scale: f32,
+    decrease_help: &'static str,
+    increase_help: &'static str,
+}
+
+fn transform_rows(state: &UiState, transform: Transform, inner: f32) -> Vec<BoxedWidget> {
+    let fields = [
+        TransformField {
+            label: "Scale",
+            accessor: |transform| &mut transform.scale,
+            min: 0.1,
+            max: 4.0,
+            step: 0.05,
+            display_unit: "%",
+            display_scale: 100.0,
+            decrease_help: "Decrease scale",
+            increase_help: "Increase scale",
+        },
+        TransformField {
+            label: "Position X",
+            accessor: |transform| &mut transform.x,
+            min: -1.0,
+            max: 1.0,
+            step: 0.01,
+            display_unit: "%",
+            display_scale: 100.0,
+            decrease_help: "Move picture left",
+            increase_help: "Move picture right",
+        },
+        TransformField {
+            label: "Position Y",
+            accessor: |transform| &mut transform.y,
+            min: -1.0,
+            max: 1.0,
+            step: 0.01,
+            display_unit: "%",
+            display_scale: 100.0,
+            decrease_help: "Move picture up",
+            increase_help: "Move picture down",
+        },
+        TransformField {
+            label: "Rotation",
+            accessor: |transform| &mut transform.rotation,
+            min: -360.0,
+            max: 360.0,
+            step: 5.0,
+            display_unit: "°",
+            display_scale: 1.0,
+            decrease_help: "Rotate counterclockwise",
+            increase_help: "Rotate clockwise",
+        },
+        TransformField {
+            label: "Crop left",
+            accessor: |transform| &mut transform.crop_left,
+            min: 0.0,
+            max: (0.99 - transform.crop_right).max(0.0),
+            step: 0.01,
+            display_unit: "%",
+            display_scale: 100.0,
+            decrease_help: "Decrease left crop",
+            increase_help: "Increase left crop",
+        },
+        TransformField {
+            label: "Crop top",
+            accessor: |transform| &mut transform.crop_top,
+            min: 0.0,
+            max: (0.99 - transform.crop_bottom).max(0.0),
+            step: 0.01,
+            display_unit: "%",
+            display_scale: 100.0,
+            decrease_help: "Decrease top crop",
+            increase_help: "Increase top crop",
+        },
+        TransformField {
+            label: "Crop right",
+            accessor: |transform| &mut transform.crop_right,
+            min: 0.0,
+            max: (0.99 - transform.crop_left).max(0.0),
+            step: 0.01,
+            display_unit: "%",
+            display_scale: 100.0,
+            decrease_help: "Decrease right crop",
+            increase_help: "Increase right crop",
+        },
+        TransformField {
+            label: "Crop bottom",
+            accessor: |transform| &mut transform.crop_bottom,
+            min: 0.0,
+            max: (0.99 - transform.crop_top).max(0.0),
+            step: 0.01,
+            display_unit: "%",
+            display_scale: 100.0,
+            decrease_help: "Decrease bottom crop",
+            increase_help: "Increase bottom crop",
+        },
+        TransformField {
+            label: "Opacity",
+            accessor: |transform| &mut transform.opacity,
+            min: 0.0,
+            max: 1.0,
+            step: 0.05,
+            display_unit: "%",
+            display_scale: 100.0,
+            decrease_help: "Decrease opacity",
+            increase_help: "Increase opacity",
+        },
     ];
     let mut rows = Vec::new();
-    for (label, field, min, max, step, multiplier) in fields {
+    for field in fields {
         let mut current = transform;
-        let value = *field(&mut current);
+        let value = *(field.accessor)(&mut current);
         let mut row = Flex::row()
             .gap(4.0)
             .align(Align::Center)
             .child(Box::new(
-                Flex::row()
-                    .width((inner - 112.0).max(60.0))
-                    .child(text(label, muted(), 11.0)),
+                Flex::row().width((inner - 112.0).max(60.0)).child(text(
+                    field.label,
+                    muted(),
+                    11.0,
+                )),
             ))
             .child(Box::new(Flex::row().width(44.0).child(text(
-                format!(
-                    "{:.0}{}",
-                    value * multiplier,
-                    if multiplier == 1.0 { "°" } else { "%" }
-                ),
+                format!("{:.0}{}", value * field.display_scale, field.display_unit),
                 text_color(),
                 11.0,
             ))));
-        for (glyph, direction) in [(Glyph::Minus, -1.0), (Glyph::Plus, 1.0)] {
-            let help = match (label, direction < 0.0) {
-                ("Scale", true) => "Decrease scale",
-                ("Scale", false) => "Increase scale",
-                ("Position X", true) => "Move picture left",
-                ("Position X", false) => "Move picture right",
-                ("Position Y", true) => "Move picture up",
-                ("Position Y", false) => "Move picture down",
-                ("Rotation", true) => "Rotate counterclockwise",
-                ("Rotation", false) => "Rotate clockwise",
-                ("Crop left", true) => "Decrease left crop",
-                ("Crop left", false) => "Increase left crop",
-                ("Crop top", true) => "Decrease top crop",
-                ("Crop top", false) => "Increase top crop",
-                ("Crop right", true) => "Decrease right crop",
-                ("Crop right", false) => "Increase right crop",
-                ("Crop bottom", true) => "Decrease bottom crop",
-                ("Crop bottom", false) => "Increase bottom crop",
-                (_, true) => "Decrease opacity",
-                (_, false) => "Increase opacity",
-            };
+        for (glyph, direction, help) in [
+            (Glyph::Minus, -1.0, field.decrease_help),
+            (Glyph::Plus, 1.0, field.increase_help),
+        ] {
             row = row.child(sized_icon_button(
                 glyph,
                 Help::new(help),
                 24.0,
                 if direction < 0.0 {
-                    value > min
+                    value > field.min
                 } else {
-                    value < max
+                    value < field.max
                 },
                 false,
                 state,
-                move |s| {
-                    set_clip_transform(s, |t| {
-                        let v = field(t);
-                        *v = ((*v + direction * step) * 1000.0).round() / 1000.0;
-                        *v = v.clamp(min, max);
+                move |state| {
+                    set_clip_transform(state, |transform| {
+                        let value = (field.accessor)(transform);
+                        *value = (((*value + direction * field.step) * 1000.0).round() / 1000.0)
+                            .clamp(field.min, field.max);
                     });
                 },
             ));
@@ -455,11 +506,10 @@ fn transform_rows(
         "Reset transform",
         !transform.is_identity(),
         state,
-        |s| set_clip_transform(s, |t| *t = Default::default()),
+        |state| set_clip_transform(state, |transform| *transform = Transform::default()),
     )));
     rows
 }
-
 fn media_name(media: &Media) -> String {
     media.path.file_name().map_or_else(
         || media.path.display().to_string(),
@@ -4243,7 +4293,6 @@ mod tests {
 
     fn destination_clip(start_frame: u64, duration_frames: u64) -> Clip {
         Clip {
-            transform: crate::timeline::Transform::default(),
             id: 10,
             start_frame,
             source_start_frame: 0,
@@ -4252,6 +4301,7 @@ mod tests {
             volume: 1.0,
             muted: false,
             linked_audio: false,
+            transform: Transform::default(),
         }
     }
 
@@ -5540,7 +5590,7 @@ mod tests {
                 }
             });
         }
-        set_clip_transform(&state, |t| t.scale = 0.5);
+        set_clip_transform(&state, |transform| transform.scale = 0.5);
         assert_eq!(selected_clip(&state).unwrap().1.transform.scale, 0.5);
         state.run(Action::Undo);
         assert!(selected_clip(&state).unwrap().1.transform.is_identity());
@@ -5555,7 +5605,7 @@ mod tests {
         assert!(!state.edit(Command::SetClipTransform {
             track_id: title.0,
             clip_id: title.1.id,
-            transform: crate::timeline::Transform {
+            transform: Transform {
                 scale: 0.5,
                 ..Default::default()
             }
@@ -5594,7 +5644,7 @@ mod tests {
                 assert!(!state.edit(Command::SetClipTransform {
                     track_id,
                     clip_id: id + 100,
-                    transform: crate::timeline::Transform {
+                    transform: Transform {
                         scale: 0.5,
                         ..Default::default()
                     }
@@ -5616,7 +5666,6 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
             clip: Clip {
-                transform: crate::timeline::Transform::default(),
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,
@@ -5624,7 +5673,8 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
-                linked_audio: false
+                linked_audio: false,
+                transform: Transform::default(),
             }
         }));
         state.select_clip(Some((0, 1)));

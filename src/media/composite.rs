@@ -1,6 +1,6 @@
 use super::preview::{FrameImage, FrameSource, VideoLayers, blend};
 use crate::project::Project;
-use crate::timeline::{ClipContent, Title, TrackKind};
+use crate::timeline::{ClipContent, Title, TrackKind, Transform};
 use crate::ui::{title_fonts, title_markup};
 use creamui::fonts::{FontWeight, HorizontalAlign, LayoutSettings, cached_layout, resolve};
 use std::collections::{HashMap, HashSet};
@@ -8,85 +8,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use swash::scale::{Render, ScaleContext, Source, image::Image};
 use swash::zeno::{Format, Join, Stroke};
-
-fn draw_transformed(
-    dst: &mut [u8],
-    width: u32,
-    height: u32,
-    image: &FrameImage,
-    t: crate::timeline::Transform,
-) {
-    let (left, top, pw, ph) = image.picture;
-    let cx = left as f32 + pw as f32 / 2.0;
-    let cy = top as f32 + ph as f32 / 2.0;
-    let x0 = left as f32 + pw as f32 * t.crop_left;
-    let x1 = left as f32 + pw as f32 * (1.0 - t.crop_right);
-    let y0 = top as f32 + ph as f32 * t.crop_top;
-    let y1 = top as f32 + ph as f32 * (1.0 - t.crop_bottom);
-    let (sin, cos) = t.rotation.to_radians().sin_cos();
-    let ox = cx + t.x * width as f32;
-    let oy = cy + t.y * height as f32;
-    let mut bounds = [
-        f32::INFINITY,
-        f32::INFINITY,
-        f32::NEG_INFINITY,
-        f32::NEG_INFINITY,
-    ];
-    for (x, y) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
-        let x = (x - cx) * t.scale;
-        let y = (y - cy) * t.scale;
-        let (x, y) = (ox + cos * x - sin * y, oy + sin * x + cos * y);
-        bounds[0] = bounds[0].min(x);
-        bounds[1] = bounds[1].min(y);
-        bounds[2] = bounds[2].max(x);
-        bounds[3] = bounds[3].max(y);
-    }
-    for y in
-        (bounds[1].floor().max(0.0) as u32)..(bounds[3].ceil().min(height as f32).max(0.0) as u32)
-    {
-        for x in (bounds[0].floor().max(0.0) as u32)
-            ..(bounds[2].ceil().min(width as f32).max(0.0) as u32)
-        {
-            let dx = x as f32 + 0.5 - ox;
-            let dy = y as f32 + 0.5 - oy;
-            let sx = cx + (cos * dx + sin * dy) / t.scale;
-            let sy = cy + (-sin * dx + cos * dy) / t.scale;
-            if sx < x0 || sx >= x1 || sy < y0 || sy >= y1 {
-                continue;
-            }
-            let fx = (sx - 0.5).clamp(left as f32, (left + pw - 1) as f32);
-            let fy = (sy - 0.5).clamp(top as f32, (top + ph - 1) as f32);
-            let ix = fx.floor() as u32;
-            let iy = fy.floor() as u32;
-            let mut sample = [0.0; 4];
-            for (px, wx) in [
-                (ix, 1.0 - (fx - ix as f32)),
-                ((ix + 1).min(left + pw - 1), fx - ix as f32),
-            ] {
-                for (py, wy) in [
-                    (iy, 1.0 - (fy - iy as f32)),
-                    ((iy + 1).min(top + ph - 1), fy - iy as f32),
-                ] {
-                    let p = ((py * image.width + px) * 4) as usize;
-                    let a = image.pixels[p + 3] as f32 / 255.0;
-                    for (c, v) in sample.iter_mut().enumerate() {
-                        *v += image.pixels[p + c] as f32 * wx * wy * if c == 3 { 1.0 } else { a };
-                    }
-                }
-            }
-            let alpha = sample[3];
-            let mut rgba = [0; 4];
-            if alpha > 0.0 {
-                for c in 0..3 {
-                    rgba[c] = (sample[c] * 255.0 / alpha).round() as u8;
-                }
-            }
-            rgba[3] = (alpha * t.opacity).round() as u8;
-            let p = ((y * width + x) * 4) as usize;
-            blend(&mut dst[p..p + 4], &rgba);
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct VisualPlan {
@@ -125,13 +46,13 @@ impl VisualPlan {
                             let media =
                                 project.media().iter().find(|media| media.id == *media_id)?;
                             Some(VisualClip::Media(FrameSource {
-                                transform: clip.transform,
                                 clip_id: clip.id,
                                 path: media.path.clone(),
                                 kind: media.kind,
                                 start: clip.start_frame,
                                 source_start: clip.source_start_frame,
                                 duration: clip.duration_frames,
+                                transform: clip.transform,
                             }))
                         }
                         ClipContent::Media { .. } => None,
@@ -178,7 +99,7 @@ pub struct Compositor {
 }
 
 enum Layer<'a> {
-    Media(Arc<FrameImage>, crate::timeline::Transform),
+    Media(Arc<FrameImage>, Transform),
     Title(&'a Title),
 }
 
@@ -278,6 +199,106 @@ impl Compositor {
             height: self.height,
             pixels,
         }))
+    }
+}
+
+fn draw_transformed(
+    destination: &mut [u8],
+    width: u32,
+    height: u32,
+    image: &FrameImage,
+    transform: Transform,
+) {
+    let (left, top, picture_width, picture_height) = image.picture;
+    let center_x = left as f32 + picture_width as f32 / 2.0;
+    let center_y = top as f32 + picture_height as f32 / 2.0;
+    let crop_left = left as f32 + picture_width as f32 * transform.crop_left;
+    let crop_right = left as f32 + picture_width as f32 * (1.0 - transform.crop_right);
+    let crop_top = top as f32 + picture_height as f32 * transform.crop_top;
+    let crop_bottom = top as f32 + picture_height as f32 * (1.0 - transform.crop_bottom);
+    let (sine, cosine) = transform.rotation.to_radians().sin_cos();
+    let offset_x = center_x + transform.x * width as f32;
+    let offset_y = center_y + transform.y * height as f32;
+    let mut bounds = [
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    ];
+    for (x, y) in [
+        (crop_left, crop_top),
+        (crop_right, crop_top),
+        (crop_left, crop_bottom),
+        (crop_right, crop_bottom),
+    ] {
+        let x = (x - center_x) * transform.scale;
+        let y = (y - center_y) * transform.scale;
+        let (x, y) = (
+            offset_x + cosine * x - sine * y,
+            offset_y + sine * x + cosine * y,
+        );
+        bounds[0] = bounds[0].min(x);
+        bounds[1] = bounds[1].min(y);
+        bounds[2] = bounds[2].max(x);
+        bounds[3] = bounds[3].max(y);
+    }
+    for y in
+        (bounds[1].floor().max(0.0) as u32)..(bounds[3].ceil().min(height as f32).max(0.0) as u32)
+    {
+        for x in (bounds[0].floor().max(0.0) as u32)
+            ..(bounds[2].ceil().min(width as f32).max(0.0) as u32)
+        {
+            let delta_x = x as f32 + 0.5 - offset_x;
+            let delta_y = y as f32 + 0.5 - offset_y;
+            let source_x = center_x + (cosine * delta_x + sine * delta_y) / transform.scale;
+            let source_y = center_y + (-sine * delta_x + cosine * delta_y) / transform.scale;
+            if source_x < crop_left
+                || source_x >= crop_right
+                || source_y < crop_top
+                || source_y >= crop_bottom
+            {
+                continue;
+            }
+            let sample_x = (source_x - 0.5).clamp(left as f32, (left + picture_width - 1) as f32);
+            let sample_y = (source_y - 0.5).clamp(top as f32, (top + picture_height - 1) as f32);
+            let sample_left = sample_x.floor() as u32;
+            let sample_top = sample_y.floor() as u32;
+            let mut sample = [0.0; 4];
+            for (pixel_x, weight_x) in [
+                (sample_left, 1.0 - (sample_x - sample_left as f32)),
+                (
+                    (sample_left + 1).min(left + picture_width - 1),
+                    sample_x - sample_left as f32,
+                ),
+            ] {
+                for (pixel_y, weight_y) in [
+                    (sample_top, 1.0 - (sample_y - sample_top as f32)),
+                    (
+                        (sample_top + 1).min(top + picture_height - 1),
+                        sample_y - sample_top as f32,
+                    ),
+                ] {
+                    let pixel_offset = ((pixel_y * image.width + pixel_x) * 4) as usize;
+                    let source_alpha = image.pixels[pixel_offset + 3] as f32 / 255.0;
+                    for (channel, value) in sample.iter_mut().enumerate() {
+                        *value += image.pixels[pixel_offset + channel] as f32
+                            * weight_x
+                            * weight_y
+                            * if channel == 3 { 1.0 } else { source_alpha };
+                    }
+                }
+            }
+            let alpha = sample[3];
+            let mut rgba = [0; 4];
+            if alpha > 0.0 {
+                for channel in 0..3 {
+                    rgba[channel] = (sample[channel] * 255.0 / alpha).round() as u8;
+                }
+            }
+            rgba[3] = (alpha * transform.opacity).round() as u8;
+            let pixel_offset = ((y * width + x) * 4) as usize;
+            blend(&mut destination[pixel_offset..pixel_offset + 4], &rgba);
+        }
     }
 }
 
@@ -499,13 +520,13 @@ mod tests {
         let plan = VisualPlan {
             resolution: (1920, 1080),
             tracks: vec![vec![VisualClip::Media(FrameSource {
-                transform: crate::timeline::Transform::default(),
                 clip_id: 1,
                 path,
                 kind: MediaKind::Image,
                 start: 0,
                 source_start: 0,
                 duration: 300,
+                transform: Transform::default(),
             })]],
         };
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -547,13 +568,13 @@ mod tests {
             let plan = VisualPlan {
                 resolution: (1920, 1080),
                 tracks: vec![vec![VisualClip::Media(FrameSource {
-                    transform: crate::timeline::Transform::default(),
                     clip_id: 1,
                     path,
                     kind: MediaKind::Video,
                     start: 0,
                     source_start: 0,
                     duration: frames,
+                    transform: Transform::default(),
                 })]],
             };
             let cancelled = Arc::new(AtomicBool::new(false));
@@ -644,13 +665,13 @@ mod tests {
         let transparent = fixture("transparent.tga", 16, 9, 0);
         let source = |id, path| {
             VisualClip::Media(FrameSource {
-                transform: crate::timeline::Transform::default(),
                 clip_id: id,
                 path,
                 kind: MediaKind::Image,
                 start: 0,
                 source_start: 0,
                 duration: 3,
+                transform: Transform::default(),
             })
         };
         let title = VisualClip::Title {
@@ -674,23 +695,23 @@ mod tests {
         let mut titled = stacked.clone();
         titled.push(vec![title.clone()]);
         let scenarios = [
-            transformed(crate::timeline::Transform {
+            transformed(Transform {
                 scale: 0.5,
                 ..Default::default()
             }),
-            transformed(crate::timeline::Transform {
+            transformed(Transform {
                 x: 0.2,
                 ..Default::default()
             }),
-            transformed(crate::timeline::Transform {
+            transformed(Transform {
                 rotation: 90.0,
                 ..Default::default()
             }),
-            transformed(crate::timeline::Transform {
+            transformed(Transform {
                 crop_left: 0.2,
                 ..Default::default()
             }),
-            transformed(crate::timeline::Transform {
+            transformed(Transform {
                 opacity: 0.5,
                 ..Default::default()
             }),
@@ -855,13 +876,13 @@ mod tests {
         .unwrap();
         let source = |id, path| {
             VisualClip::Media(FrameSource {
-                transform: crate::timeline::Transform::default(),
                 clip_id: id,
                 path,
                 kind: MediaKind::Image,
                 start: 0,
                 source_start: 0,
                 duration: 3,
+                transform: Transform::default(),
             })
         };
         let title = VisualClip::Title {
@@ -978,13 +999,6 @@ mod tests {
         fs::remove_file(blue).unwrap();
         fs::remove_dir(dir).unwrap();
     }
-}
-
-#[cfg(test)]
-mod transform_pixels {
-    use super::*;
-    use crate::timeline::Transform;
-
     #[test]
     fn scale_offset_rotation_crop_and_opacity() {
         let image = FrameImage {

@@ -1524,6 +1524,7 @@ mod tests {
     use super::*;
     use crate::media::Media;
     use crate::timeline::Clip;
+    use crate::timeline::Transform;
     use creamui::core::Rect;
     use std::collections::HashSet;
 
@@ -1696,7 +1697,6 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
             clip: Clip {
-                transform: crate::timeline::Transform::default(),
                 id: 1,
                 start_frame: 45,
                 source_start_frame: 0,
@@ -1705,6 +1705,7 @@ mod tests {
                 volume: 1.0,
                 muted: false,
                 linked_audio: true,
+                transform: Transform::default(),
             },
         }));
 
@@ -1840,7 +1841,6 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id,
                 clip: Clip {
-                    transform: crate::timeline::Transform::default(),
                     id: clip_id,
                     start_frame: 0,
                     source_start_frame: 0,
@@ -1849,6 +1849,7 @@ mod tests {
                     volume: 1.0,
                     muted: false,
                     linked_audio: false,
+                    transform: Transform::default(),
                 },
             }));
         }
@@ -1895,7 +1896,6 @@ mod tests {
             has_audio: true,
         })));
         let detached = Clip {
-            transform: crate::timeline::Transform::default(),
             id: 1,
             start_frame: 0,
             source_start_frame: 15,
@@ -1904,6 +1904,7 @@ mod tests {
             volume: 0.5,
             muted: false,
             linked_audio: false,
+            transform: Transform::default(),
         };
         assert!(state.edit(Command::InsertClip {
             track_id: 3,
@@ -2115,7 +2116,6 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id,
                 clip: Clip {
-                    transform: crate::timeline::Transform::default(),
                     id,
                     start_frame,
                     source_start_frame: 0,
@@ -2124,6 +2124,7 @@ mod tests {
                     volume: 1.0,
                     muted: false,
                     linked_audio: false,
+                    transform: Transform::default(),
                 },
             }));
         }

@@ -5,7 +5,7 @@ use super::state::media_frames;
 use crate::media::MediaKind;
 use crate::project::edit::split_tracks;
 use crate::project::{Command, Editor, Project};
-use crate::timeline::{Clip, ClipContent, Track, TrackKind};
+use crate::timeline::{Clip, ClipContent, Track, TrackKind, Transform};
 use std::collections::HashSet;
 
 /// A clip identity: `(track_id, clip_id)`.
@@ -233,7 +233,6 @@ pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Op
     Some((
         track.id,
         Clip {
-            transform: crate::timeline::Transform::default(),
             id,
             start_frame,
             source_start_frame: 0,
@@ -251,6 +250,7 @@ pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Op
             volume: 1.0,
             muted: false,
             linked_audio: false,
+            transform: Transform::default(),
         },
     ))
 }
@@ -373,7 +373,6 @@ pub(crate) fn insert_media(
         None => track.clips.iter().map(clip_end).max().unwrap_or(0),
     };
     let clip = Clip {
-        transform: crate::timeline::Transform::default(),
         id: next_clip_id(project).ok_or("Clip ID limit reached")?,
         start_frame: start,
         source_start_frame: 0,
@@ -382,6 +381,7 @@ pub(crate) fn insert_media(
         volume: 1.0,
         muted: false,
         linked_audio: media.kind == MediaKind::Video && media.has_audio,
+        transform: Transform::default(),
     };
     let end = start.checked_add(duration).ok_or("Clip range overflows")?;
     if track
@@ -572,7 +572,6 @@ mod tests {
 
     fn title(id: u64, start_frame: u64) -> Clip {
         Clip {
-            transform: crate::timeline::Transform::default(),
             id,
             start_frame,
             source_start_frame: 0,
@@ -589,6 +588,7 @@ mod tests {
             volume: 1.0,
             muted: false,
             linked_audio: false,
+            transform: Transform::default(),
         }
     }
 

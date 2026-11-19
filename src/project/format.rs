@@ -48,7 +48,7 @@ pub fn to_json(project: &Project) -> Result<String, serde_json::Error> {
 mod tests {
     use super::*;
     use crate::media::{Media, MediaKind};
-    use crate::timeline::{Clip, ClipContent, Title};
+    use crate::timeline::{Clip, ClipContent, Title, Transform};
     use std::path::PathBuf;
 
     #[test]
@@ -63,7 +63,6 @@ mod tests {
             has_audio: false,
         }]);
         fixture["tracks"][0]["clips"] = serde_json::json!([Clip {
-            transform: crate::timeline::Transform::default(),
             id: 8,
             start_frame: 0,
             source_start_frame: 24,
@@ -72,9 +71,9 @@ mod tests {
             volume: 1.0,
             muted: false,
             linked_audio: false,
+            transform: Transform::default(),
         }]);
         fixture["tracks"][1]["clips"] = serde_json::json!([Clip {
-            transform: crate::timeline::Transform::default(),
             id: 9,
             start_frame: 10,
             source_start_frame: 0,
@@ -95,6 +94,7 @@ mod tests {
             volume: 1.0,
             muted: false,
             linked_audio: false,
+            transform: Transform::default(),
         }]);
         let project = from_json(&fixture.to_string()).unwrap();
         assert_eq!(from_json(&to_json(&project).unwrap()).unwrap(), project);
@@ -157,7 +157,6 @@ mod tests {
         let mut document: serde_json::Value =
             serde_json::from_str(&to_json(&Project::new("Legacy title")).unwrap()).unwrap();
         let mut clip = serde_json::to_value(Clip {
-            transform: crate::timeline::Transform::default(),
             id: 1,
             start_frame: 0,
             source_start_frame: 0,
@@ -166,6 +165,7 @@ mod tests {
             volume: 1.0,
             muted: false,
             linked_audio: false,
+            transform: Transform::default(),
         })
         .unwrap();
         for field in ["bold", "italic", "outline", "parse_html", "parse_markdown"] {
@@ -218,7 +218,6 @@ mod tests {
             has_audio: true,
         }]);
         let clip = Clip {
-            transform: crate::timeline::Transform::default(),
             id: 9,
             start_frame: 0,
             source_start_frame: 0,
@@ -227,6 +226,7 @@ mod tests {
             volume: 1.0,
             muted: false,
             linked_audio: false,
+            transform: Transform::default(),
         };
         document["tracks"][0]["clips"] = serde_json::json!([clip.clone()]);
         document["tracks"][2]["clips"] = serde_json::json!([Clip { id: 10, ..clip }]);
@@ -234,14 +234,13 @@ mod tests {
         assert_eq!(from_json(&to_json(&project).unwrap()).unwrap(), project);
         assert!(!to_json(&project).unwrap().contains("linked_audio"));
         assert!(!to_json(&project).unwrap().contains("transform"));
-        document["tracks"][0]["clips"][0]["transform"] =
-            serde_json::json!(crate::timeline::Transform {
-                scale: 0.5,
-                rotation: 90.0,
-                crop_left: 0.1,
-                opacity: 0.5,
-                ..Default::default()
-            });
+        document["tracks"][0]["clips"][0]["transform"] = serde_json::json!(Transform {
+            scale: 0.5,
+            rotation: 90.0,
+            crop_left: 0.1,
+            opacity: 0.5,
+            ..Default::default()
+        });
         let transformed = from_json(&document.to_string()).unwrap();
         assert_eq!(
             from_json(&to_json(&transformed).unwrap()).unwrap(),

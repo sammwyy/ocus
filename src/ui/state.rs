@@ -967,7 +967,7 @@ impl UiState {
                 path: media.path.clone(),
                 kind: media.kind,
                 source_start: clip.source_start_frame,
-                duration: clip.duration_frames,
+                duration: clip.source_span(),
             });
         }
         let media_id = self.selected_media.peek()?;
@@ -1220,6 +1220,7 @@ impl UiState {
                 };
                 if track.kind == TrackKind::Video {
                     sources.push(FrameSource {
+                        speed: clip.speed,
                         clip_id: clip.id,
                         path: media.path.clone(),
                         kind: media.kind,
@@ -1275,6 +1276,7 @@ impl UiState {
                 .iter()
                 .filter(|range| range.kind != MediaKind::Audio)
                 .map(|range| FrameSource {
+                    speed: 1.0,
                     clip_id: 0,
                     path: range.path.clone(),
                     kind: range.kind,
@@ -1292,6 +1294,7 @@ impl UiState {
                 .iter()
                 .filter(|range| range.kind != MediaKind::Image)
                 .map(|range| AudioSource {
+                    speed: 1.0,
                     path: range.path.clone(),
                     start: 0,
                     source_start: range.source_start,
@@ -1583,7 +1586,7 @@ impl UiState {
                         path: media.path.clone(),
                         kind: media.kind,
                         source_start: clip.source_start_frame,
-                        duration: clip.duration_frames,
+                        duration: clip.source_span(),
                         fps,
                     },
                     geometry.lane_visible(index)
@@ -3042,6 +3045,7 @@ mod tests {
         );
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                speed: clip.speed,
                 path,
                 start: clip.start_frame,
                 source_start: clip.source_start_frame,
@@ -3281,6 +3285,7 @@ mod tests {
                     content: ClipContent::Media { media_id: 1 },
                     volume: 1.0,
                     muted: false,
+                    speed: 1.0,
                     linked_audio: false,
                 }
             }));
@@ -4131,6 +4136,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: true,
+                speed: 1.0,
                 linked_audio: false,
             }
         }));

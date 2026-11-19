@@ -124,6 +124,7 @@ mod tests {
                 }),
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 linked_audio: false,
             },
         }));

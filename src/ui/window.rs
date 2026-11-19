@@ -122,8 +122,8 @@ fn adjust_timing(state: &UiState, source: bool, seconds: bool, increase: bool) {
                 .find(|media| media.id == media_id)
                 .filter(|media| media.kind != MediaKind::Image)
                 .and_then(|media| media_frames(media, fps))
-                .map(|frames| frames.saturating_sub(clip.duration_frames))
-                .unwrap_or(u64::MAX - clip.duration_frames),
+                .map(|frames| frames.saturating_sub(clip.source_span()))
+                .unwrap_or(u64::MAX - clip.source_span()),
             _ => return,
         };
         Some(Command::Trim {
@@ -1866,6 +1866,37 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                 ],
             ));
         }
+        if media.is_some_and(|media| media.kind != MediaKind::Image) {
+            let mut presets = Vec::new();
+            for speed in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] {
+                presets.push(chip(
+                    &format!("{speed}x"),
+                    clip.speed == speed,
+                    state,
+                    move |state| {
+                        if let Some((track_id, clip)) = selected_clip(state) {
+                            state.edit(Command::SetClipSpeed {
+                                track_id,
+                                clip_id: clip.id,
+                                speed,
+                            });
+                        }
+                    },
+                ));
+            }
+            rows.push(section(
+                &format!("Speed · {}x", clip.speed),
+                vec![
+                    Box::new(Grid::new().columns(3).gap(4.0).with_children(presets)),
+                    text("Slower is longer · faster is shorter.", faint(), 10.0),
+                    text(
+                        "Audio keeps its pitch. Stops at the next clip.",
+                        faint(),
+                        10.0,
+                    ),
+                ],
+            ));
+        }
         let destinations = compatible_destinations(project.tracks(), track_id, &clip);
         let mut move_buttons = Flex::row()
             .gap(4.0)
@@ -2216,7 +2247,7 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                                     path: media.path.clone(),
                                     kind: media.kind,
                                     source_start: clip.source_start_frame,
-                                    duration: clip.duration_frames,
+                                    duration: clip.source_span(),
                                     fps,
                                 })
                                 .cloned()
@@ -2225,6 +2256,7 @@ fn timeline_lanes(state: &UiState, project: &Project, fps: (u32, u32)) -> Vec<La
                             .filter(|_| video)
                             .and_then(|media| state.thumbnails.borrow().get(&media.path).cloned()),
                         volume: clip.volume,
+                        speed: clip.speed,
                         muted: clip.muted,
                         linked_audio: clip.linked_audio,
                     }
@@ -2553,27 +2585,31 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
         ),
     };
     let source_end = range.as_ref().map_or(0, |range| range.duration);
-    let source_actions: Vec<BoxedWidget> = match (primary, selected_media) {
-        (Some(_), _) => selected_clip(state)
-            .filter(|_| range.is_some())
-            .map(|(_, clip)| {
-                let start = clip.start_frame;
-                tool_button(Some(Glyph::Locate), "Match frame", true, state, move |s| {
-                    s.pause_source();
-                    s.focus_frame(start.saturating_add(s.source.position.peek()));
+    let source_actions: Vec<BoxedWidget> =
+        match (primary, selected_media) {
+            (Some(_), _) => selected_clip(state)
+                .filter(|_| range.is_some())
+                .map(|(_, clip)| {
+                    let start = clip.start_frame;
+                    let speed = clip.speed;
+                    tool_button(Some(Glyph::Locate), "Match frame", true, state, move |s| {
+                        s.pause_source();
+                        s.focus_frame(start.saturating_add(
+                            (s.source.position.peek() as f64 / speed).floor() as u64,
+                        ));
+                    })
                 })
-            })
-            .into_iter()
-            .collect(),
-        (None, Some(id)) => vec![tool_button(
-            Some(Glyph::Plus),
-            "Insert",
-            !busy && source_end > 0,
-            state,
-            move |s| s.insert_media(id),
-        )],
-        (None, None) => Vec::new(),
-    };
+                .into_iter()
+                .collect(),
+            (None, Some(id)) => vec![tool_button(
+                Some(Glyph::Plus),
+                "Insert",
+                !busy && source_end > 0,
+                state,
+                move |s| s.insert_media(id),
+            )],
+            (None, None) => Vec::new(),
+        };
     let source = monitor(
         "Source",
         VIDEO,
@@ -3994,6 +4030,7 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 1.0,
             muted: false,
+            speed: 1.0,
             linked_audio: false,
         }
     }
@@ -5240,6 +5277,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 linked_audio: false
             }
         }));
@@ -5275,6 +5313,7 @@ mod tests {
                     fallback: None,
                     volume: 1.0,
                     muted: false,
+                    speed: 1.0,
                     linked_audio: false,
                 }],
             }],
@@ -5384,6 +5423,61 @@ mod tests {
         assert!(state.drag.peek().is_none());
         state.end_media_drag();
         assert_eq!(starts(0), vec![0, 90]);
+    }
+
+    #[test]
+    fn speed_presets_apply_to_media_but_not_titles_or_stills() {
+        let state = UiState::new();
+        assert!(
+            !render(&state, 1440.0, 1500.0)
+                .labels
+                .iter()
+                .any(|label| label.starts_with("SPEED ·"))
+        );
+        assert!(state.add_title());
+        assert!(
+            !render(&state, 1440.0, 1500.0)
+                .labels
+                .iter()
+                .any(|label| label.starts_with("SPEED ·"))
+        );
+        for (id, kind, path) in [
+            (7, MediaKind::Video, "video.mp4"),
+            (8, MediaKind::Image, "still.png"),
+        ] {
+            assert!(state.edit(Command::ImportMedia(Media {
+                id,
+                path: path.into(),
+                kind,
+                duration_us: Some(4_000_000),
+                has_audio: false
+            })));
+            state.insert_media(id);
+            let labels = render(&state, 1440.0, 1500.0).labels;
+            if kind == MediaKind::Image {
+                assert!(!labels.iter().any(|label| label.starts_with("SPEED ·")));
+            } else {
+                for preset in ["0.25x", "0.5x", "1x", "1.5x", "2x", "4x"] {
+                    assert!(labels.iter().any(|label| label == preset), "{preset}");
+                }
+                let (track_id, clip) = selected_clip(&state).unwrap();
+                assert!(state.edit(Command::SetClipSpeed {
+                    track_id,
+                    clip_id: clip.id,
+                    speed: 2.0
+                }));
+                let labels = render(&state, 1440.0, 1500.0).labels;
+                assert!(labels.iter().any(|label| label == "SPEED · 2X"));
+                assert!(labels.iter().any(|label| label == "2x"));
+                adjust_timing(&state, true, false, true);
+                assert_eq!(selected_clip(&state).unwrap().1.source_start_frame, 0);
+                adjust_timing(&state, false, true, false);
+                assert_eq!(selected_clip(&state).unwrap().1.duration_frames, 30);
+                adjust_timing(&state, true, true, true);
+                let clip = selected_clip(&state).unwrap().1;
+                assert_eq!((clip.source_start_frame, clip.source_span()), (30, 60));
+            }
+        }
     }
 
     #[test]

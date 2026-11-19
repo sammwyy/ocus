@@ -43,6 +43,7 @@ pub(super) struct LaneClip {
     pub clip_id: u64,
     pub start: u64,
     pub duration: u64,
+    pub speed: f64,
     pub name: String,
     pub look: ClipLook,
     pub images: Option<Storyboard>,
@@ -797,7 +798,25 @@ impl TimelineView {
             base.mix(STAGE, if selected { 0.2 } else { 0.42 }),
             0.0,
         );
-        let label_space = body.width - 12.0;
+        let badge = (clip.speed != 1.0).then(|| format!("{}x", clip.speed));
+        let badge_width = if badge.is_some() {
+            36.0_f32.min((body.width - 12.0).max(0.0))
+        } else {
+            0.0
+        };
+        let label_space = body.width - 12.0 - badge_width;
+        if let Some(badge) = badge
+            && badge_width >= 24.0
+        {
+            let rect = Rect {
+                x: body.x + body.width - badge_width - 4.0,
+                y: body.y + 2.0,
+                width: badge_width,
+                height: CLIP_HEADER - 4.0,
+            };
+            painter.fill_rect(rect, STAGE, 3.0);
+            painter.fill_text(rect, &badge, text_color(), 9.0, TextAlign::Center);
+        }
         let duration = format!(
             "{:.1}s",
             clip.duration as f64 * f64::from(self.fps.1) / f64::from(self.fps.0.max(1))
@@ -822,7 +841,7 @@ impl TimelineView {
         if show_duration {
             painter.fill_text(
                 Rect {
-                    x: body.x + body.width - 50.0,
+                    x: body.x + body.width - 50.0 - badge_width,
                     y: body.y + 1.0,
                     width: 44.0,
                     height: CLIP_HEADER - 2.0,

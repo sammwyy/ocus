@@ -56,8 +56,11 @@ IDs, clip ranges and reference existence. `project::store` loads and saves on
 background jobs, with same-directory temporary files, sync, and rename for
 atomic writes. Imported media paths are absolute. Format migrations do not
 exist yet; optional probe metadata and title style/parse flags keep version 1
-files readable. Media
-probing and bounded first-frame thumbnails use the `ffmpeg-next` library on
+files readable. Media clip speed is also an optional version 1 field: absent means 1x and 1x is
+omitted when saving. It scales source time, not stored timeline duration;
+titles and still images must stay at 1x. The shared audio mixer uses FFmpeg's
+atempo filter for changed speeds, chaining stages outside 0.5x–2x to preserve
+pitch. Media probing and bounded first-frame thumbnails use the `ffmpeg-next` library on
 workers. `media/preview.rs` decodes and scales frames off the UI thread,
 maintaining a small frame buffer during playback and seeking to source frames
 after an edit. It also generates three representative thumbnails per video

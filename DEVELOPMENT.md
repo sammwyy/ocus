@@ -53,7 +53,7 @@ development package matching the RPM Fusion FFmpeg libraries:
 
 ```sh
 sudo dnf install ffmpeg-devel
-pkg-config --modversion libavformat libavcodec libavutil libswscale libswresample
+pkg-config --modversion libavformat libavcodec libavutil libswscale libswresample libavfilter
 ```
 
 On the Fedora 42 development machine, this check currently succeeds. Do not
@@ -66,8 +66,8 @@ Install a C compiler, `pkg-config`, FFmpeg and `libclang`:
 
 ```sh
 sudo apt update
-sudo apt install build-essential pkg-config libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev libclang-dev
-pkg-config --modversion libavformat libavcodec libavutil libswscale libswresample
+sudo apt install build-essential pkg-config libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev libavfilter-dev libclang-dev
+pkg-config --modversion libavformat libavcodec libavutil libswscale libswresample libavfilter
 ```
 
 Use a Wayland or X11 desktop session to launch the window. Depending on the
@@ -102,7 +102,7 @@ Run `cargo run --locked` from a logged-in graphical session. Verify the FFmpeg
 libraries are discoverable:
 
 ```sh
-pkg-config --modversion libavformat libavcodec libavutil libswscale libswresample
+pkg-config --modversion libavformat libavcodec libavutil libswscale libswresample libavfilter
 ```
 
 The macOS build and FFmpeg integration have not been verified on a Mac yet.

@@ -633,6 +633,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 linked_audio: false,
             }
         }));
@@ -688,6 +689,7 @@ mod tests {
                 content: ClipContent::Title(Title::default()),
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 linked_audio: false,
             },
         }));
@@ -757,6 +759,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 linked_audio: false,
             },
         }));
@@ -872,6 +875,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 2 },
                 volume: 0.5,
                 muted: false,
+                speed: 1.0,
                 linked_audio: false,
             },
         }));
@@ -936,6 +940,7 @@ mod tests {
             content: ClipContent::Media { media_id: 1 },
             volume: 1.0,
             muted: false,
+            speed: 1.0,
             linked_audio: false,
         }];
         layered[1].clips = vec![Clip {
@@ -946,6 +951,7 @@ mod tests {
             content: ClipContent::Media { media_id: 3 },
             volume: 1.0,
             muted: false,
+            speed: 1.0,
             linked_audio: false,
         }];
         layered.push(Track {
@@ -965,6 +971,7 @@ mod tests {
                 }),
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 linked_audio: false,
             }],
         });
@@ -1070,6 +1077,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 linked_audio: false,
             },
         }));
@@ -1150,6 +1158,7 @@ mod tests {
                 }),
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 linked_audio: false,
             },
         }));
@@ -1274,6 +1283,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 linked_audio: false,
             },
         }));
@@ -1387,6 +1397,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                speed: 1.0,
                 linked_audio: false,
             },
         }));

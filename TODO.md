@@ -32,6 +32,7 @@ clip commands do not complete the corresponding editor workflows.
   snapping, drag sources from the bin onto a track, and drop files on the
   window or a track; each drop is one undoable command.
 - [x] Trim clips by dragging their edges, with frame and second steps in the inspector.
+- [x] Set media clip speed from 0.25x to 4x with pitch-preserving linked audio.
 - [ ] Generate filmstrips lazily for clips beyond the bounded first 64
   cached source ranges in large projects.
 - [x] Decode video on a worker with a bounded frame buffer; support

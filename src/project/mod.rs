@@ -105,9 +105,10 @@ impl Project {
                     .checked_add(clip.duration_frames)
                     .ok_or("Clip range overflows")?;
                 clip.source_start_frame
-                    .checked_add(clip.duration_frames)
+                    .checked_add(clip.source_span())
                     .ok_or("Clip source range overflows")?;
                 if clip.duration_frames == 0
+                    || !clip.valid_speed()
                     || clip.start_frame < end
                     || !clip_ids.insert(clip.id)
                     || !clip.volume.is_finite()
@@ -118,7 +119,8 @@ impl Project {
                 end = next;
                 match &clip.content {
                     ClipContent::Title(title)
-                        if track.kind == TrackKind::Video && title.valid() => {}
+                        if track.kind == TrackKind::Video && title.valid() && clip.speed == 1.0 => {
+                    }
                     ClipContent::Media { media_id }
                         if self.media.iter().any(|media| {
                             media.id == *media_id && self.media_clip_fits(media, track.kind, clip)
@@ -145,6 +147,9 @@ impl Project {
         kind: TrackKind,
         clip: &crate::timeline::Clip,
     ) -> bool {
+        if !clip.valid_speed() || media.kind == MediaKind::Image && clip.speed != 1.0 {
+            return false;
+        }
         if !(matches!(
             (kind, media.kind),
             (TrackKind::Video, MediaKind::Video | MediaKind::Image)
@@ -166,7 +171,7 @@ impl Project {
         } else {
             max_frames
         };
-        u128::from(clip.source_start_frame) + u128::from(clip.duration_frames) <= max_frames
+        u128::from(clip.source_start_frame) + u128::from(clip.source_span()) <= max_frames
     }
 }
 

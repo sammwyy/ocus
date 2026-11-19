@@ -20,6 +20,8 @@ pub struct Clip {
     pub start_frame: u64,
     pub source_start_frame: u64,
     pub duration_frames: u64,
+    #[serde(default = "default_speed", skip_serializing_if = "normal_speed")]
+    pub speed: f64,
     pub content: ClipContent,
     pub volume: f32,
     pub muted: bool,
@@ -27,6 +29,32 @@ pub struct Clip {
     /// moved and trimmed with the picture; `volume` and `muted` apply to it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub linked_audio: bool,
+}
+
+fn default_speed() -> f64 {
+    1.0
+}
+
+fn normal_speed(speed: &f64) -> bool {
+    *speed == 1.0
+}
+
+impl Clip {
+    pub fn source_offset(&self, timeline_frames: u64) -> u64 {
+        (timeline_frames as f64 * self.speed).floor() as u64
+    }
+
+    pub fn source_span(&self) -> u64 {
+        (self.duration_frames as f64 * self.speed).ceil() as u64
+    }
+
+    pub fn timeline_span(&self, source_frames: u64) -> u64 {
+        (source_frames as f64 / self.speed).floor() as u64
+    }
+
+    pub fn valid_speed(&self) -> bool {
+        self.speed.is_finite() && (0.25..=4.0).contains(&self.speed)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

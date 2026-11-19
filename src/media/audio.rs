@@ -18,6 +18,7 @@ const CHUNK: usize = 2_048;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AudioSource {
+    pub speed: f64,
     pub path: PathBuf,
     pub start: u64,
     pub source_start: u64,
@@ -52,6 +53,7 @@ impl AudioPlan {
                     }
                     let media = project.media().iter().find(|media| media.id == media_id)?;
                     audible(track.kind, clip, media).then(|| AudioSource {
+                        speed: clip.speed,
                         path: media.path.clone(),
                         start: clip.start_frame,
                         source_start: clip.source_start_frame,
@@ -199,7 +201,8 @@ pub fn feed(
     struct Slot<'a> {
         path: &'a Path,
         offset: u64,
-        reader: Option<AudioReader>,
+        reader: Option<TempoReader>,
+        speed: f64,
         begin: u64,
         end: u64,
         volume: f32,
@@ -212,7 +215,9 @@ pub fn feed(
             let until = source.start.saturating_add(source.duration).min(plan.end);
             (from < until).then(|| Slot {
                 path: &source.path,
-                offset: source.source_start + from - source.start,
+                offset: source.source_start
+                    + ((from - source.start) as f64 * source.speed).floor() as u64,
+                speed: source.speed,
                 reader: None,
                 begin: to_samples(from),
                 end: to_samples(until),
@@ -236,7 +241,14 @@ pub fn feed(
             let reader = match &mut slot.reader {
                 Some(reader) => reader,
                 None => {
-                    match AudioReader::open(slot.path, slot.offset, plan.fps, cancelled.clone()) {
+                    match TempoReader::open(
+                        slot.path,
+                        slot.offset,
+                        plan.fps,
+                        slot.speed,
+                        ((slot.end - slot.begin) as f64 * slot.speed).ceil() as u64,
+                        cancelled.clone(),
+                    ) {
                         Ok(Some(reader)) => slot.reader.insert(reader),
                         Ok(None) => {
                             slot.end = from;
@@ -282,6 +294,144 @@ pub fn feed(
     match first_error {
         Some(error) => Err(error),
         None => Ok(()),
+    }
+}
+
+struct TempoReader {
+    reader: AudioReader,
+    filter: Option<ffmpeg::filter::Graph>,
+    pending: VecDeque<f32>,
+    remaining: u64,
+    flushed: bool,
+}
+
+impl TempoReader {
+    fn open(
+        path: &Path,
+        offset: u64,
+        fps: (u32, u32),
+        speed: f64,
+        remaining: u64,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<Option<Self>, String> {
+        let Some(reader) = AudioReader::open(path, offset, fps, cancelled)? else {
+            return Ok(None);
+        };
+        let filter = if speed == 1.0 {
+            None
+        } else {
+            let mut graph = ffmpeg::filter::Graph::new();
+            let buffer = ffmpeg::filter::find("abuffer").ok_or("FFmpeg abuffer is unavailable")?;
+            let sink =
+                ffmpeg::filter::find("abuffersink").ok_or("FFmpeg abuffersink is unavailable")?;
+            graph
+                .add(
+                    &buffer,
+                    "in",
+                    "time_base=1/48000:sample_rate=48000:sample_fmt=flt:channel_layout=stereo",
+                )
+                .map_err(|error| error.to_string())?;
+            graph
+                .add(&sink, "out", "")
+                .map_err(|error| error.to_string())?;
+            let mut out = graph.get("out").ok_or("Missing audio filter sink")?;
+            out.set_sample_format(ffmpeg::format::Sample::F32(
+                ffmpeg::format::sample::Type::Packed,
+            ));
+            out.set_channel_layout(ffmpeg::ChannelLayout::STEREO);
+            out.set_sample_rate(RATE);
+            let spec = if speed < 0.5 {
+                format!("atempo=0.5,atempo={}", speed / 0.5)
+            } else if speed > 2.0 {
+                format!("atempo=2,atempo={}", speed / 2.0)
+            } else {
+                format!("atempo={speed}")
+            };
+            graph
+                .output("in", 0)
+                .and_then(|output| output.input("out", 0))
+                .and_then(|input| input.parse(&spec))
+                .map_err(|error| error.to_string())?;
+            graph.validate().map_err(|error| error.to_string())?;
+            Some(graph)
+        };
+        Ok(Some(Self {
+            reader,
+            filter,
+            pending: VecDeque::new(),
+            remaining,
+            flushed: false,
+        }))
+    }
+
+    fn read(
+        &mut self,
+        output: &mut Vec<f32>,
+        frames: usize,
+        cancelled: &AtomicBool,
+    ) -> Result<(), String> {
+        let Some(filter) = &mut self.filter else {
+            self.reader.read(output, frames, cancelled)?;
+            return Ok(());
+        };
+        while self.pending.len() < frames * CHANNELS && !cancelled.load(Ordering::Relaxed) {
+            let mut decoded = ffmpeg::frame::Audio::empty();
+            match filter.get("out").unwrap().sink().frame(&mut decoded) {
+                Ok(()) => {
+                    self.pending.extend(
+                        decoded
+                            .plane::<(f32, f32)>(0)
+                            .iter()
+                            .flat_map(|&(left, right)| [left, right]),
+                    );
+                }
+                Err(ffmpeg::Error::Eof) => break,
+                Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => {
+                    if self.flushed {
+                        break;
+                    }
+                    let mut samples = Vec::new();
+                    let count = self.remaining.min(CHUNK as u64) as usize;
+                    self.reader.read(&mut samples, count, cancelled)?;
+                    self.remaining = self
+                        .remaining
+                        .saturating_sub((samples.len() / CHANNELS) as u64);
+                    if samples.is_empty() {
+                        filter
+                            .get("in")
+                            .unwrap()
+                            .source()
+                            .flush()
+                            .map_err(|error| error.to_string())?;
+                        self.flushed = true;
+                    } else {
+                        let mut input = ffmpeg::frame::Audio::new(
+                            ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
+                            samples.len() / CHANNELS,
+                            ffmpeg::ChannelLayout::STEREO,
+                        );
+                        input.set_rate(RATE);
+                        for (frame, pair) in input
+                            .plane_mut::<(f32, f32)>(0)
+                            .iter_mut()
+                            .zip(samples.as_chunks::<CHANNELS>().0)
+                        {
+                            *frame = (pair[0], pair[1]);
+                        }
+                        filter
+                            .get("in")
+                            .unwrap()
+                            .source()
+                            .add(&input)
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        let count = (frames * CHANNELS).min(self.pending.len());
+        output.extend(self.pending.drain(..count));
+        Ok(())
     }
 }
 
@@ -621,6 +771,101 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[test]
+    fn sped_up_audio_handles_empty_and_missing_sources() {
+        let queue = Arc::new(AudioQueue::new());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut plan = AudioPlan {
+            sources: vec![],
+            end: 3,
+            fps: (30, 1),
+        };
+        feed(&plan, 0, queue.clone(), cancelled.clone()).unwrap();
+        assert!(std::iter::from_fn(|| queue.pop()).all(|sample| sample == 0.0));
+        let directory = tempfile::tempdir().unwrap();
+        plan.sources.push(AudioSource {
+            path: directory.path().join("missing.wav"),
+            speed: 0.5,
+            start: 0,
+            source_start: 0,
+            duration: 3,
+            volume: 1.0,
+        });
+        let queue = Arc::new(AudioQueue::new());
+        assert!(
+            feed(&plan, 0, queue, cancelled)
+                .unwrap_err()
+                .contains("Cannot open audio source")
+        );
+    }
+
+    #[test]
+    fn tempo_changes_length_without_changing_pitch() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tone.wav");
+        assert!(
+            std::process::Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "aevalsrc=0.5*sin(2*PI*440*t):s=48000:d=2",
+                    "-c:a",
+                    "pcm_f32le"
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        for speed in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] {
+            let duration = (60.0 / speed) as u64;
+            let plan = Arc::new(AudioPlan {
+                sources: vec![AudioSource {
+                    speed,
+                    path: path.clone(),
+                    start: 0,
+                    source_start: 0,
+                    duration,
+                    volume: 1.0,
+                }],
+                end: duration,
+                fps: (30, 1),
+            });
+            let samples = play(&plan, 0, None);
+            assert_eq!(
+                samples.len(),
+                (duration * u64::from(RATE) / 30) as usize * CHANNELS
+            );
+            let frames: Vec<_> = samples
+                .as_chunks::<CHANNELS>()
+                .0
+                .iter()
+                .skip(RATE as usize / 10)
+                .take(RATE as usize / 5)
+                .map(|pair| f64::from(pair[0]))
+                .collect();
+            let amplitude = |frequency: f64| {
+                let (real, imaginary) =
+                    frames
+                        .iter()
+                        .enumerate()
+                        .fold((0.0, 0.0), |(re, im), (i, sample)| {
+                            let phase =
+                                std::f64::consts::TAU * frequency * i as f64 / f64::from(RATE);
+                            (re + sample * phase.cos(), im + sample * phase.sin())
+                        });
+                2.0 * real.hypot(imaginary) / frames.len() as f64
+            };
+            assert!(amplitude(440.0) > 0.4, "{speed}x: {}", amplitude(440.0));
+            if speed != 1.0 {
+                assert!(amplitude(440.0 * speed) < 0.05);
+            }
+        }
+    }
+
     fn mixed_project() -> Project {
         let mut value = serde_json::to_value(Project::new("Mixed audio")).unwrap();
         value["settings"]["frame_rate"] =
@@ -660,6 +905,7 @@ mod tests {
     fn timeline_audio_plan_preserves_sources_and_clock() {
         let project = mixed_project();
         let source = |path: &str, start, volume| AudioSource {
+            speed: 1.0,
             path: path.into(),
             start,
             source_start: 2,
@@ -743,6 +989,7 @@ mod tests {
             let queue = Arc::new(AudioQueue::new());
             let plan = AudioPlan {
                 sources: vec![AudioSource {
+                    speed: 1.0,
                     path,
                     start: 0,
                     source_start: 0,
@@ -842,6 +1089,7 @@ mod tests {
             let plan = Arc::new(AudioPlan {
                 sources: (0..clips)
                     .map(|index| AudioSource {
+                        speed: 1.0,
                         path: path.clone(),
                         start: index * 240,
                         source_start: 0,
@@ -904,6 +1152,7 @@ mod tests {
         let plan = AudioPlan {
             sources: vec![
                 AudioSource {
+                    speed: 1.0,
                     path: mono.clone(),
                     start: 0,
                     source_start: 0,
@@ -911,6 +1160,7 @@ mod tests {
                     volume: 1.0,
                 },
                 AudioSource {
+                    speed: 1.0,
                     path: stereo.clone(),
                     start: 5,
                     source_start: 6,
@@ -918,6 +1168,7 @@ mod tests {
                     volume: 0.5,
                 },
                 AudioSource {
+                    speed: 1.0,
                     path: silent.clone(),
                     start: 0,
                     source_start: 0,
@@ -955,6 +1206,7 @@ mod tests {
         let queue = Arc::new(AudioQueue::new());
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                speed: 1.0,
                 path: path.clone(),
                 start: 0,
                 source_start: 0,
@@ -1010,6 +1262,7 @@ mod tests {
         let queue = Arc::new(AudioQueue::new());
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                speed: 1.0,
                 path: path.clone(),
                 start: 0,
                 source_start: 3,
@@ -1077,6 +1330,7 @@ mod tests {
             let queue = Arc::new(AudioQueue::new());
             let plan = AudioPlan {
                 sources: vec![AudioSource {
+                    speed: 1.0,
                     path: path.clone(),
                     start: 0,
                     source_start: 0,
@@ -1224,6 +1478,7 @@ mod tests {
             );
             let plan = Arc::new(AudioPlan {
                 sources: vec![AudioSource {
+                    speed: 1.0,
                     path,
                     start: 0,
                     source_start: 0,
@@ -1271,6 +1526,7 @@ mod tests {
             .collect();
         write_wav(&stereo, 48_000, 2, &stereo_samples);
         let source = |path: &PathBuf, start, source_start, duration, volume| AudioSource {
+            speed: 1.0,
             path: path.clone(),
             start,
             source_start,
@@ -1337,6 +1593,7 @@ mod tests {
         assert!(made.unwrap().success());
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                speed: 1.0,
                 path: path.clone(),
                 start: 0,
                 source_start: 0,
@@ -1368,6 +1625,7 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(true));
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                speed: 1.0,
                 path: PathBuf::from("missing.wav"),
                 start: 0,
                 source_start: 0,

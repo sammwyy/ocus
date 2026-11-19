@@ -249,6 +249,7 @@ pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Op
             }),
             volume: 1.0,
             muted: false,
+            speed: 1.0,
             linked_audio: false,
         },
     ))
@@ -376,6 +377,7 @@ pub(crate) fn insert_media(
         start_frame: start,
         source_start_frame: 0,
         duration_frames: duration,
+        speed: 1.0,
         content: ClipContent::Media { media_id },
         volume: 1.0,
         muted: false,
@@ -528,6 +530,7 @@ pub(crate) fn link_audio(project: &Project, selection: &[ClipRef]) -> Option<Pla
                     && clip.start_frame == picture.start_frame
                     && clip.source_start_frame == picture.source_start_frame
                     && clip.duration_frames == picture.duration_frames
+                    && clip.speed == picture.speed
             })
         });
         let has_audio = project
@@ -585,6 +588,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            speed: 1.0,
             linked_audio: false,
         }
     }

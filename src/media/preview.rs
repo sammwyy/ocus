@@ -16,6 +16,13 @@ pub struct FrameSource {
     pub start: u64,
     pub source_start: u64,
     pub duration: u64,
+    pub speed: f64,
+}
+
+impl FrameSource {
+    fn source_frame(&self, position: u64) -> u64 {
+        self.source_start + ((position - self.start) as f64 * self.speed).floor() as u64
+    }
 }
 
 #[derive(Clone)]
@@ -48,6 +55,7 @@ pub fn storyboard(
         vec![0, key.duration / 2, key.duration - 1]
     };
     let source = FrameSource {
+        speed: 1.0,
         clip_id: 0,
         path: key.path.clone(),
         kind: key.kind,
@@ -140,7 +148,7 @@ impl VideoLayers {
         position: u64,
         cancelled: &Arc<AtomicBool>,
     ) -> Result<Arc<FrameImage>, String> {
-        let target = source.source_start + position - source.start;
+        let target = source.source_frame(position);
         if !self.readers.contains_key(&source.clip_id) {
             self.readers.insert(
                 source.clip_id,
@@ -453,6 +461,27 @@ mod tests {
     use std::process::Command;
 
     #[test]
+    fn speed_maps_timeline_offsets_to_source_frames() {
+        for speed in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] {
+            let source = super::FrameSource {
+                clip_id: 1,
+                path: "video.mp4".into(),
+                kind: super::MediaKind::Video,
+                start: 10,
+                source_start: 30,
+                duration: 60,
+                speed,
+            };
+            for offset in [0, 1, 3, 17, 59] {
+                assert_eq!(
+                    source.source_frame(10 + offset),
+                    30 + (offset as f64 * speed).floor() as u64
+                );
+            }
+        }
+    }
+
+    #[test]
     fn decoded_colors_match_ffmpeg() {
         ffmpeg::init().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -509,6 +538,7 @@ mod tests {
                 .unwrap();
             assert!(reference.status.success());
             let source = FrameSource {
+                speed: 1.0,
                 clip_id: 1,
                 path: path.clone(),
                 kind: MediaKind::Video,
@@ -547,6 +577,7 @@ mod tests {
             let source = FrameSource {
                 clip_id: 1,
                 path: root.join(format!("{name}.mp4")),
+                speed: 1.0,
                 kind: MediaKind::Video,
                 start: 0,
                 source_start: 0,
@@ -592,6 +623,7 @@ mod tests {
         data.extend((0..8 * 6 * 3).map(|value| value as u8));
         fs::write(&path, data).unwrap();
         let source = FrameSource {
+            speed: 1.0,
             clip_id: 1,
             path: path.clone(),
             kind: MediaKind::Image,
@@ -634,6 +666,7 @@ mod tests {
             );
             let frames = u64::from(fps.0 / fps.1);
             let source = FrameSource {
+                speed: 1.0,
                 clip_id: 1,
                 path,
                 kind: MediaKind::Video,
@@ -693,6 +726,7 @@ mod tests {
                 .success()
         );
         let source = FrameSource {
+            speed: 1.0,
             clip_id: 1,
             path: path.clone(),
             kind: MediaKind::Video,
@@ -763,6 +797,7 @@ mod tests {
                 (180, 320)
             };
             let source = FrameSource {
+                speed: 1.0,
                 clip_id: 1,
                 path: path.clone(),
                 kind: MediaKind::Video,
@@ -819,6 +854,7 @@ mod tests {
             data.extend(vec![255; width * height * 3]);
             fs::write(&path, data).unwrap();
             let source = FrameSource {
+                speed: 1.0,
                 clip_id: 1,
                 path: path.clone(),
                 kind: MediaKind::Image,
@@ -904,6 +940,7 @@ mod tests {
         ffmpeg::init().unwrap();
         let cancelled = Arc::new(AtomicBool::new(false));
         let source = FrameSource {
+            speed: 1.0,
             clip_id: 1,
             path,
             kind: MediaKind::Video,
@@ -937,6 +974,7 @@ mod tests {
         }
         fs::write(&path, source).unwrap();
         let clips = [FrameSource {
+            speed: 1.0,
             clip_id: 1,
             path: path.clone(),
             kind: MediaKind::Video,
@@ -1029,6 +1067,7 @@ mod tests {
         assert!(storyboard_frames[2].pixels[center] > 140);
         let cut = PreviewPlan {
             sources: vec![FrameSource {
+                speed: 1.0,
                 clip_id: 2,
                 path: path.clone(),
                 kind: MediaKind::Video,

@@ -1,6 +1,6 @@
 use crate::media::{Media, MediaKind};
 use crate::project::Project;
-use crate::timeline::{Clip, ClipContent, TrackKind};
+use crate::timeline::{Clip, ClipContent, Playback, TrackKind};
 use ffmpeg_next as ffmpeg;
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -81,7 +81,7 @@ impl AudioPlan {
 }
 
 pub(crate) fn audible(kind: TrackKind, clip: &Clip, media: &Media) -> bool {
-    !clip.muted && carries_sound(kind, clip, media)
+    !clip.muted && clip.playback != Playback::Freeze && carries_sound(kind, clip, media)
 }
 
 pub(crate) fn carries_sound(kind: TrackKind, clip: &Clip, media: &Media) -> bool {
@@ -202,6 +202,7 @@ pub fn feed(
         path: &'a Path,
         offset: u64,
         reader: Option<AudioReader>,
+        reverse: Option<ReverseAudioReader>,
         begin: u64,
         end: u64,
         volume: f32,
@@ -209,6 +210,7 @@ pub fn feed(
     let mut slots: Vec<Slot> = plan
         .sources
         .iter()
+        .filter(|source| source.playback != Playback::Freeze)
         .filter_map(|source| {
             let from = source.start.max(start);
             let until = source.start.saturating_add(source.duration).min(plan.end);
@@ -216,6 +218,15 @@ pub fn feed(
                 path: &source.path,
                 offset: source.source_start + from - source.start,
                 reader: None,
+                reverse: (source.playback == Playback::Reverse).then(|| ReverseAudioReader {
+                    path: source.path.clone(),
+                    source_start: source.source_start,
+                    fps: plan.fps,
+                    end: to_samples(source.start.saturating_add(source.duration))
+                        .saturating_sub(to_samples(source.start))
+                        .saturating_sub(to_samples(from) - to_samples(source.start)),
+                    samples: VecDeque::new(),
+                }),
                 begin: to_samples(from),
                 end: to_samples(until),
                 volume: source.volume,
@@ -235,27 +246,33 @@ pub fn feed(
             if from >= until {
                 continue;
             }
-            let reader = match &mut slot.reader {
-                Some(reader) => reader,
-                None => {
-                    match AudioReader::open(slot.path, slot.offset, plan.fps, cancelled.clone()) {
-                        Ok(Some(reader)) => slot.reader.insert(reader),
-                        Ok(None) => {
-                            slot.end = from;
-                            continue;
-                        }
-                        Err(error) => {
-                            if !cancelled.load(Ordering::Relaxed) {
-                                first_error.get_or_insert(error);
+            let mut sound = Vec::with_capacity((until - from) as usize * CHANNELS);
+            let result = if let Some(reverse) = &mut slot.reverse {
+                reverse.read(&mut sound, (until - from) as usize, &cancelled)
+            } else {
+                let reader = match &mut slot.reader {
+                    Some(reader) => reader,
+                    None => {
+                        match AudioReader::open(slot.path, slot.offset, plan.fps, cancelled.clone())
+                        {
+                            Ok(Some(reader)) => slot.reader.insert(reader),
+                            Ok(None) => {
+                                slot.end = from;
+                                continue;
                             }
-                            slot.end = from;
-                            continue;
+                            Err(error) => {
+                                if !cancelled.load(Ordering::Relaxed) {
+                                    first_error.get_or_insert(error);
+                                }
+                                slot.end = from;
+                                continue;
+                            }
                         }
                     }
-                }
+                };
+                reader.read(&mut sound, (until - from) as usize, &cancelled)
             };
-            let mut sound = Vec::with_capacity((until - from) as usize * CHANNELS);
-            match reader.read(&mut sound, (until - from) as usize, &cancelled) {
+            match result {
                 Ok(_) => {
                     for (index, frame) in sound.as_chunks::<CHANNELS>().0.iter().enumerate() {
                         let offset = (from - position) as usize * CHANNELS + index * CHANNELS;
@@ -287,6 +304,75 @@ pub fn feed(
     }
 }
 
+struct ReverseAudioReader {
+    path: PathBuf,
+    source_start: u64,
+    fps: (u32, u32),
+    end: u64,
+    samples: VecDeque<f32>,
+}
+
+impl ReverseAudioReader {
+    fn read(
+        &mut self,
+        out: &mut Vec<f32>,
+        frames: usize,
+        cancelled: &Arc<AtomicBool>,
+    ) -> Result<usize, String> {
+        let mut read = 0;
+        while read < frames && !cancelled.load(Ordering::Relaxed) {
+            if self.samples.is_empty() {
+                if self.end == 0 {
+                    break;
+                }
+                let begin = self.end.saturating_sub(u64::from(RATE));
+                // Whole-second anchors preserve the source trim's resampler phase.
+                // One second of preroll settles the filter before the kept block.
+                let seconds = (begin / u64::from(RATE)).saturating_sub(1);
+                let time = u128::from(self.source_start) * u128::from(self.fps.1)
+                    + u128::from(seconds) * u128::from(self.fps.0);
+                let mut block = Vec::new();
+                if let Some(mut reader) = AudioReader::open_time(
+                    &self.path,
+                    time,
+                    u128::from(self.fps.0),
+                    cancelled.clone(),
+                )? {
+                    let mut skip = begin - seconds * u64::from(RATE);
+                    while skip > 0 && !cancelled.load(Ordering::Relaxed) {
+                        block.clear();
+                        let count =
+                            reader.read(&mut block, skip.min(CHUNK as u64) as usize, cancelled)?;
+                        if count == 0 {
+                            break;
+                        }
+                        skip -= count as u64;
+                    }
+                    block.clear();
+                    if skip == 0 {
+                        reader.read(&mut block, (self.end - begin) as usize, cancelled)?;
+                    }
+                }
+                block.resize((self.end - begin) as usize * CHANNELS, 0.0);
+                self.samples.extend(
+                    block
+                        .as_chunks::<CHANNELS>()
+                        .0
+                        .iter()
+                        .rev()
+                        .flatten()
+                        .copied(),
+                );
+                self.end = begin;
+            }
+            let count = (frames - read).min(self.samples.len() / CHANNELS);
+            out.extend(self.samples.drain(..count * CHANNELS));
+            read += count;
+        }
+        Ok(read)
+    }
+}
+
 /// One source's audio stream, resampled to the output format and emitting
 /// stereo samples in order for the part of the clip being played.
 struct AudioReader {
@@ -313,6 +399,20 @@ impl AudioReader {
         fps: (u32, u32),
         cancelled: Arc<AtomicBool>,
     ) -> Result<Option<Self>, String> {
+        Self::open_time(
+            path,
+            u128::from(offset) * u128::from(fps.1),
+            u128::from(fps.0),
+            cancelled,
+        )
+    }
+
+    fn open_time(
+        path: &Path,
+        time: u128,
+        denominator: u128,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<Option<Self>, String> {
         let interrupted = cancelled.clone();
         let mut input =
             ffmpeg::format::input_with_interrupt(path, move || interrupted.load(Ordering::Relaxed))
@@ -334,8 +434,8 @@ impl AudioReader {
         if rate == 0 || decoder.format() == ffmpeg::format::Sample::None {
             return Err("Audio source has an unsupported format".into());
         }
-        if offset > 0 {
-            let micros = u128::from(offset) * u128::from(fps.1) * 1_000_000 / u128::from(fps.0);
+        if time > 0 {
+            let micros = time * 1_000_000 / denominator;
             if let Some(timestamp) = super::seek_timestamp(&input, micros)
                 && input.seek(timestamp, ..timestamp).is_ok()
             {
@@ -370,10 +470,7 @@ impl AudioReader {
             stream_index,
             time_base,
             origin_pts,
-            skip_until: u64::try_from(
-                u128::from(offset) * u128::from(fps.1) * u128::from(rate) / u128::from(fps.0),
-            )
-            .unwrap_or(u64::MAX),
+            skip_until: u64::try_from(time * u128::from(rate) / denominator).unwrap_or(u64::MAX),
             pending: VecDeque::new(),
             initial: true,
             silence: 0,
@@ -1191,6 +1288,141 @@ mod tests {
         }
         worker.join().unwrap().unwrap();
         heard
+    }
+
+    #[test]
+    fn reverse_audio_mirrors_stereo_samples_across_blocks_and_seeks() {
+        for rate in [48_000, 44_100] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("chirp.wav");
+            let samples: Vec<_> = (0..rate * 5)
+                .flat_map(|n| {
+                    let t = n as f32 / rate as f32;
+                    [
+                        ((t * t * 317.0).sin() * 9000.0) as i16,
+                        ((t * t * 173.0).cos() * 6000.0) as i16,
+                    ]
+                })
+                .collect();
+            write_wav(&path, rate, 2, &samples);
+            for fps in [(30, 1), (30000, 1001)] {
+                let source = AudioSource {
+                    playback: Playback::Forward,
+                    path: path.clone(),
+                    start: 7,
+                    source_start: 11,
+                    duration: 100,
+                    volume: 0.6,
+                };
+                let mut plan = AudioPlan {
+                    sources: vec![source],
+                    end: 107,
+                    fps,
+                };
+                let forward = play(
+                    &Arc::new(AudioPlan {
+                        sources: plan.sources.clone(),
+                        end: plan.end,
+                        fps,
+                    }),
+                    7,
+                    None,
+                );
+                let expected: Vec<_> = forward
+                    .as_chunks::<CHANNELS>()
+                    .0
+                    .iter()
+                    .rev()
+                    .flatten()
+                    .copied()
+                    .collect();
+                plan.sources[0].playback = Playback::Reverse;
+                let plan = Arc::new(plan);
+                let reversed = play(&plan, 7, None);
+                assert_eq!(reversed.len(), expected.len());
+                let error = reversed
+                    .iter()
+                    .zip(&expected)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0, f32::max);
+                assert!(error < 0.0001, "rate {rate}, fps {fps:?}: error {error}");
+                let seek = play(&plan, 48, None);
+                let skip = (48_u64 * u64::from(RATE) * u64::from(fps.1) / u64::from(fps.0)
+                    - 7 * u64::from(RATE) * u64::from(fps.1) / u64::from(fps.0))
+                    as usize
+                    * CHANNELS;
+                assert_eq!(seek.len(), expected.len() - skip);
+                let error = seek
+                    .iter()
+                    .zip(&expected[skip..])
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0, f32::max);
+                assert!(
+                    error < 0.0001,
+                    "seek rate {rate}, fps {fps:?}: error {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn freeze_is_silent_in_plans_and_direct_feeds() {
+        let mut project = mixed_project();
+        let mut tracks = project.tracks().to_vec();
+        for track in &mut tracks {
+            for clip in &mut track.clips {
+                clip.playback = Playback::Freeze;
+            }
+        }
+        let value = serde_json::to_value(&project).unwrap();
+        let mut value = value;
+        value["tracks"] = serde_json::to_value(tracks).unwrap();
+        project = serde_json::from_value(value).unwrap();
+        assert!(AudioPlan::from_project(&project).sources.is_empty());
+        let plan = Arc::new(AudioPlan {
+            sources: vec![AudioSource {
+                playback: Playback::Freeze,
+                path: "not-opened.wav".into(),
+                start: 0,
+                source_start: 10,
+                duration: 3,
+                volume: 1.0,
+            }],
+            end: 3,
+            fps: (30, 1),
+        });
+        let samples = play(&plan, 0, None);
+        assert_eq!(samples.len(), 4800 * CHANNELS);
+        assert!(samples.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn reverse_audio_bounds_blocks_and_handles_empty_missing_and_cancelled_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sound.wav");
+        write_wav(&path, RATE, 2, &vec![1000; RATE as usize * CHANNELS * 3]);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut reader = ReverseAudioReader {
+            path,
+            source_start: 0,
+            fps: (30, 1),
+            end: u64::from(RATE) * 3,
+            samples: VecDeque::new(),
+        };
+        let mut sound = Vec::new();
+        assert_eq!(reader.read(&mut sound, 1, &cancelled).unwrap(), 1);
+        assert_eq!(reader.end, u64::from(RATE) * 2);
+        assert_eq!(reader.samples.len(), (RATE as usize - 1) * CHANNELS);
+        assert_eq!(reader.read(&mut sound, 0, &cancelled).unwrap(), 0);
+        cancelled.store(true, Ordering::Relaxed);
+        assert_eq!(reader.read(&mut sound, 10, &cancelled).unwrap(), 0);
+        cancelled.store(false, Ordering::Relaxed);
+        reader.samples.clear();
+        reader.end = 0;
+        assert_eq!(reader.read(&mut sound, 10, &cancelled).unwrap(), 0);
+        reader.path = dir.path().join("missing.wav");
+        reader.end = 10;
+        assert!(reader.read(&mut sound, 10, &cancelled).is_err());
     }
 
     #[test]

@@ -5,8 +5,9 @@ The timeline model supports `forward` (the omitted default), `reverse`, and
 the opposite direction; freeze holds one video frame with an independent
 duration. `SetPlayback` and `freeze_at` are validated, undoable project edits.
 Leaving freeze keeps the held source frame as the source range start and
-clamps the duration to the remaining source. Playback controls, reverse/freeze
-rendering and freeze audio silencing are not implemented yet.
+clamps the duration to the remaining source. Preview, filmstrips and export
+render reverse and freeze playback; reverse audio follows the picture and
+freeze audio is silent. Playback controls are not implemented yet.
 
 Projects open even when source files have moved. Missing files are marked in the
 media bin; choose **Relink…** to search a folder by exact filename, or right-click

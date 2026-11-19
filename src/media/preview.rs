@@ -1,6 +1,7 @@
 use super::MediaKind;
 use super::audio::Clock;
 use super::composite::{Compositor, VisualPlan};
+use crate::timeline::Playback;
 use ffmpeg_next as ffmpeg;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,6 +18,16 @@ pub struct FrameSource {
     pub start: u64,
     pub source_start: u64,
     pub duration: u64,
+}
+
+impl FrameSource {
+    fn source_frame_at(&self, position: u64) -> Option<u64> {
+        self.playback.source_frame_at(
+            self.source_start,
+            self.duration,
+            position.checked_sub(self.start)?,
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -59,16 +70,22 @@ pub fn storyboard(
         duration: key.duration,
     };
     let mut frames = Vec::new();
+    let mut layers = VideoLayers::new(key.fps, (160, 90));
     for offset in offsets {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
-        let target = key
-            .source_start
-            .checked_add(offset)
-            .ok_or("Storyboard frame range overflows")?;
-        let mut reader = FrameReader::open(&source, target, key.fps, (160, 90), cancelled.clone())?;
-        let mut image = Arc::unwrap_or_clone(reader.frame_at(target, &cancelled)?);
+        let image = if key.playback == Playback::Forward {
+            let target = source
+                .source_frame_at(offset)
+                .ok_or("Storyboard frame range overflows")?;
+            let mut reader =
+                FrameReader::open(&source, target, key.fps, (160, 90), cancelled.clone())?;
+            reader.frame_at(target, &cancelled)?
+        } else {
+            layers.layer_at(&source, offset, &cancelled)?
+        };
+        let mut image = Arc::unwrap_or_clone(image);
         for pixel in image.pixels.as_chunks_mut::<4>().0 {
             for channel in 0..3 {
                 pixel[channel] =
@@ -143,17 +160,21 @@ impl VideoLayers {
         position: u64,
         cancelled: &Arc<AtomicBool>,
     ) -> Result<Arc<FrameImage>, String> {
-        let target = source.source_start + position - source.start;
+        let target = source
+            .source_frame_at(position)
+            .ok_or("Invalid preview source position")?;
         if !self.readers.contains_key(&source.clip_id) {
             self.readers.insert(
                 source.clip_id,
                 FrameReader::open(source, target, self.fps, self.output, cancelled.clone())?,
             );
         }
-        self.readers
-            .get_mut(&source.clip_id)
-            .unwrap()
-            .frame_at(target, cancelled)
+        let reader = self.readers.get_mut(&source.clip_id).unwrap();
+        if source.playback == Playback::Reverse {
+            reader.reverse_frame_at(target, source.source_start, cancelled)
+        } else {
+            reader.frame_at(target, cancelled)
+        }
     }
 
     pub(crate) fn retain(&mut self, active: &[u64]) {
@@ -279,6 +300,10 @@ struct FrameReader {
     eof: bool,
     still: bool,
     fitted: Option<Arc<FrameImage>>,
+    reverse_start: u64,
+    reverse_frames: Vec<Arc<FrameImage>>,
+    #[cfg(test)]
+    decoded_frames: usize,
 }
 
 impl FrameReader {
@@ -340,9 +365,57 @@ impl FrameReader {
             current: None,
             future: None,
             eof: false,
-            still: source.kind == MediaKind::Image,
+            still: source.kind == MediaKind::Image || source.playback == Playback::Freeze,
             fitted: None,
+            reverse_start: 0,
+            reverse_frames: Vec::new(),
+            #[cfg(test)]
+            decoded_frames: 0,
         })
+    }
+
+    fn reverse_frame_at(
+        &mut self,
+        target: u64,
+        minimum: u64,
+        cancelled: &AtomicBool,
+    ) -> Result<Arc<FrameImage>, String> {
+        if let Some(index) = target.checked_sub(self.reverse_start)
+            && let Some(image) = self.reverse_frames.get(index as usize)
+        {
+            return Ok(image.clone());
+        }
+        const MAX_FRAMES: u64 = 32;
+        const MAX_BYTES: u64 = 64 * 1024 * 1024;
+        let bytes = u64::from(self.output.0) * u64::from(self.output.1) * 4;
+        let count = (MAX_BYTES / bytes.max(1)).clamp(1, MAX_FRAMES);
+        let start = target.saturating_sub(count - 1).max(minimum);
+        self.reverse_frames.clear();
+        let micros =
+            u128::from(start) * u128::from(self.fps.1) * 1_000_000 / u128::from(self.fps.0);
+        let timestamp =
+            super::seek_timestamp(&self.input, micros).ok_or("Reverse seek overflows")?;
+        self.input
+            .seek(timestamp, ..timestamp)
+            .map_err(|error| error.to_string())?;
+        self.decoder.flush();
+        self.current = None;
+        self.future = None;
+        self.fitted = None;
+        self.eof = false;
+        self.fallback = start;
+        self.reverse_start = start;
+        for frame in start..=target {
+            if cancelled.load(Ordering::Relaxed) {
+                return Err("Preview cancelled".into());
+            }
+            let image = self.frame_at(frame, cancelled)?;
+            self.reverse_frames.push(image);
+        }
+        self.reverse_frames
+            .last()
+            .cloned()
+            .ok_or("Empty reverse block".into())
     }
 
     fn frame_at(&mut self, target: u64, cancelled: &AtomicBool) -> Result<Arc<FrameImage>, String> {
@@ -406,6 +479,10 @@ impl FrameReader {
             }
             let mut decoded = ffmpeg::frame::Video::empty();
             if self.decoder.receive_frame(&mut decoded).is_ok() {
+                #[cfg(test)]
+                {
+                    self.decoded_frames += 1;
+                }
                 if decoded.timestamp().is_some_and(|pts| pts < self.origin_pts) {
                     continue;
                 }
@@ -454,6 +531,174 @@ mod tests {
     use super::*;
     use std::fs;
     use std::process::Command;
+
+    #[test]
+    fn reverse_and_freeze_match_forward_frames_and_seek() {
+        ffmpeg::init().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frames.mkv");
+        assert!(
+            Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "nullsrc=s=64x36:r=30,geq=lum=16+mod(N\\,30)*7:cb=128:cr=128",
+                    "-frames:v",
+                    "80",
+                    "-c:v",
+                    "ffv1"
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        for late in [false, true] {
+            let path = if late {
+                let output = dir.path().join("late.mkv");
+                assert!(
+                    Command::new("ffmpeg")
+                        .args(["-v", "error", "-i"])
+                        .arg(&path)
+                        .args(["-c", "copy", "-output_ts_offset", "30"])
+                        .arg(&output)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+                output
+            } else {
+                path.clone()
+            };
+            let mut source = FrameSource {
+                playback: Playback::Forward,
+                clip_id: 1,
+                path,
+                kind: MediaKind::Video,
+                start: 10,
+                source_start: 5,
+                duration: 70,
+            };
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let mut forward = VideoLayers::new((30, 1), (64, 36));
+            let frames: Vec<_> = (10..80)
+                .map(|k| forward.layer_at(&source, k, &cancelled).unwrap())
+                .collect();
+            source.playback = Playback::Reverse;
+            let mut reverse = VideoLayers::new((30, 1), (64, 36));
+            for k in 0..70 {
+                assert_eq!(
+                    reverse
+                        .layer_at(&source, 10 + k, &cancelled)
+                        .unwrap()
+                        .pixels,
+                    frames[69 - k as usize].pixels
+                );
+            }
+            let reader = reverse.readers.get(&1).unwrap();
+            assert!(reader.reverse_frames.len() <= 32);
+            assert!(
+                reader.decoded_frames < 150,
+                "decoded {} frames",
+                reader.decoded_frames
+            );
+            let mut seek = VideoLayers::new((30, 1), (64, 36));
+            for k in [35, 36, 69, 0, 33] {
+                assert_eq!(
+                    seek.layer_at(&source, 10 + k, &cancelled).unwrap().pixels,
+                    frames[69 - k as usize].pixels
+                );
+            }
+            source.playback = Playback::Freeze;
+            let mut freeze = VideoLayers::new((30, 1), (64, 36));
+            let held = freeze.layer_at(&source, 10, &cancelled).unwrap();
+            let decoded = freeze.readers[&1].decoded_frames;
+            assert_eq!(held.pixels, frames[0].pixels);
+            for k in 10..80 {
+                assert!(Arc::ptr_eq(
+                    &held,
+                    &freeze.layer_at(&source, k, &cancelled).unwrap()
+                ));
+            }
+            assert_eq!(freeze.readers[&1].decoded_frames, decoded);
+            assert!(freeze.layer_at(&source, 80, &cancelled).is_err());
+            let key = StoryboardKey {
+                playback: Playback::Freeze,
+                path: source.path.clone(),
+                kind: source.kind,
+                source_start: 5,
+                duration: 70,
+                fps: (30, 1),
+            };
+            let stills = storyboard(&key, cancelled.clone()).unwrap();
+            assert!(stills.iter().all(|image| image.pixels == stills[0].pixels));
+            let mut key = key;
+            key.playback = Playback::Forward;
+            let strips = storyboard(&key, cancelled.clone()).unwrap();
+            key.playback = Playback::Reverse;
+            let reversed = storyboard(&key, cancelled).unwrap();
+            assert_eq!(reversed[0].pixels, strips[2].pixels);
+            assert_eq!(reversed[2].pixels, strips[0].pixels);
+        }
+    }
+
+    #[test]
+    #[ignore = "release-mode reverse playback timing"]
+    fn reverse_1080p_timing() {
+        ffmpeg::init().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("1080p.mp4");
+        assert!(
+            Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=s=1920x1080:r=30:d=3",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast",
+                    "-g",
+                    "30",
+                    "-threads",
+                    "1"
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut source = FrameSource {
+            playback: Playback::Forward,
+            clip_id: 1,
+            path,
+            kind: MediaKind::Video,
+            start: 0,
+            source_start: 0,
+            duration: 90,
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        for _ in 0..3 {
+            for playback in [Playback::Forward, Playback::Reverse] {
+                source.playback = playback;
+                let mut layers = VideoLayers::new((30, 1), (1920, 1080));
+                let started = Instant::now();
+                for frame in 0..90 {
+                    std::hint::black_box(layers.layer_at(&source, frame, &cancelled).unwrap());
+                }
+                println!(
+                    "1080p 90 frames {playback:?}: {:.3} s",
+                    started.elapsed().as_secs_f64()
+                );
+            }
+        }
+    }
 
     #[test]
     fn decoded_colors_match_ffmpeg() {

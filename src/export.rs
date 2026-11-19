@@ -581,6 +581,128 @@ mod tests {
     }
 
     #[test]
+    fn exports_reversed_frames_and_frozen_video_with_silent_audio() {
+        use crate::project::export_settings::ExportSettings;
+        use crate::timeline::Playback;
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.mkv");
+        assert!(
+            std::process::Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "nullsrc=s=64x36:r=30,geq=lum=16+N*7:cb=128:cr=128",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:sample_rate=48000",
+                    "-t",
+                    "0.4",
+                    "-c:v",
+                    "ffv1",
+                    "-c:a",
+                    "pcm_s16le"
+                ])
+                .arg(&source)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut document: serde_json::Value =
+            serde_json::from_str(&format::to_json(&Project::new("Playback export")).unwrap())
+                .unwrap();
+        document["settings"]["width"] = 64.into();
+        document["settings"]["height"] = 36.into();
+        let mut editor = Editor::new(format::from_json(&document.to_string()).unwrap());
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: source,
+            kind: MediaKind::Video,
+            duration_us: Some(400_000),
+            has_audio: true
+        })));
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 0,
+            clip: Clip {
+                id: 1,
+                start_frame: 0,
+                source_start_frame: 3,
+                duration_frames: 6,
+                content: ClipContent::Media { media_id: 1 },
+                volume: 1.0,
+                muted: false,
+                linked_audio: true,
+                playback: Playback::Forward
+            }
+        }));
+        let mut settings =
+            ExportSettings::for_project(64, 36, editor.project().settings().frame_rate.clone());
+        settings.video_quality = Some(0);
+        let mut images = Vec::new();
+        for playback in [Playback::Forward, Playback::Reverse, Playback::Freeze] {
+            if playback != Playback::Forward {
+                assert!(editor.apply(Command::SetPlayback {
+                    track_id: 0,
+                    clip_id: 1,
+                    playback
+                }));
+            }
+            let path = dir.path().join(format!("{playback:?}.mp4"));
+            render_with_settings(
+                editor.project(),
+                &path,
+                &settings,
+                Arc::new(ExportControl::default()),
+            )
+            .unwrap();
+            let output = std::process::Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(&path)
+                .args(["-an", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let frames: Vec<_> = output
+                .stdout
+                .as_chunks::<{ 64 * 36 * 3 }>()
+                .0
+                .iter()
+                .map(|frame| frame.to_vec())
+                .collect();
+            assert_eq!(frames.len(), 6);
+            images.push(frames);
+            if playback == Playback::Freeze {
+                let output = ffmpeg::format::input(&path).unwrap();
+                assert!(output.streams().best(ffmpeg::media::Type::Audio).is_none());
+                continue;
+            }
+            let audio = std::process::Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(&path)
+                .args(["-vn", "-f", "f32le", "-ac", "2", "-"])
+                .output()
+                .unwrap();
+            assert!(audio.status.success());
+            let samples: Vec<_> = audio
+                .stdout
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|v| f32::from_le_bytes(*v))
+                .collect();
+            assert!(!samples.is_empty());
+            assert!(samples.iter().any(|sample| sample.abs() > 0.03));
+        }
+        for k in 0..6 {
+            assert_eq!(images[1][k], images[0][5 - k]);
+            assert_eq!(images[2][k], images[0][5]);
+        }
+    }
+
+    #[test]
     #[ignore = "manual real-export audio measurement; set OCUS_DOWNMIX_EVIDENCE"]
     fn exports_center_only_surround_audio() {
         let dir = std::path::PathBuf::from(std::env::var("OCUS_DOWNMIX_EVIDENCE").unwrap());

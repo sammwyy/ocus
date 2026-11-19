@@ -10,6 +10,17 @@ pub enum Playback {
 }
 
 impl Playback {
+    pub fn source_frame_at(self, start: u64, duration: u64, offset: u64) -> Option<u64> {
+        if offset >= duration {
+            return None;
+        }
+        start.checked_add(match self {
+            Self::Forward => offset,
+            Self::Reverse => duration - 1 - offset,
+            Self::Freeze => 0,
+        })
+    }
+
     fn is_default(&self) -> bool {
         *self == Self::Forward
     }
@@ -31,8 +42,6 @@ pub enum TrackKind {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Clip {
-    #[serde(default, skip_serializing_if = "Playback::is_default")]
-    pub playback: Playback,
     pub id: u64,
     pub start_frame: u64,
     pub source_start_frame: u64,
@@ -44,18 +53,14 @@ pub struct Clip {
     /// moved and trimmed with the picture; `volume` and `muted` apply to it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub linked_audio: bool,
+    #[serde(default, skip_serializing_if = "Playback::is_default")]
+    pub playback: Playback,
 }
 
 impl Clip {
     pub fn source_frame_at(&self, offset: u64) -> Option<u64> {
-        if offset >= self.duration_frames {
-            return None;
-        }
-        self.source_start_frame.checked_add(match self.playback {
-            Playback::Forward => offset,
-            Playback::Reverse => self.duration_frames - 1 - offset,
-            Playback::Freeze => 0,
-        })
+        self.playback
+            .source_frame_at(self.source_start_frame, self.duration_frames, offset)
     }
 
     pub fn source_start_for_range(&self, offset: u64, duration: u64) -> Option<u64> {

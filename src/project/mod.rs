@@ -1,5 +1,5 @@
 use crate::media::{Media, MediaKind};
-use crate::timeline::{ClipContent, Track, TrackKind};
+use crate::timeline::{ClipContent, Playback, Track, TrackKind};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -105,7 +105,7 @@ impl Project {
                     .checked_add(clip.duration_frames)
                     .ok_or("Clip range overflows")?;
                 clip.source_start_frame
-                    .checked_add(if clip.playback == crate::timeline::Playback::Freeze {
+                    .checked_add(if clip.playback == Playback::Freeze {
                         0
                     } else {
                         clip.duration_frames
@@ -124,7 +124,7 @@ impl Project {
                     ClipContent::Title(title)
                         if track.kind == TrackKind::Video
                             && title.valid()
-                            && clip.playback == crate::timeline::Playback::Forward => {}
+                            && clip.playback == Playback::Forward => {}
                     ClipContent::Media { media_id }
                         if self.media.iter().any(|media| {
                             media.id == *media_id && self.media_clip_fits(media, track.kind, clip)
@@ -151,7 +151,6 @@ impl Project {
         kind: TrackKind,
         clip: &crate::timeline::Clip,
     ) -> bool {
-        use crate::timeline::Playback;
         if (clip.playback == Playback::Reverse && media.kind == MediaKind::Image)
             || (clip.playback == Playback::Freeze
                 && !(kind == TrackKind::Video && media.kind == MediaKind::Video))

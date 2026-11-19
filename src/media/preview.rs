@@ -533,6 +533,7 @@ mod tests {
 
     fn proxy_source(path: PathBuf, duration: u64) -> FrameSource {
         FrameSource {
+            lut: None,
             color: ColorAdjust::default(),
             clip_id: 1,
             path,

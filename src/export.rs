@@ -937,6 +937,7 @@ mod tests {
             track_id: 0,
             clip: Clip {
                 color: Default::default(),
+                lut: None,
                 transition_out: None,
                 id: 1,
                 start_frame: 0,

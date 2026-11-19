@@ -2711,6 +2711,11 @@ pub(crate) fn media_frames(media: &Media, fps: (u32, u32)) -> Option<u64> {
     if let Some(duration_us) = media.duration_us {
         let count = u128::from(duration_us) * u128::from(numerator)
             / (1_000_000_u128 * u128::from(denominator));
+        let count = if duration_us > 0 && numerator > 0 && media.kind != MediaKind::Image {
+            count.max(1)
+        } else {
+            count
+        };
         u64::try_from(count).ok()
     } else if media.kind == MediaKind::Image {
         Some((numerator * 3 / denominator).max(1))
@@ -2904,6 +2909,100 @@ mod tests {
             play();
             assert_eq!(state.open_audio_output(|| Ok(())), Some(()));
         }
+    }
+
+    #[test]
+    fn subframe_media_frames_preserves_unknown_and_zero_durations() {
+        let mut media = Media {
+            id: 1,
+            path: "short.wav".into(),
+            kind: MediaKind::Audio,
+            duration_us: Some(20_000),
+            has_audio: true,
+        };
+        for kind in [MediaKind::Audio, MediaKind::Video] {
+            media.kind = kind;
+            for fps in [(30, 1), (30_000, 1001)] {
+                assert_eq!(media_frames(&media, fps), Some(1));
+            }
+            media.duration_us = Some(1_000_000);
+            assert_eq!(media_frames(&media, (30, 1)), Some(30));
+            media.duration_us = Some(0);
+            assert_eq!(media_frames(&media, (30, 1)), None);
+            media.duration_us = None;
+            assert_eq!(media_frames(&media, (30, 1)), None);
+            media.duration_us = Some(20_000);
+        }
+        media.kind = MediaKind::Image;
+        assert_eq!(media_frames(&media, (30, 1)), None);
+        media.duration_us = None;
+        assert_eq!(media_frames(&media, (30, 1)), Some(90));
+    }
+
+    #[test]
+    fn subframe_audio_imports_inserts_and_pads_with_silence() {
+        use crate::media::audio::{AudioPlan, AudioQueue, AudioSource, feed};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("click.wav");
+        assert!(
+            std::process::Command::new("ffmpeg")
+                .args(["-v", "error", "-f", "lavfi", "-i", "sine=d=0.02:r=48000"])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (path, info, _) = inspect_source(&path).unwrap();
+        assert_eq!(info.duration_us, Some(20_000));
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: path.clone(),
+            kind: info.kind,
+            duration_us: info.duration_us,
+            has_audio: info.has_audio,
+        })));
+        assert_eq!(state.insert_media_at(1, None), Some(1));
+        let editor = state.editor.borrow();
+        let clip = &editor.project().tracks()[2].clips[0];
+        assert_eq!(clip.duration_frames, 1);
+        assert!(editor.project().validate().is_ok());
+        let media = &editor.project().media()[0];
+        let mut beyond_source = clip.clone();
+        beyond_source.duration_frames = 2;
+        assert!(
+            !editor
+                .project()
+                .media_clip_fits(media, TrackKind::Audio, &beyond_source)
+        );
+        beyond_source.duration_frames = 1;
+        beyond_source.source_start_frame = 1;
+        assert!(
+            !editor
+                .project()
+                .media_clip_fits(media, TrackKind::Audio, &beyond_source)
+        );
+        let plan = AudioPlan {
+            sources: vec![AudioSource {
+                path,
+                start: clip.start_frame,
+                source_start: clip.source_start_frame,
+                duration: clip.duration_frames,
+                volume: 1.0,
+            }],
+            end: 1,
+            fps: (30, 1),
+        };
+        let queue = Arc::new(AudioQueue::new());
+        feed(&plan, 0, queue.clone(), Arc::new(AtomicBool::new(false))).unwrap();
+        let samples: Vec<_> = std::iter::from_fn(|| queue.pop()).collect();
+        assert_eq!(samples.len(), 1600 * 2);
+        assert!(samples[..960 * 2].iter().any(|sample| sample.abs() > 0.01));
+        assert!(samples[960 * 2..].iter().all(|sample| *sample == 0.0));
+        drop(editor);
+        state.undo();
+        assert!(state.editor.borrow().project().tracks()[2].clips.is_empty());
     }
 
     #[test]

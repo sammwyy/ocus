@@ -161,6 +161,11 @@ impl Project {
         }
         let max_frames = u128::from(duration_us) * u128::from(self.settings.frame_rate.numerator)
             / (1_000_000_u128 * u128::from(self.settings.frame_rate.denominator));
+        let max_frames = if duration_us > 0 {
+            max_frames.max(1)
+        } else {
+            max_frames
+        };
         u128::from(clip.source_start_frame) + u128::from(clip.duration_frames) <= max_frames
     }
 }

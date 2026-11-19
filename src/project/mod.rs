@@ -147,6 +147,15 @@ impl Project {
             }
             let mut end = 0;
             for clip in &track.clips {
+                if clip.effect.as_ref().is_some_and(|effect| {
+                    !effect.valid()
+                        || track.kind != TrackKind::Video
+                        || !matches!(clip.content, ClipContent::Media { .. })
+                }) {
+                    return Err(
+                        "Effects need a video or image clip and an amount between 0 and 1".into(),
+                    );
+                }
                 if clip.chroma_key.is_some_and(|key| {
                     !key.valid()
                         || track.kind != TrackKind::Video

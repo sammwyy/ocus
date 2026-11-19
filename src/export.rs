@@ -1057,6 +1057,7 @@ mod tests {
                 speed: 1.0,
                 transform: crate::timeline::Transform::default(),
                 noise_reduction: false,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 transition_out: None,
@@ -1268,6 +1269,7 @@ mod tests {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 color: Default::default(),
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 transition_out: None,
@@ -1370,6 +1372,7 @@ mod tests {
             track_id,
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -1532,6 +1535,7 @@ mod tests {
             track_id: 0,
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -1690,6 +1694,7 @@ mod tests {
             track_id: 0,
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -1818,6 +1823,7 @@ mod tests {
             track_id: 2,
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 id: 3,
@@ -1895,6 +1901,7 @@ mod tests {
         let mut layered = editor.project().tracks().to_vec();
         layered[0].clips = vec![Clip {
             playback: crate::timeline::Playback::Forward,
+            effect: None,
             lut: None,
             chroma_key: None,
             id: 4,
@@ -1918,6 +1925,7 @@ mod tests {
         }];
         layered[1].clips = vec![Clip {
             playback: crate::timeline::Playback::Forward,
+            effect: None,
             lut: None,
             chroma_key: None,
             id: 5,
@@ -1948,6 +1956,7 @@ mod tests {
             hidden: false,
             clips: vec![Clip {
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 id: 6,
@@ -2072,6 +2081,7 @@ mod tests {
             track_id: 0,
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -2159,6 +2169,7 @@ mod tests {
             track_id: 0,
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -2338,6 +2349,7 @@ mod tests {
             track_id,
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,
@@ -2472,6 +2484,7 @@ mod tests {
             track_id: 2,
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,

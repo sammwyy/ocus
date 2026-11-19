@@ -1372,6 +1372,225 @@ impl ColorProperty {
     }
 }
 
+struct EffectAmount {
+    state: UiState,
+    clip: ClipRef,
+    amount: f32,
+    enabled: bool,
+}
+
+impl Widget for EffectAmount {
+    fn style(&self) -> creamui::Style {
+        Style::default().size(220.0, 28.0).into()
+    }
+
+    fn paint(&self, painter: &mut dyn Painter, rect: Rect) {
+        let amount = self
+            .state
+            .effect_drag
+            .get()
+            .filter(|(clip, _)| *clip == self.clip)
+            .map_or(self.amount, |(_, amount)| amount);
+        let track = Rect {
+            x: rect.x + 6.0,
+            y: rect.y + 12.0,
+            width: rect.width - 12.0,
+            height: 4.0,
+        };
+        painter.fill_rect(track, surface(), 2.0);
+        painter.fill_rect(
+            Rect {
+                width: track.width * amount,
+                ..track
+            },
+            accent(),
+            2.0,
+        );
+        painter.fill_rect(
+            Rect {
+                x: track.x + track.width * amount - 5.0,
+                y: rect.y + 9.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            text_color(),
+            5.0,
+        );
+    }
+
+    fn on_drag_start(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
+        if !self.enabled {
+            return None;
+        }
+        let state = self.state.clone();
+        let clip = self.clip;
+        Some(Rc::new(move |point, rect| {
+            state.pause();
+            state.effect_drag.set(Some((
+                clip,
+                ((point.x - 6.0) / (rect.width - 12.0).max(1.0)).clamp(0.0, 1.0),
+            )));
+            state.request_preview();
+        }))
+    }
+
+    fn on_drag(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
+        if !self.enabled {
+            return None;
+        }
+        let state = self.state.clone();
+        let clip = self.clip;
+        Some(Rc::new(move |point, rect| {
+            if state
+                .effect_drag
+                .peek()
+                .is_some_and(|(target, _)| target == clip)
+            {
+                state.effect_drag.set(Some((
+                    clip,
+                    ((point.x - 6.0) / (rect.width - 12.0).max(1.0)).clamp(0.0, 1.0),
+                )));
+                state.request_preview();
+            }
+        }))
+    }
+
+    fn on_drag_end(&self) -> Option<Rc<dyn Fn()>> {
+        if !self.enabled {
+            return None;
+        }
+        let state = self.state.clone();
+        let clip = self.clip;
+        Some(Rc::new(move || {
+            let draft = state.effect_drag.peek();
+            state.effect_drag.set(None);
+            if let Some((target, amount)) = draft
+                && target == clip
+                && let Some((track_id, current)) = selected_clip(&state)
+                && (track_id, current.id) == target
+                && let Some(mut effect) = current.effect
+            {
+                effect.amount = amount;
+                state.edit(Command::SetClipEffect {
+                    track_id,
+                    clip_id: current.id,
+                    effect: Some(effect),
+                });
+            }
+        }))
+    }
+}
+
+fn effect_section(state: &UiState, track_id: u64, clip: &Clip, busy: bool) -> BoxedWidget {
+    use crate::media::effects::{BUILTINS, error};
+    use crate::timeline::{Effect, EffectShader};
+    let clip_id = clip.id;
+    let mut labels = vec!["None"];
+    labels.extend(BUILTINS.iter().map(|(_, label)| *label));
+    let file_name = match clip.effect.as_ref().map(|effect| &effect.shader) {
+        Some(EffectShader::File(path)) => Some(
+            path.file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        Some(EffectShader::Builtin(id)) if !BUILTINS.iter().any(|(key, _)| *key == id) => {
+            Some(format!("Unknown: {id}"))
+        }
+        _ => None,
+    };
+    if let Some(name) = &file_name {
+        labels.push(name);
+    }
+    let selected = match clip.effect.as_ref().map(|effect| &effect.shader) {
+        None => 0,
+        Some(EffectShader::Builtin(id)) => BUILTINS
+            .iter()
+            .position(|(key, _)| *key == id)
+            .map_or(labels.len() - 1, |index| index + 1),
+        Some(EffectShader::File(_)) => labels.len() - 1,
+    };
+    if state.effect_select.peek_selected() != selected {
+        state.effect_select.select(selected);
+    }
+    let select_state = state.clone();
+    let mut rows: Vec<BoxedWidget> = vec![
+        Box::new(
+            creamui::widgets::Select::controlled(&labels, state.effect_select.clone()).on_select(
+                move |index| {
+                    if busy {
+                        return;
+                    }
+                    let effect = if index == 0 {
+                        None
+                    } else if let Some((id, _)) = BUILTINS.get(index - 1) {
+                        Some(Effect {
+                            shader: EffectShader::Builtin((*id).into()),
+                            amount: 1.0,
+                        })
+                    } else {
+                        return;
+                    };
+                    select_state.edit(Command::SetClipEffect {
+                        track_id,
+                        clip_id,
+                        effect,
+                    });
+                },
+            ),
+        ),
+        inline(with_help(
+            secondary_button(None, "Load .wgsl…", !busy, state, move |state| {
+                state.choose_effect(track_id, clip_id)
+            }),
+            Help::new("Load your own WGSL picture effect from a file"),
+            state,
+        )),
+    ];
+    if let Some(effect) = &clip.effect {
+        let amount = state
+            .effect_drag
+            .get()
+            .filter(|(target, _)| *target == (track_id, clip_id))
+            .map_or(effect.amount, |(_, amount)| amount);
+        rows.push(property("Amount", format!("{:.0}%", amount * 100.0)));
+        rows.push(Box::new(EffectAmount {
+            state: state.clone(),
+            clip: (track_id, clip_id),
+            amount,
+            enabled: !busy,
+        }));
+        if matches!(&effect.shader, EffectShader::Builtin(id) if id == "blur") {
+            rows.push(text(
+                "Amount sets the blur radius (0–8 pixels).",
+                muted(),
+                10.0,
+            ));
+        }
+        if let Some(error) = error(&effect.shader) {
+            rows.push(text(format!("Effect unavailable: {error}"), muted(), 10.0));
+        }
+    }
+    rows.push(inline(with_help(
+        secondary_button(
+            None,
+            "Clear effect",
+            !busy && clip.effect.is_some(),
+            state,
+            move |state| {
+                state.edit(Command::SetClipEffect {
+                    track_id,
+                    clip_id,
+                    effect: None,
+                });
+            },
+        ),
+        Help::new("Remove this clip's shader effect and keep its color adjustments"),
+        state,
+    )));
+    section("Effect", rows)
+}
+
 fn color_control(
     state: &UiState,
     inner: f32,
@@ -2035,6 +2254,13 @@ impl Widget for ProgramCanvas {
     }
 
     fn on_drag(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
+        if !self
+            .titles
+            .iter()
+            .any(|(key, _)| Some(*key) == self.selected)
+        {
+            return None;
+        }
         let state = self.state.clone();
         let aspect = self.aspect;
         let resolution = self.resolution;
@@ -3023,6 +3249,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         )),
                     ],
                 ));
+                rows.push(effect_section(state, track_id, &clip, busy));
                 rows.push(chroma_section(state, track_id, &clip, inner, busy));
             }
         }
@@ -4365,6 +4592,7 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                             speed: 1.0,
                             transform: crate::timeline::Transform::default(),
                             noise_reduction: false,
+                            effect: None,
                             lut: None,
                             chroma_key: None,
                             transition_out: None,
@@ -6559,6 +6787,7 @@ mod tests {
     fn destination_clip(start_frame: u64, duration_frames: u64) -> Clip {
         Clip {
             playback: crate::timeline::Playback::Forward,
+            effect: None,
             lut: None,
             chroma_key: None,
             id: 10,
@@ -7035,6 +7264,186 @@ mod tests {
     }
 
     #[test]
+    fn effect_amount_drag_keeps_capture_while_preview_loads() {
+        use crate::timeline::{Effect, EffectShader};
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/effect.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(1_000_000),
+            has_audio: false,
+        })));
+        let mut clip = destination_clip(0, 30);
+        clip.content = ClipContent::Media { media_id: 1 };
+        clip.effect = Some(Effect {
+            shader: EffectShader::Builtin("invert".into()),
+            amount: 1.0,
+        });
+        let id = clip.id;
+        assert!(state.edit(Command::InsertClip {
+            track_id: 0,
+            clip: Box::new(clip)
+        }));
+        state.select_clip(Some((0, id)));
+        state.missing_media.set(HashSet::new());
+        state.preview_available.set(true);
+        let viewport = Size {
+            width: 1280.0,
+            height: 736.0,
+        };
+        let mut renderer = Renderer::new();
+        let mut draw = || {
+            creamui::reactive::with_context_scope(|| {
+                creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
+                    creamui::Theme::dark(),
+                ));
+                renderer.render(
+                    build(&state, viewport),
+                    viewport,
+                    &mut TestPainter::default(),
+                )
+            })
+        };
+        let (scene, index, rect) = (0..30)
+            .find_map(|step| {
+                state.inspector_scroll.set(step as f32 * 40.0);
+                let scene = draw();
+                let (index, rect) = (0..)
+                    .map_while(|index| scene.draggable_at(index).map(|(rect, _)| (index, rect)))
+                    .find(|(_, rect)| {
+                        rect.width == 220.0
+                            && rect.height == 28.0
+                            && rect.x > 900.0
+                            && rect.y > 100.0
+                            && rect.y < 380.0
+                    })?;
+                Some((scene, index, rect))
+            })
+            .expect("scrolled Effect slider is visible");
+        let offset = state.inspector_scroll.peek();
+        let max_offset = state.inspector_scroll.max_offset();
+        assert!(offset > 0.0);
+        let pointer = Point {
+            x: rect.x + rect.width - 6.0,
+            y: rect.y + 14.0,
+        };
+        let local = Point {
+            x: pointer.x - rect.x,
+            y: pointer.y - rect.y,
+        };
+        scene.drag_start_at(pointer).unwrap().1(local, rect);
+        scene.draggable_at(index).unwrap().1(local, rect);
+        let end = scene.drag_end_at(index).unwrap();
+        for amount in [0.95, 0.8, 0.6, 0.3] {
+            for preview in [PreviewState::Loading, PreviewState::Ready] {
+                state.program.preview.set(preview);
+                let scene = draw();
+                assert_eq!(state.inspector_scroll.peek(), offset);
+                assert_eq!(state.inspector_scroll.max_offset(), max_offset);
+                let (current, drag) = scene.draggable_at(index).unwrap();
+                drag(
+                    Point {
+                        x: rect.x + 6.0 + amount * (rect.width - 12.0) - current.x,
+                        y: pointer.y - current.y,
+                    },
+                    current,
+                );
+                assert_eq!(
+                    state.inspector_scroll.peek(),
+                    offset,
+                    "drag must not reach the scrollbar"
+                );
+                assert_eq!(current, rect, "captured slider bounds must stay fixed");
+                let (target, draft) = state.effect_drag.peek().unwrap();
+                assert_eq!(target, (0, id));
+                assert!((draft - amount).abs() < 0.00001);
+                assert_eq!(selected_clip(&state).unwrap().1.effect.unwrap().amount, 1.0);
+            }
+        }
+        end();
+        assert!((selected_clip(&state).unwrap().1.effect.unwrap().amount - 0.3).abs() < 0.00001);
+        state.undo();
+        assert_eq!(selected_clip(&state).unwrap().1.effect.unwrap().amount, 1.0);
+    }
+
+    #[test]
+    fn effect_amount_drag_survives_rebuild_and_undoes_once() {
+        use crate::timeline::{Effect, EffectShader};
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/effect.png".into(),
+            kind: MediaKind::Image,
+            duration_us: None,
+            has_audio: false
+        })));
+        let mut clip = destination_clip(0, 30);
+        clip.content = ClipContent::Media { media_id: 1 };
+        clip.effect = Some(Effect {
+            shader: EffectShader::Builtin("invert".into()),
+            amount: 1.0,
+        });
+        let id = clip.id;
+        assert!(state.edit(Command::InsertClip {
+            track_id: 0,
+            clip: Box::new(clip)
+        }));
+        state.select_clip(Some((0, id)));
+        let rect = Rect {
+            x: 100.0,
+            y: 200.0,
+            width: 220.0,
+            height: 28.0,
+        };
+        let slider = || EffectAmount {
+            state: state.clone(),
+            clip: (0, id),
+            amount: 1.0,
+            enabled: true,
+        };
+        slider().on_drag_start().unwrap()(Point { x: 58.0, y: 14.0 }, rect);
+        assert_eq!(state.effect_drag.peek(), Some(((0, id), 0.25)));
+        slider().on_drag().unwrap()(Point { x: 110.0, y: 14.0 }, rect);
+        assert_eq!(selected_clip(&state).unwrap().1.effect.unwrap().amount, 1.0);
+        slider().on_drag_end().unwrap()();
+        assert!(state.effect_drag.peek().is_none());
+        assert_eq!(selected_clip(&state).unwrap().1.effect.unwrap().amount, 0.5);
+        state.undo();
+        assert_eq!(selected_clip(&state).unwrap().1.effect.unwrap().amount, 1.0);
+        state.redo();
+        assert_eq!(selected_clip(&state).unwrap().1.effect.unwrap().amount, 0.5);
+        let painter = render(&state, 1280.0, 2600.0);
+        for label in [
+            "EFFECT",
+            "Invert",
+            "Load .wgsl…",
+            "Amount",
+            "Clear effect",
+            "CHROMA KEY",
+        ] {
+            assert!(painter.labels.iter().any(|text| text == label), "{label}");
+        }
+        slider().on_drag_start().unwrap()(Point { x: 58.0, y: 14.0 }, rect);
+        state.select_clip(None);
+        slider().on_drag_end().unwrap()();
+        assert!(state.effect_drag.peek().is_none());
+        assert!(
+            !render(&state, 1280.0, 900.0)
+                .labels
+                .iter()
+                .any(|text| text == "EFFECT")
+        );
+        assert!(state.add_title());
+        assert!(
+            !render(&state, 1280.0, 2600.0)
+                .labels
+                .iter()
+                .any(|text| text == "EFFECT")
+        );
+    }
+
+    #[test]
     fn color_property_steps_snap_to_grid_and_reach_limits() {
         for property in [
             ColorProperty::Brightness,
@@ -7231,6 +7640,7 @@ mod tests {
             .unwrap();
         let key = StoryboardKey {
             transform_bits: StoryboardKey::transform_bits(crate::timeline::Transform::default()),
+            effect: None,
             lut: None,
             chroma_key: None,
             color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
@@ -8857,6 +9267,7 @@ mod tests {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 noise_reduction: false,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 transition_out: None,
@@ -9118,6 +9529,7 @@ mod tests {
                     playback: crate::timeline::Playback::Forward,
                     id: id + 100,
                     noise_reduction: false,
+                    effect: None,
                     lut: None,
                     chroma_key: None,
                     transition_out: None,
@@ -9146,7 +9558,7 @@ mod tests {
                 kind == MediaKind::Video
             );
             assert_eq!(
-                render(&state, 1280.0, 1950.0)
+                render(&state, 1280.0, 2100.0)
                     .labels
                     .iter()
                     .any(|l| l == "PICTURE-IN-PICTURE"),
@@ -9854,6 +10266,7 @@ mod tests {
             track_id: 0,
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,

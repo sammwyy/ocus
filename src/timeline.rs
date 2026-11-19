@@ -89,9 +89,35 @@ pub enum TrackKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Effect {
+    pub shader: EffectShader,
+    #[serde(default = "effect_amount")]
+    pub amount: f32,
+}
+
+fn effect_amount() -> f32 {
+    1.0
+}
+
+impl Effect {
+    pub fn valid(&self) -> bool {
+        self.amount.is_finite() && (0.0..=1.0).contains(&self.amount)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectShader {
+    Builtin(String),
+    File(std::path::PathBuf),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Clip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stabilization: Option<Stabilization>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect: Option<Effect>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lut: Option<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

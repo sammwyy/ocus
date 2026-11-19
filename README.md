@@ -11,7 +11,7 @@
 ## What you can do
 
 - **Cut and arrange.** Import video, audio, and stills; then trim, split, snap, and layer clips on a multitrack timeline. Use markers to find your place and undo or redo project edits.
-- **Refine the picture.** Preview clips in **Source** and the whole sequence in **Program**. Add transitions, change clip speed, remove green/blue screens with Chroma key, adjust color or apply a `.cube` LUT, and position picture-in-picture overlays.
+- **Refine the picture.** Preview clips in **Source** and the whole sequence in **Program**. Add transitions, change clip speed, remove green/blue screens with Chroma key, adjust color or apply a `.cube` LUT, apply built-in or custom WGSL shader effects, and position picture-in-picture overlays.
 - **Add titles and subtitles.** Style text directly on your footage, apply animated fade, lower-third, pop or typewriter title templates, import an SRT file, or generate subtitles locally with Whisper. Burn subtitles into a video or write an SRT alongside it. The first generation downloads a multilingual base model (~142 MB); audio stays on your computer.
 - **Shape the sound.** See waveforms on the timeline, keep sound linked to its video or detach it, and adjust volume, fades, loudness, and noise reduction per clip.
 - **Export for your destination.** Start with H.264/AAC MP4, pick a preset for vertical or square video, or export WebM, animated GIF, or audio-only WAV.

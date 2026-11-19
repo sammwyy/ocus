@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone)]
 pub struct FrameSource {
     pub stabilization: Option<(u64, Arc<Vec<Transform>>)>,
+    pub effect: Option<crate::timeline::Effect>,
     pub playback: crate::timeline::Playback,
     pub lut: Option<PathBuf>,
     pub chroma_key: Option<crate::timeline::ChromaKey>,
@@ -66,6 +67,7 @@ pub struct FrameImage {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct StoryboardKey {
+    pub effect: Option<String>,
     pub transform_bits: [u32; 9],
     pub color_bits: [u32; 3],
     pub lut: Option<PathBuf>,
@@ -79,6 +81,11 @@ pub struct StoryboardKey {
 }
 
 impl StoryboardKey {
+    fn effect(&self) -> Option<crate::timeline::Effect> {
+        self.effect
+            .as_ref()
+            .and_then(|value| serde_json::from_str(value).ok())
+    }
     pub fn transform_bits(transform: Transform) -> [u32; 9] {
         [
             transform.scale,
@@ -138,6 +145,7 @@ pub fn storyboard(
     let source = FrameSource {
         speed: 1.0,
         playback: key.playback,
+        effect: key.effect(),
         lut: key.lut.clone(),
         chroma_key: key.chroma_key,
         color: ColorAdjust {
@@ -181,6 +189,11 @@ pub fn storyboard(
         };
         let image = super::composite::apply_chroma_key(image, source.chroma_key);
         let image = apply_lut(&mut luts, &source, adjust_color(image, source.color))?;
+        let image = super::effects::apply(
+            source.effect.as_ref(),
+            image,
+            offset as f32 * key.fps.1 as f32 / key.fps.0 as f32,
+        );
         let mut image = Arc::unwrap_or_clone(image);
         if !source.transform.is_identity() {
             let mut pixels = vec![0; image.pixels.len()];
@@ -727,6 +740,7 @@ mod tests {
         FrameSource {
             speed: 1.0,
             playback: crate::timeline::Playback::Forward,
+            effect: None,
             lut: None,
             chroma_key: None,
             color: ColorAdjust::default(),
@@ -1042,6 +1056,7 @@ mod tests {
                 playback: crate::timeline::Playback::Forward,
                 transform: Transform::default(),
                 color: Default::default(),
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 clip_id: 1,
@@ -1107,6 +1122,7 @@ mod tests {
                 keyframes: Vec::new(),
                 speed: 1.0,
                 transform: crate::timeline::Transform::default(),
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 color: Default::default(),
@@ -1182,6 +1198,7 @@ mod tests {
             assert!(freeze.layer_at(&source, 80, &cancelled).is_err());
             let key = StoryboardKey {
                 transform_bits: StoryboardKey::transform_bits(crate::timeline::Transform::default()),
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
@@ -1238,6 +1255,7 @@ mod tests {
             keyframes: Vec::new(),
             speed: 1.0,
             transform: crate::timeline::Transform::default(),
+            effect: None,
             lut: None,
             chroma_key: None,
             color: Default::default(),
@@ -1325,6 +1343,7 @@ mod tests {
             let source = FrameSource {
                 playback: crate::timeline::Playback::Forward,
                 speed: 1.0,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 color: Default::default(),
@@ -1368,6 +1387,7 @@ mod tests {
         for name in ["late", "zero"] {
             let source = FrameSource {
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 color: Default::default(),
@@ -1424,6 +1444,7 @@ mod tests {
         let source = FrameSource {
             speed: 1.0,
             playback: crate::timeline::Playback::Forward,
+            effect: None,
             lut: None,
             chroma_key: None,
             color: Default::default(),
@@ -1474,6 +1495,7 @@ mod tests {
             let source = FrameSource {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 color: Default::default(),
@@ -1541,6 +1563,7 @@ mod tests {
         let source = FrameSource {
             speed: 1.0,
             playback: crate::timeline::Playback::Forward,
+            effect: None,
             lut: None,
             chroma_key: None,
             color: Default::default(),
@@ -1619,6 +1642,7 @@ mod tests {
             let source = FrameSource {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 color: Default::default(),
@@ -1683,6 +1707,7 @@ mod tests {
             let source = FrameSource {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 color: Default::default(),
@@ -1777,6 +1802,7 @@ mod tests {
         let source = FrameSource {
             speed: 1.0,
             playback: crate::timeline::Playback::Forward,
+            effect: None,
             lut: None,
             chroma_key: None,
             color: Default::default(),
@@ -1833,6 +1859,7 @@ mod tests {
                 playback: crate::timeline::Playback::Forward,
                 transform: Transform::default(),
                 color: Default::default(),
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 clip_id: 1,
@@ -1879,6 +1906,7 @@ mod tests {
         let clips = [FrameSource {
             speed: 1.0,
             playback: crate::timeline::Playback::Forward,
+            effect: None,
             lut: None,
             chroma_key: None,
             color: Default::default(),
@@ -1967,6 +1995,7 @@ mod tests {
                     transform_bits: StoryboardKey::transform_bits(
                         crate::timeline::Transform::default(),
                     ),
+                    effect: None,
                     lut: None,
                     chroma_key: None,
                     color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),
@@ -1990,6 +2019,7 @@ mod tests {
             sources: vec![FrameSource {
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 color: Default::default(),

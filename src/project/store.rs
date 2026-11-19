@@ -41,6 +41,14 @@ pub(super) fn migrate_media(project: &mut Project, path: Option<&Path>) -> io::R
             }
         }
         for clip in project.tracks.iter_mut().flat_map(|track| &mut track.clips) {
+            if let Some(crate::timeline::Effect {
+                shader: crate::timeline::EffectShader::File(path),
+                ..
+            }) = &mut clip.effect
+                && path.is_relative()
+            {
+                *path = parent.join(&*path);
+            }
             if let Some(lut) = &mut clip.lut
                 && lut.is_relative()
             {
@@ -159,6 +167,27 @@ mod tests {
         );
         assert_eq!(loaded.tracks()[0].clips[1].lut, Some(absolute_lut));
         assert!(loaded.tracks()[0].clips[2].lut.is_none());
+    }
+
+    #[test]
+    fn opening_resolves_relative_effect_files_beside_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut document = serde_json::to_value(Project::new("Relative effects")).unwrap();
+        document["version"] = 1.into();
+        document["media"] =
+            serde_json::json!([{ "id": 1, "path": "missing.png", "kind": "image" }]);
+        document["tracks"][0]["clips"] = serde_json::json!([
+            { "id": 1, "start_frame": 0, "source_start_frame": 0, "duration_frames": 10,
+              "content": { "media": { "media_id": 1 } }, "volume": 1.0, "muted": false,
+              "effect": {"shader": {"file": "looks/warm.wgsl"}} }
+        ]);
+        let path = dir.path().join("film.ocus");
+        fs::write(&path, document.to_string()).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(
+            loaded.tracks()[0].clips[0].effect.as_ref().unwrap().shader,
+            crate::timeline::EffectShader::File(dir.path().join("looks/warm.wgsl"))
+        );
     }
 
     #[test]
@@ -328,6 +357,7 @@ mod tests {
             track_id: 0,
             clip: Box::new(Clip {
                 playback: crate::timeline::Playback::Forward,
+                effect: None,
                 lut: None,
                 chroma_key: None,
                 id: 1,

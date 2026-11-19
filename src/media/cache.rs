@@ -100,6 +100,16 @@ fn storyboard_selected(
         params.extend(value.to_le_bytes());
     }
     let entry = root.and_then(|root| {
+        if let Some(effect) = &request.effect {
+            params.extend(effect.as_bytes());
+            if let Ok(crate::timeline::Effect {
+                shader: crate::timeline::EffectShader::File(path),
+                ..
+            }) = serde_json::from_str(effect)
+            {
+                params.extend(key(&path, b"effect")?.as_bytes());
+            }
+        }
         if let Some(lut) = &request.lut {
             params.extend(key(lut, b"lut")?.as_bytes());
         }
@@ -285,6 +295,7 @@ mod tests {
         );
         StoryboardKey {
             transform_bits: StoryboardKey::transform_bits(crate::timeline::Transform::default()),
+            effect: None,
             lut: None,
             chroma_key: None,
             color_bits: [0.0f32, 1.0, 1.0].map(f32::to_bits),

@@ -184,7 +184,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [x] Custom export presets
 
 **Extensibility**
-- [ ] Effects written as WGSL shaders, used as the base for a future plugin system
+- [x] Effects written as WGSL shaders, used as the base for a future plugin system
 
 **Interoperability**
 - [x] Import and export OpenTimelineIO (OTIO) and EDL

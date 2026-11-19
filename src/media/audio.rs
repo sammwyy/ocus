@@ -2538,6 +2538,7 @@ mod tests {
                     noise_reduction: false,
                     linked_audio: false,
                     color: Default::default(),
+                    effect: None,
                     lut: None,
                     chroma_key: None,
                 }),

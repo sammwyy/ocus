@@ -1417,6 +1417,7 @@ impl UiState {
                 };
                 if track.kind == TrackKind::Video {
                     sources.push(FrameSource {
+                        color: clip.color,
                         clip_id: clip.id,
                         path: media.path.clone(),
                         kind: media.kind,
@@ -1474,6 +1475,7 @@ impl UiState {
                 .iter()
                 .filter(|range| range.kind != MediaKind::Audio)
                 .map(|range| FrameSource {
+                    color: Default::default(),
                     clip_id: 0,
                     path: range.path.clone(),
                     kind: range.kind,
@@ -4075,6 +4077,7 @@ mod tests {
                     content: ClipContent::Media { media_id: 1 },
                     volume: 1.0,
                     muted: false,
+                    color: Default::default(),
                     transition: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
@@ -4948,6 +4951,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: true,
+                color: Default::default(),
                 transition: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,

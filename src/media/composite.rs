@@ -1,6 +1,8 @@
 use super::preview::{FrameImage, FrameSource, VideoLayers, blend};
 use crate::project::Project;
-use crate::timeline::{ClipContent, Title, TrackKind, Transform, Transition, TransitionKind};
+use crate::timeline::{
+    ClipContent, ColorAdjust, Title, TrackKind, Transform, Transition, TransitionKind,
+};
 use crate::ui::{title_fonts, title_markup};
 use creamui::fonts::{FontWeight, HorizontalAlign, LayoutSettings, cached_layout, resolve};
 use std::collections::{HashMap, HashSet};
@@ -8,6 +10,31 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use swash::scale::{Render, ScaleContext, Source, image::Image};
 use swash::zeno::{Format, Join, Stroke};
+
+fn adjust_color(image: Arc<FrameImage>, color: ColorAdjust) -> Arc<FrameImage> {
+    if color.neutral() {
+        return image;
+    }
+    let table: [f32; 256] = std::array::from_fn(|value| {
+        (((value as f32 / 255.0 - 0.5) * color.contrast + 0.5 + color.brightness) * 255.0)
+            .clamp(0.0, 255.0)
+    });
+    let mut adjusted = (*image).clone();
+    for pixel in adjusted.pixels.as_chunks_mut::<4>().0 {
+        let rgb = [
+            table[pixel[0] as usize],
+            table[pixel[1] as usize],
+            table[pixel[2] as usize],
+        ];
+        let luma = rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+        for channel in 0..3 {
+            pixel[channel] = (luma + (rgb[channel] - luma) * color.saturation)
+                .round()
+                .clamp(0.0, 255.0) as u8;
+        }
+    }
+    Arc::new(adjusted)
+}
 
 #[derive(Clone)]
 pub struct VisualPlan {
@@ -61,6 +88,7 @@ impl VisualPlan {
                             let media =
                                 project.media().iter().find(|media| media.id == *media_id)?;
                             Some(VisualClip::Media(FrameSource {
+                                color: clip.color,
                                 clip_id: clip.id,
                                 path: media.path.clone(),
                                 kind: media.kind,
@@ -171,7 +199,10 @@ impl Compositor {
                     {
                         visible = true;
                         active.push(source.clip_id);
-                        let image = self.layers.layer_at(source, position, cancelled)?;
+                        let image = adjust_color(
+                            self.layers.layer_at(source, position, cancelled)?,
+                            source.color,
+                        );
                         let opaque = source.transform.is_identity()
                             && image.width == self.width
                             && image.height == self.height
@@ -248,7 +279,10 @@ impl Compositor {
         match clip {
             VisualClip::Media(source) => {
                 active.push(source.clip_id);
-                let image = self.layers.layer_at(source, position, cancelled)?;
+                let image = adjust_color(
+                    self.layers.layer_at(source, position, cancelled)?,
+                    source.color,
+                );
                 if !source.transform.is_identity() {
                     draw_transformed(pixels, self.width, self.height, &image, source.transform);
                     return Ok(());
@@ -748,6 +782,124 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    #[test]
+    fn color_adjust_maps_pixels() {
+        let image = Arc::new(FrameImage {
+            picture: (0, 0, 1, 1),
+            width: 1,
+            height: 1,
+            pixels: vec![100, 150, 200, 73],
+        });
+        assert!(Arc::ptr_eq(
+            &image,
+            &adjust_color(image.clone(), ColorAdjust::default())
+        ));
+        let grey = adjust_color(
+            image.clone(),
+            ColorAdjust {
+                saturation: 0.0,
+                ..Default::default()
+            },
+        );
+        assert_eq!(grey.pixels, vec![143, 143, 143, 73]);
+        let bright = adjust_color(
+            image.clone(),
+            ColorAdjust {
+                brightness: 0.2,
+                ..Default::default()
+            },
+        );
+        assert_eq!(bright.pixels, vec![151, 201, 251, 73]);
+        let flat = adjust_color(
+            image,
+            ColorAdjust {
+                contrast: 0.0,
+                ..Default::default()
+            },
+        );
+        assert_eq!(flat.pixels, vec![128, 128, 128, 73]);
+    }
+
+    #[test]
+    fn adjusted_clip_changes_composed_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("color.tga");
+        let mut tga = vec![0; 18];
+        tga[2] = 2;
+        tga[12..14].copy_from_slice(&2u16.to_le_bytes());
+        tga[14..16].copy_from_slice(&2u16.to_le_bytes());
+        tga[16] = 32;
+        tga[17] = 40;
+        tga.extend([200, 150, 100, 255].repeat(4));
+        std::fs::write(&path, tga).unwrap();
+        let plan = |color| VisualPlan {
+            resolution: (2, 2),
+            transitions: HashMap::new(),
+            tracks: vec![vec![VisualClip::Media(FrameSource {
+                color,
+                clip_id: 1,
+                path: path.clone(),
+                kind: crate::media::MediaKind::Image,
+                start: 0,
+                source_start: 0,
+                duration: 30,
+                transform: Transform::default(),
+            })]],
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let raw = Compositor::new(plan(Default::default()), 2, 2, (30, 1))
+            .frame(0, &cancelled)
+            .unwrap()
+            .unwrap();
+        let grey = Compositor::new(
+            plan(ColorAdjust {
+                saturation: 0.0,
+                ..Default::default()
+            }),
+            2,
+            2,
+            (30, 1),
+        )
+        .frame(0, &cancelled)
+        .unwrap()
+        .unwrap();
+        assert_ne!(raw.pixels, grey.pixels);
+        assert_eq!(grey.pixels, [143, 143, 143, 255].repeat(4));
+        for kind in [
+            TransitionKind::Fade,
+            TransitionKind::Dissolve,
+            TransitionKind::Slide,
+        ] {
+            let mut transition_plan = plan(ColorAdjust {
+                saturation: 0.0,
+                ..Default::default()
+            });
+            transition_plan.transitions.insert(
+                1,
+                Transition {
+                    kind,
+                    duration_frames: 2,
+                },
+            );
+            let frame = Compositor::new(transition_plan, 2, 2, (30, 1))
+                .frame(0, &cancelled)
+                .unwrap()
+                .unwrap();
+            assert!(
+                frame.pixels.as_chunks::<4>().0.iter().all(|pixel| {
+                    pixel[0] == pixel[1] && pixel[1] == pixel[2] && pixel[3] == 255
+                })
+            );
+            assert!(
+                frame
+                    .pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| pixel[0] > 0)
+            );
+        }
+    }
     static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
 
     #[test]
@@ -1036,6 +1188,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 90,
+                color: Default::default(),
                 transform: Transform::default(),
             }
         };
@@ -1123,6 +1276,84 @@ mod tests {
     }
 
     #[test]
+    fn color_is_applied_before_transform_in_normal_and_transition_frames() {
+        ffmpeg_next::init().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gradient.tga");
+        let mut tga = vec![0; 18];
+        tga[2] = 2;
+        tga[12..14].copy_from_slice(&4u16.to_le_bytes());
+        tga[14..16].copy_from_slice(&2u16.to_le_bytes());
+        tga[16] = 32;
+        tga[17] = 40;
+        for _ in 0..2 {
+            for value in [10, 60, 130, 240] {
+                tga.extend([value, value, value, 255]);
+            }
+        }
+        fs::write(&path, tga).unwrap();
+        let source = FrameSource {
+            clip_id: 1,
+            path,
+            kind: MediaKind::Image,
+            start: 0,
+            source_start: 0,
+            duration: 5,
+            color: ColorAdjust {
+                brightness: 0.2,
+                contrast: 2.0,
+                saturation: 1.0,
+            },
+            transform: Transform {
+                scale: 0.75,
+                rotation: 15.0,
+                opacity: 0.8,
+                ..Default::default()
+            },
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let image = VideoLayers::new((30, 1), (4, 2))
+            .layer_at(&source, 0, &cancelled)
+            .unwrap();
+        let graded = adjust_color(image.clone(), source.color);
+        let mut expected = [0, 0, 0, 255].repeat(8);
+        draw_transformed(&mut expected, 4, 2, &graded, source.transform);
+        let mut ungraded = [0, 0, 0, 255].repeat(8);
+        draw_transformed(&mut ungraded, 4, 2, &image, source.transform);
+        assert_ne!(expected, ungraded);
+        for transition in [false, true] {
+            let plan = VisualPlan {
+                resolution: (4, 2),
+                transitions: if transition {
+                    HashMap::from([(
+                        1,
+                        Transition {
+                            kind: TransitionKind::Fade,
+                            duration_frames: 3,
+                        },
+                    )])
+                } else {
+                    HashMap::new()
+                },
+                tracks: vec![vec![VisualClip::Media(source.clone())]],
+            };
+            let actual = Compositor::new(plan, 4, 2, (30, 1))
+                .frame(0, &cancelled)
+                .unwrap()
+                .unwrap();
+            let mut expected = expected.clone();
+            if transition {
+                for pixel in expected.as_chunks_mut::<4>().0 {
+                    for channel in &mut pixel[..3] {
+                        *channel = (f64::from(*channel) * 0.25).round() as u8;
+                    }
+                }
+            }
+            assert_eq!(actual.pixels, expected, "transition={transition}");
+        }
+    }
+
+    #[test]
     fn adjacent_video_continues_after_out_and_holds_at_source_eof() {
         ffmpeg_next::init().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -1181,6 +1412,7 @@ mod tests {
                 VisualClip::Media(FrameSource {
                     clip_id: 1,
                     path: video,
+                    color: Default::default(),
                     kind: MediaKind::Video,
                     start: 0,
                     source_start: 0,
@@ -1190,6 +1422,7 @@ mod tests {
                 VisualClip::Media(FrameSource {
                     clip_id: 2,
                     path: still,
+                    color: Default::default(),
                     kind: MediaKind::Image,
                     start: 2,
                     source_start: 0,
@@ -1246,6 +1479,7 @@ mod tests {
                 source_start: 0,
                 duration: 5,
                 transform,
+                color: Default::default(),
             })
         };
         let mut outgoing = source(
@@ -1317,6 +1551,7 @@ mod tests {
             VisualClip::Media(FrameSource {
                 clip_id: id,
                 path,
+                color: Default::default(),
                 kind: MediaKind::Image,
                 start,
                 source_start: 0,
@@ -1514,6 +1749,7 @@ mod tests {
             transitions: HashMap::new(),
             resolution: (1920, 1080),
             tracks: vec![vec![VisualClip::Media(FrameSource {
+                color: Default::default(),
                 clip_id: 1,
                 path,
                 kind: MediaKind::Image,
@@ -1563,6 +1799,7 @@ mod tests {
                 transitions: HashMap::new(),
                 resolution: (1920, 1080),
                 tracks: vec![vec![VisualClip::Media(FrameSource {
+                    color: Default::default(),
                     clip_id: 1,
                     path,
                     kind: MediaKind::Video,
@@ -1660,6 +1897,7 @@ mod tests {
         let transparent = fixture("transparent.tga", 16, 9, 0);
         let source = |id, path| {
             VisualClip::Media(FrameSource {
+                color: Default::default(),
                 clip_id: id,
                 path,
                 kind: MediaKind::Image,
@@ -1873,6 +2111,7 @@ mod tests {
         .unwrap();
         let source = |id, path| {
             VisualClip::Media(FrameSource {
+                color: Default::default(),
                 clip_id: id,
                 path,
                 kind: MediaKind::Image,

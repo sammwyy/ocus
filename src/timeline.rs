@@ -39,6 +39,8 @@ pub struct Clip {
     /// moved and trimmed with the picture; `volume` and `muted` apply to it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub linked_audio: bool,
+    #[serde(default, skip_serializing_if = "ColorAdjust::neutral")]
+    pub color: ColorAdjust,
     #[serde(default, skip_serializing_if = "Transform::is_identity")]
     pub transform: Transform,
 }
@@ -133,6 +135,38 @@ impl Clip {
 pub enum ClipContent {
     Media { media_id: u64 },
     Title(Title),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ColorAdjust {
+    pub brightness: f32,
+    pub contrast: f32,
+    pub saturation: f32,
+}
+
+impl Default for ColorAdjust {
+    fn default() -> Self {
+        Self {
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+        }
+    }
+}
+
+impl ColorAdjust {
+    pub fn neutral(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn valid(&self) -> bool {
+        self.brightness.is_finite()
+            && (-1.0..=1.0).contains(&self.brightness)
+            && self.contrast.is_finite()
+            && (0.0..=2.0).contains(&self.contrast)
+            && self.saturation.is_finite()
+            && (0.0..=2.0).contains(&self.saturation)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

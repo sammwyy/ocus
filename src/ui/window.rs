@@ -4040,6 +4040,48 @@ fn open_project_link(url: &'static str, state: &UiState) {
     }
 }
 
+fn performance_settings(state: &UiState, hardware: bool, width: f32) -> BoxedWidget {
+    let backends = crate::media::hardware::Backend::PLATFORM
+        .iter()
+        .map(|backend| backend.name())
+        .collect::<Vec<_>>()
+        .join(" or ");
+    let toggle = state.clone();
+    Box::new(
+        Flex::column()
+            .width(width)
+            .gap(12.0)
+            .child(heading("Performance", text_color(), 16.0))
+            .child(Box::new(
+                Flex::row()
+                    .gap(10.0)
+                    .align(Align::Center)
+                    .child(Box::new(Checkbox::new(hardware, move || {
+                        toggle.toggle_hardware_acceleration()
+                    })))
+                    .child(heading("Hardware acceleration", text_color(), 11.0)),
+            ))
+            .child(text(
+                fit(
+                    &format!("Decode previews and encode exports with {backends}."),
+                    width,
+                    11.0,
+                ),
+                muted(),
+                11.0,
+            ))
+            .child(text(
+                fit(
+                    "Ocus switches to software when no device supports the media.",
+                    width,
+                    11.0,
+                ),
+                muted(),
+                11.0,
+            )),
+    )
+}
+
 fn about_settings(state: &UiState, width: f32) -> BoxedWidget {
     let light = creamui::use_theme().colors.surface.r > 128;
     let link_color = if light {
@@ -4285,6 +4327,13 @@ fn settings_modal(state: &UiState, viewport: Size) -> BoxedWidget {
                 SettingsPage::Appearance,
             ))
             .child(settings_nav(
+                "Performance",
+                page == SettingsPage::Performance,
+                nav_width - 24.0,
+                state,
+                SettingsPage::Performance,
+            ))
+            .child(settings_nav(
                 "About",
                 page == SettingsPage::About,
                 nav_width - 24.0,
@@ -4342,10 +4391,16 @@ fn settings_modal(state: &UiState, viewport: Size) -> BoxedWidget {
                                             state.settings_scroll.clone(),
                                         )
                                         .child(
-                                            if page == SettingsPage::Appearance {
-                                                content
-                                            } else {
-                                                about_settings(state, content_width)
+                                            match page {
+                                                SettingsPage::Appearance => content,
+                                                SettingsPage::Performance => performance_settings(
+                                                    state,
+                                                    settings.hardware_acceleration,
+                                                    content_width,
+                                                ),
+                                                SettingsPage::About => {
+                                                    about_settings(state, content_width)
+                                                }
                                             },
                                         ),
                                     )),
@@ -5751,6 +5806,63 @@ mod tests {
         state.open_settings();
         assert!(state.settings_page.peek() == SettingsPage::Appearance);
         assert_eq!(state.settings_scroll.offset(), 0.0);
+    }
+
+    #[test]
+    fn performance_settings_toggle_hardware_acceleration() {
+        let state = UiState::new();
+        state.open_settings();
+        let viewport = Size {
+            width: 1280.0,
+            height: 760.0,
+        };
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let mut painter = TestPainter::default();
+            let scene = Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+            let performance = painter
+                .bounds
+                .iter()
+                .find(|(label, _)| label == "Performance")
+                .unwrap()
+                .1;
+            scene
+                .hit_test(Point {
+                    x: performance.x + 2.0,
+                    y: performance.y + performance.height / 2.0,
+                })
+                .expect("Performance navigation must be clickable")();
+            assert!(state.settings_page.peek() == SettingsPage::Performance);
+        });
+        let enabled = state.settings.peek().hardware_acceleration;
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let mut painter = TestPainter::default();
+            let scene = Renderer::new().render(build(&state, viewport), viewport, &mut painter);
+            let backends = crate::media::hardware::Backend::PLATFORM
+                .iter()
+                .map(|backend| backend.name())
+                .collect::<Vec<_>>()
+                .join(" or ");
+            assert!(painter.labels.iter().any(|label| label.contains(&backends)));
+            let label = painter
+                .bounds
+                .iter()
+                .find(|(label, _)| label == "Hardware acceleration")
+                .unwrap()
+                .1;
+            scene
+                .hit_test(Point {
+                    x: label.x - 16.0,
+                    y: label.y + label.height / 2.0,
+                })
+                .expect("hardware acceleration checkbox must be clickable")();
+        });
+        assert_eq!(state.settings.peek().hardware_acceleration, !enabled);
+        assert_eq!(crate::media::hardware::enabled(), !enabled);
+        state.toggle_hardware_acceleration();
+        assert_eq!(state.settings.peek().hardware_acceleration, enabled);
+        assert_eq!(crate::media::hardware::enabled(), enabled);
     }
 
     #[test]

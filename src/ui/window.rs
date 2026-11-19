@@ -1043,6 +1043,7 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     vec![
                         Box::new(Thumb {
                             image,
+                            placeholder: state.thumbnail_label(media),
                             kind: media.kind,
                             width: None,
                             height: ((tile - 10.0) * 9.0 / 16.0).round(),
@@ -1091,6 +1092,7 @@ fn media_bin(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     vec![
                         Box::new(Thumb {
                             image,
+                            placeholder: state.thumbnail_label(media),
                             kind: media.kind,
                             width: Some(64.0),
                             height: 36.0,
@@ -1644,6 +1646,9 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         };
         if let Some(media) = media {
             rows.push(Box::new(Thumb {
+                placeholder: (track_kind == TrackKind::Video)
+                    .then(|| state.thumbnail_label(media))
+                    .flatten(),
                 image: (track_kind == TrackKind::Video)
                     .then(|| state.thumbnails.borrow().get(&media.path).cloned())
                     .flatten(),
@@ -2038,6 +2043,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         subtitle = "Source file";
         let id = media.id;
         rows.push(Box::new(Thumb {
+            placeholder: state.thumbnail_label(media),
             image: state.thumbnails.borrow().get(&media.path).cloned(),
             kind: media.kind,
             width: None,
@@ -4200,6 +4206,82 @@ mod tests {
                 .any(|label| label == "No clip at this frame")
         );
         assert!(!painter.labels.iter().any(|label| label == "Audio only"));
+    }
+
+    #[test]
+    fn bin_thumbnail_without_a_preview_has_an_explicit_fallback() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/tmp/video.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: false,
+        })));
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(painter.labels.iter().any(|label| label == "No preview"));
+        for view in [MediaView::Grid, MediaView::List] {
+            state.media_view.set(view);
+            state
+                .thumbnail_loading
+                .set(HashSet::from(["/tmp/video.mp4".into()]));
+            let painter = render(&state, 1280.0, 760.0);
+            assert!(painter.labels.iter().any(|label| label == "Loading…"));
+            assert!(!painter.labels.iter().any(|label| label == "No preview"));
+            state.thumbnail_loading.set(HashSet::new());
+            let painter = render(&state, 1280.0, 760.0);
+            assert!(painter.labels.iter().any(|label| label == "No preview"));
+        }
+    }
+
+    #[test]
+    fn timeline_shows_a_failed_storyboard_fallback() {
+        let state = UiState::new();
+        let path = std::path::PathBuf::from("/tmp/video.mp4");
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: path.clone(),
+            kind: MediaKind::Video,
+            duration_us: Some(2_000_000),
+            has_audio: false,
+        })));
+        state.thumbnails.borrow_mut().insert(
+            path.clone(),
+            Arc::new(RgbaImage::new(1, 1, vec![255; 4]).unwrap()),
+        );
+        state.insert_media(1);
+        let editor = state.editor.borrow();
+        let project = editor.project();
+        let clip = project
+            .tracks()
+            .iter()
+            .filter(|track| track.kind == TrackKind::Video)
+            .flat_map(|track| &track.clips)
+            .next()
+            .unwrap();
+        let key = StoryboardKey {
+            path,
+            kind: MediaKind::Video,
+            source_start: clip.source_start_frame,
+            duration: clip.duration_frames,
+            fps: (
+                project.settings().frame_rate.numerator,
+                project.settings().frame_rate.denominator,
+            ),
+        };
+        drop(editor);
+        state
+            .storyboards
+            .borrow_mut()
+            .insert(key.clone(), Arc::new(Vec::new()));
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(painter.labels.iter().any(|label| label == "No preview"));
+        state.storyboards.borrow_mut().insert(
+            key,
+            Arc::new(vec![Arc::new(RgbaImage::new(1, 1, vec![255; 4]).unwrap())]),
+        );
+        let painter = render(&state, 1280.0, 760.0);
+        assert!(!painter.labels.iter().any(|label| label == "No preview"));
     }
 
     #[test]

@@ -737,6 +737,22 @@ impl TimelineView {
                         index += 1;
                     }
                 }
+                if clip.images.as_ref().is_some_and(|images| images.is_empty())
+                    && content.width >= 65.0
+                    && content.height >= 14.0
+                {
+                    painter.fill_text(
+                        Rect {
+                            x: content.x + 5.0,
+                            width: content.width - 10.0,
+                            ..content
+                        },
+                        "No preview",
+                        muted(),
+                        10.0,
+                        TextAlign::Start,
+                    );
+                }
             }
             ClipLook::Audio if content.height > 6.0 => {
                 let level = (clip.volume / 2.0).clamp(0.0, 1.0);

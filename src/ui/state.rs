@@ -107,6 +107,7 @@ pub(crate) const ZOOM_SECONDS: [u64; 16] = [
 ];
 const DEFAULT_ZOOM: usize = 5;
 
+/// An empty cached filmstrip marks a preview that could not be generated.
 pub(crate) type Storyboard = Arc<Vec<Arc<RgbaImage>>>;
 
 fn storyboard_requests(
@@ -300,6 +301,7 @@ pub(crate) struct UiState {
     pub export_quality: TextController,
     pub export_scroll: ScrollController,
     pub thumbnails: Rc<RefCell<HashMap<PathBuf, Arc<RgbaImage>>>>,
+    pub thumbnail_loading: Signal<HashSet<PathBuf>>,
     pub storyboards: Rc<RefCell<HashMap<StoryboardKey, Storyboard>>>,
     pub media_scroll: ScrollController,
     pub inspector_scroll: ScrollController,
@@ -463,6 +465,7 @@ impl UiState {
             export_quality: TextController::default(),
             export_scroll: ScrollController::default(),
             thumbnails: Rc::new(RefCell::new(HashMap::new())),
+            thumbnail_loading: Signal::new(HashSet::new()),
             storyboards: Rc::new(RefCell::new(HashMap::new())),
             media_scroll: ScrollController::default(),
             inspector_scroll: ScrollController::default(),
@@ -1652,24 +1655,21 @@ impl UiState {
                 if state.storyboard_serial.get() != serial {
                     return;
                 }
-                match result {
-                    Ok(frames) if !frames.is_empty() => {
-                        let images: Vec<_> = frames
-                            .into_iter()
-                            .filter_map(|frame| {
-                                RgbaImage::new(frame.width, frame.height, frame.pixels)
-                                    .map(Arc::new)
-                            })
-                            .collect();
-                        if !images.is_empty() {
-                            state.storyboards.borrow_mut().insert(key, Arc::new(images));
-                            state.ui_revision.update(|revision| *revision += 1);
-                        }
-                    }
-                    _ => {}
-                }
+                state.finish_storyboard(key, result);
             },
         );
+    }
+
+    fn finish_storyboard(&self, key: StoryboardKey, result: Result<Vec<FrameImage>, String>) {
+        let images = result
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|frame| {
+                RgbaImage::new(frame.width, frame.height, frame.pixels).map(Arc::new)
+            })
+            .collect();
+        self.storyboards.borrow_mut().insert(key, Arc::new(images));
+        self.ui_revision.update(|revision| *revision += 1);
     }
 
     fn storyboard_requests(&self) -> Vec<StoryboardKey> {
@@ -1802,6 +1802,7 @@ impl UiState {
         self.export_modal.set(false);
         self.project_path.set(None);
         self.thumbnails.borrow_mut().clear();
+        self.thumbnail_loading.set(HashSet::new());
         self.cancel_storyboards();
         self.storyboards.borrow_mut().clear();
         self.reset_monitors();
@@ -1894,6 +1895,7 @@ impl UiState {
         }
         self.export_modal.set(false);
         self.thumbnails.borrow_mut().clear();
+        self.thumbnail_loading.set(HashSet::new());
         self.cancel_storyboards();
         self.storyboards.borrow_mut().clear();
         self.project_path.set(path);
@@ -2713,24 +2715,20 @@ impl UiState {
                                         "Source rejected by project validation".into(),
                                     ));
                                 }
-                                if let Some(thumb) = thumb
-                                    && state
-                                        .editor
-                                        .borrow()
-                                        .project()
-                                        .media()
-                                        .iter()
-                                        .any(|media| media.id == id && media.path == path)
-                                    && let Some(image) =
-                                        RgbaImage::new(thumb.width, thumb.height, thumb.pixels)
+                                if state
+                                    .editor
+                                    .borrow()
+                                    .project()
+                                    .media()
+                                    .iter()
+                                    .any(|media| media.id == id && media.path == path)
                                 {
-                                    let mut thumbnails = state.thumbnails.borrow_mut();
+                                    let thumbnails = state.thumbnails.borrow();
                                     if thumbnails.len() < MAX_THUMBNAILS
                                         || thumbnails.contains_key(&path)
                                     {
-                                        thumbnails.insert(path, Arc::new(image));
                                         drop(thumbnails);
-                                        state.ui_revision.update(|revision| *revision += 1);
+                                        state.finish_thumbnail(path, thumb);
                                     }
                                 }
                             } else {
@@ -2814,33 +2812,66 @@ impl UiState {
             .filter(|media| missing.contains(&media.id))
             .map(|media| media.path.clone())
             .collect();
+        let sources: Vec<_> = sources
+            .into_iter()
+            .filter(|path| !missing_paths.contains(path))
+            .collect();
+        self.thumbnail_loading
+            .update(|pending| pending.extend(sources.iter().cloned()));
         app.spawn_background(
             move || {
                 sources
                     .into_iter()
-                    .filter(|path| !missing_paths.contains(path))
-                    .filter_map(|path| thumbnail(&path).ok().map(|image| (path, image)))
+                    .map(|path| {
+                        let image = thumbnail(&path).ok();
+                        (path, image)
+                    })
                     .collect::<Vec<_>>()
             },
             move |results| {
                 let editor = state.editor.borrow();
-                let mut thumbnails = state.thumbnails.borrow_mut();
                 for (path, thumb) in results {
                     if editor
                         .project()
                         .media()
                         .iter()
                         .any(|media| media.path == path)
-                        && let Some(image) = RgbaImage::new(thumb.width, thumb.height, thumb.pixels)
                     {
-                        thumbnails.insert(path, Arc::new(image));
+                        state.finish_thumbnail(path, thumb);
                     }
                 }
-                drop(thumbnails);
                 drop(editor);
                 state.ui_revision.update(|revision| *revision += 1);
             },
         );
+    }
+
+    fn finish_thumbnail(&self, path: PathBuf, thumb: Option<Thumbnail>) {
+        self.thumbnail_loading.update(|pending| {
+            pending.remove(&path);
+        });
+        let image = thumb.and_then(|thumb| RgbaImage::new(thumb.width, thumb.height, thumb.pixels));
+        let mut thumbnails = self.thumbnails.borrow_mut();
+        if let Some(image) = image {
+            thumbnails.insert(path, Arc::new(image));
+        } else {
+            thumbnails.remove(&path);
+        }
+        drop(thumbnails);
+        self.ui_revision.update(|revision| *revision += 1);
+    }
+
+    pub(super) fn thumbnail_label(&self, media: &Media) -> Option<&'static str> {
+        if media.kind == MediaKind::Audio
+            || self.missing_media.get().contains(&media.id)
+            || self.thumbnails.borrow().contains_key(&media.path)
+        {
+            None
+        } else if self.thumbnail_loading.get().contains(&media.path) {
+            Some("Loading…")
+        } else {
+            Some("No preview")
+        }
     }
 
     pub fn insert_media(&self, media_id: u64) {
@@ -3072,6 +3103,77 @@ fn import_summary(imported: usize, total: usize, errors: &[(PathBuf, String)]) -
 mod tests {
     use super::*;
     use crate::timeline::Clip;
+
+    #[test]
+    fn thumbnail_completion_distinguishes_pending_failed_and_ready() {
+        let state = UiState::new();
+        let media = Media {
+            id: 1,
+            path: "video.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(1_000_000),
+            has_audio: false,
+        };
+        state
+            .thumbnail_loading
+            .set(HashSet::from([media.path.clone()]));
+        assert_eq!(state.thumbnail_label(&media), Some("Loading…"));
+        state.finish_thumbnail(media.path.clone(), None);
+        assert_eq!(state.thumbnail_label(&media), Some("No preview"));
+        assert!(state.thumbnail_loading.peek().is_empty());
+        state.finish_thumbnail(
+            media.path.clone(),
+            Some(Thumbnail {
+                width: 1,
+                height: 1,
+                pixels: vec![255; 4],
+            }),
+        );
+        assert_eq!(state.thumbnail_label(&media), None);
+        state.finish_thumbnail(
+            media.path.clone(),
+            Some(Thumbnail {
+                width: 1,
+                height: 1,
+                pixels: Vec::new(),
+            }),
+        );
+        assert_eq!(state.thumbnail_label(&media), Some("No preview"));
+        state.missing_media.set(HashSet::from([1]));
+        assert_eq!(state.thumbnail_label(&media), None);
+        assert_eq!(
+            state.thumbnail_label(&Media {
+                kind: MediaKind::Audio,
+                ..media
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn storyboard_failures_and_empty_results_are_cached_without_requeueing() {
+        let state = UiState::new();
+        let key = storyboard_ranges()[0].0.clone();
+        for result in [Err("decode failed".into()), Ok(Vec::new())] {
+            state.finish_storyboard(key.clone(), result);
+            assert!(state.storyboards.borrow()[&key].is_empty());
+            let requests = storyboard_requests(
+                &[(key.clone(), true)],
+                &mut state.storyboards.borrow_mut(),
+                &mut Vec::new(),
+            );
+            assert!(requests.is_empty());
+        }
+        state.finish_storyboard(
+            key.clone(),
+            Ok(vec![FrameImage {
+                width: 1,
+                height: 1,
+                pixels: vec![255; 4],
+            }]),
+        );
+        assert_eq!(state.storyboards.borrow()[&key].len(), 1);
+    }
 
     #[test]
     fn autosave_error_survives_other_status_updates_until_success() {

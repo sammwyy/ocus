@@ -169,6 +169,21 @@ offers independent In and Out choices, quarter-second duration steps, and
 slide edges; the timeline marks their effective ranges with mirrored ramps
 at the clip's start and end.
 
+Video and image clips may reference a `.cube` color LUT through an optional
+version 1 field (absent means no LUT). `SetClipLut` changes it undoably; splits
+and copies preserve it. The Inspector validates chosen files on a worker.
+The shared compositor applies per-clip brightness, contrast and saturation
+first, then loads and caches LUTs by path on its worker. Both adjustments run
+before transitions and layer blending. The Inspector exposes both color
+adjustments and LUT selection. Missing or malformed LUTs report
+errors in preview and export. Each cached LUT keeps its floating-point lattice
+and three 256-entry domain index/weight tables for per-pixel trilinear
+interpolation (1D LUTs use per-channel linear tables). Extreme lattice values
+use exact interpolation to avoid floating-point cancellation errors. Relative
+LUT paths resolve beside the project file, like media paths. Caches live only
+as long as the compositor. Alpha is unchanged. Source preview and thumbnails
+remain ungraded.
+
 ## Where new work belongs
 
 | Work | Place it when implemented | Boundary |

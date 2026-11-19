@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct FrameSource {
+    pub lut: Option<PathBuf>,
     pub color: ColorAdjust,
     pub clip_id: u64,
     pub path: PathBuf,
@@ -51,6 +52,7 @@ pub fn storyboard(
         vec![0, key.duration / 2, key.duration - 1]
     };
     let source = FrameSource {
+        lut: None,
         color: Default::default(),
         clip_id: 0,
         path: key.path.clone(),
@@ -816,6 +818,7 @@ mod tests {
                 .unwrap();
             assert!(reference.status.success());
             let source = FrameSource {
+                lut: None,
                 color: Default::default(),
                 clip_id: 1,
                 path: path.clone(),
@@ -853,6 +856,7 @@ mod tests {
         let root = PathBuf::from(std::env::var("OCUS_SEEK_FIXTURES").unwrap());
         for name in ["late", "zero"] {
             let source = FrameSource {
+                lut: None,
                 color: Default::default(),
                 clip_id: 1,
                 path: root.join(format!("{name}.mp4")),
@@ -901,6 +905,7 @@ mod tests {
         data.extend((0..8 * 6 * 3).map(|value| value as u8));
         fs::write(&path, data).unwrap();
         let source = FrameSource {
+            lut: None,
             color: Default::default(),
             clip_id: 1,
             path: path.clone(),
@@ -944,6 +949,7 @@ mod tests {
             );
             let frames = u64::from(fps.0 / fps.1);
             let source = FrameSource {
+                lut: None,
                 color: Default::default(),
                 clip_id: 1,
                 path,
@@ -1004,6 +1010,7 @@ mod tests {
                 .success()
         );
         let source = FrameSource {
+            lut: None,
             color: Default::default(),
             clip_id: 1,
             path: path.clone(),
@@ -1075,6 +1082,7 @@ mod tests {
                 (180, 320)
             };
             let source = FrameSource {
+                lut: None,
                 color: Default::default(),
                 clip_id: 1,
                 path: path.clone(),
@@ -1132,6 +1140,7 @@ mod tests {
             data.extend(vec![255; width * height * 3]);
             fs::write(&path, data).unwrap();
             let source = FrameSource {
+                lut: None,
                 color: Default::default(),
                 clip_id: 1,
                 path: path.clone(),
@@ -1219,6 +1228,7 @@ mod tests {
         ffmpeg::init().unwrap();
         let cancelled = Arc::new(AtomicBool::new(false));
         let source = FrameSource {
+            lut: None,
             color: Default::default(),
             clip_id: 1,
             path,
@@ -1253,6 +1263,7 @@ mod tests {
         }
         fs::write(&path, source).unwrap();
         let clips = [FrameSource {
+            lut: None,
             color: Default::default(),
             clip_id: 1,
             path: path.clone(),
@@ -1349,6 +1360,7 @@ mod tests {
         let cut = PreviewPlan {
             use_proxies: false,
             sources: vec![FrameSource {
+                lut: None,
                 color: Default::default(),
                 clip_id: 2,
                 path: path.clone(),

@@ -32,8 +32,8 @@ clip commands do not complete the corresponding editor workflows.
   snapping, drag sources from the bin onto a track, and drop files on the
   window or a track; each drop is one undoable command.
 - [x] Trim clips by dragging their edges, with frame and second steps in the inspector.
-- [ ] Generate filmstrips lazily for clips beyond the bounded first 64
-  cached source ranges in large projects.
+- [x] Generate filmstrips for additional visible clips on demand, without
+  retaining more than 64 source ranges when they leave the viewport.
 - [x] Decode video on a worker with a bounded frame buffer; support
   play/pause, frame stepping and frame-accurate timeline ruler seeks.
 - [x] Present video and still-image frames through CreamUI's GPU viewport.

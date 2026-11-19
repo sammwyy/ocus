@@ -33,6 +33,7 @@ pub(crate) fn split_tracks(
             continue;
         }
         let right = Clip {
+            keyframes: clip.keyframes_for_range(i128::from(offset)),
             transition: None,
             id: next_id,
             start_frame: at_frame,
@@ -57,6 +58,11 @@ pub(crate) fn split_tracks(
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
+    SetClipKeyframes {
+        track_id: u64,
+        clip_id: u64,
+        keyframes: Vec<crate::timeline::Keyframe>,
+    },
     SetPlayback {
         track_id: u64,
         clip_id: u64,
@@ -249,6 +255,8 @@ fn ripple_delete(project: &Project, selection: &[(u64, u64)]) -> Option<Vec<Trac
                         next_id = next_id.checked_add(1)?;
                         right.id = next_id;
                         right.transition = None;
+                        right.keyframes =
+                            clip.keyframes_for_range(i128::from(end - clip.start_frame));
                         right.source_start_frame =
                             clip.source_start_for_range(end - clip.start_frame, clip_end - end)?;
                         right.start_frame = start;
@@ -269,6 +277,7 @@ fn ripple_delete(project: &Project, selection: &[(u64, u64)]) -> Option<Vec<Trac
                         kept.push(clip);
                     }
                 } else if clip_end > end {
+                    clip.keyframes = clip.keyframes_for_range(i128::from(end - clip.start_frame));
                     clip.source_start_frame =
                         clip.source_start_for_range(end - clip.start_frame, clip_end - end)?;
                     clip.duration_frames = clip_end - end;
@@ -468,6 +477,7 @@ mod playback_tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                keyframes: Vec::new(),
                 speed: 1.0,
                 transform: crate::timeline::Transform::default(),
                 noise_reduction: false,
@@ -508,6 +518,7 @@ mod playback_tests {
             assert!(editor.apply(Command::InsertClip {
                 track_id: 1,
                 clip: Clip {
+                    keyframes: Vec::new(),
                     speed: 1.0,
                     transform: crate::timeline::Transform::default(),
                     noise_reduction: false,
@@ -727,6 +738,7 @@ mod playback_tests {
         }));
         let mut tracks = editor.project().tracks().to_vec();
         tracks[1].clips.push(Clip {
+            keyframes: Vec::new(),
             speed: 1.0,
             transform: crate::timeline::Transform::default(),
             noise_reduction: false,
@@ -820,6 +832,7 @@ impl Editor {
             | Command::SetClipColor { track_id, .. }
             | Command::SetPlayback { track_id, .. }
             | Command::SetClipTransform { track_id, .. }
+            | Command::SetClipKeyframes { track_id, .. }
             | Command::SetClipLut { track_id, .. }
             | Command::SetClipFades { track_id, .. }
             | Command::SetClipNoiseReduction { track_id, .. }
@@ -983,6 +996,9 @@ impl Editor {
                         })
                         .is_none()
                     || !clip.transform.valid()
+                    || !crate::timeline::valid_keyframes(&clip.keyframes)
+                    || (!clip.keyframes.is_empty()
+                        && !matches!(clip.content, ClipContent::Media { .. }))
                     || !clip.color.valid()
                     || !clip.volume.is_finite()
                     || !(0.0..=2.0).contains(&clip.volume)
@@ -1023,6 +1039,7 @@ impl Editor {
                     }
                 };
                 if !compatible
+                    || (!clip.keyframes.is_empty() && kind != TrackKind::Video)
                     || (clip.lut.is_some()
                         && (kind != TrackKind::Video
                             || !matches!(clip.content, ClipContent::Media { .. })))
@@ -1245,11 +1262,38 @@ impl Editor {
                     .clips
                     .iter_mut()
                     .find(|c| c.id == clip_id)?;
+                clip.keyframes = clip
+                    .keyframes_for_range(i128::from(start_frame) - i128::from(clip.start_frame));
                 clip.start_frame = start_frame;
                 clip.source_start_frame = source_start_frame;
                 clip.duration_frames = duration_frames;
                 clip.clamp_fades();
                 self.execute(Command::ReplaceTracks(tracks))
+            }
+            Command::SetClipKeyframes {
+                track_id,
+                clip_id,
+                keyframes,
+            } => {
+                if !crate::timeline::valid_keyframes(&keyframes) {
+                    return None;
+                }
+                let track = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|t| t.id == track_id && t.kind == TrackKind::Video)?;
+                let clip = track.clips.iter_mut().find(|c| c.id == clip_id)?;
+                if !matches!(clip.content, ClipContent::Media { .. }) || clip.keyframes == keyframes
+                {
+                    return None;
+                }
+                let old = std::mem::replace(&mut clip.keyframes, keyframes);
+                Some(Command::SetClipKeyframes {
+                    track_id,
+                    clip_id,
+                    keyframes: old,
+                })
             }
             Command::SetClipTransform {
                 track_id,
@@ -1413,6 +1457,15 @@ impl Editor {
                     clip.duration_frames = clip
                         .duration_frames
                         .min(clip.timeline_span(frames.saturating_sub(clip.source_start_frame)));
+                }
+                let last = clip.duration_frames.saturating_sub(1);
+                if clip.keyframes.last().is_some_and(|key| key.frame > last) {
+                    let boundary = crate::timeline::Keyframe::new(
+                        last,
+                        clip.transform_at(clip.start_frame + last),
+                    );
+                    clip.keyframes.retain(|key| key.frame < last);
+                    clip.keyframes.push(boundary);
                 }
                 clip.clamp_fades();
                 self.execute(Command::ReplaceTracks(tracks))
@@ -1823,6 +1876,7 @@ mod tests {
             muted: false,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         assert!(editor.apply(Command::InsertClip {
@@ -1953,6 +2007,54 @@ mod tests {
             "linked_audio": true
         }]);
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn speed_changes_bound_keys_and_preserve_visible_animation_with_undo() {
+        use crate::timeline::{Keyframe, Transform};
+        for playback in [Playback::Forward, Playback::Reverse] {
+            let mut project = speed_project();
+            let clip = &mut project.tracks[0].clips[0];
+            clip.playback = playback;
+            clip.keyframes = vec![
+                Keyframe::new(0, Transform::default()),
+                Keyframe::new(
+                    59,
+                    Transform {
+                        x: 1.0,
+                        ..Default::default()
+                    },
+                ),
+            ];
+            let original = clip.clone();
+            let mut editor = Editor::new(project);
+            assert!(editor.apply(Command::SetClipSpeed {
+                track_id: 0,
+                clip_id: 1,
+                speed: 2.0
+            }));
+            let faster = editor.project().tracks()[0].clips[0].clone();
+            assert_eq!(faster.duration_frames, 30);
+            assert_eq!(faster.keyframes.last().unwrap().frame, 29);
+            assert!((faster.transform_at(25).x - original.transform_at(25).x).abs() < 0.00001);
+            assert!(editor.undo());
+            assert_eq!(editor.project().tracks()[0].clips[0], original);
+            assert!(editor.redo());
+            assert_eq!(editor.project().tracks()[0].clips[0], faster);
+            assert!(editor.apply(Command::SetClipSpeed {
+                track_id: 0,
+                clip_id: 1,
+                speed: 0.5
+            }));
+            let slower = &editor.project().tracks()[0].clips[0];
+            assert_eq!(slower.duration_frames, 120);
+            assert_eq!(slower.keyframes, faster.keyframes);
+            assert!(!editor.apply(Command::SetClipSpeed {
+                track_id: 0,
+                clip_id: 1,
+                speed: 0.0
+            }));
+        }
     }
 
     #[test]
@@ -2415,6 +2517,7 @@ mod tests {
             transition_out: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         assert!(editor.apply(Command::InsertClip {
@@ -2651,6 +2754,7 @@ mod tests {
                 transition: None,
                 linked_audio: true,
                 color: Default::default(),
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             }
         }));
@@ -2723,6 +2827,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             };
             assert!(editor.apply(Command::InsertClip {
@@ -2807,6 +2912,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         assert!(editor.apply(Command::InsertClip {
@@ -2894,6 +3000,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         assert!(editor.apply(Command::InsertClip {
@@ -2948,6 +3055,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -3233,6 +3341,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         let insert =
@@ -3325,6 +3434,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         project.tracks[0].clips = vec![
@@ -3434,6 +3544,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         for (id, start_frame, track_id) in [(1, 0, 0), (2, 30, 0), (3, 30, 1)] {
@@ -3532,6 +3643,7 @@ mod tests {
                     fade_out_frames: 0,
                     noise_reduction: false,
                     linked_audio: id == 2,
+                    keyframes: Vec::new(),
                     transform: Transform::default(),
                 },
             }));
@@ -3594,6 +3706,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         for (track_id, clip) in [
@@ -3624,6 +3737,7 @@ mod tests {
                     fade_out_frames: 0,
                     noise_reduction: false,
                     linked_audio: false,
+                    keyframes: Vec::new(),
                     transform: Transform::default(),
                 },
             ),
@@ -3699,6 +3813,7 @@ mod tests {
                     fade_out_frames: 0,
                     noise_reduction: false,
                     linked_audio: false,
+                    keyframes: Vec::new(),
                     transform: Transform::default(),
                 },
             }));
@@ -3739,6 +3854,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         assert!(!editor.apply(Command::InsertClip {
@@ -3788,6 +3904,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -3816,6 +3933,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -3859,6 +3977,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -3955,6 +4074,7 @@ mod tests {
             fade_out_frames: 0,
             linked_audio: false,
             color: Default::default(),
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         assert!(editor.apply(Command::InsertClip { track_id: 0, clip }));
@@ -4018,6 +4138,108 @@ mod tests {
                 .iter()
                 .all(|c| c.transform == transformed)
         );
+    }
+
+    #[test]
+    fn keyframes_validate_round_trip_and_follow_content_edits() {
+        use crate::timeline::Keyframe;
+        let mut editor = Editor::new(Project::new("Animation"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "image.png".into(),
+            kind: MediaKind::Image,
+            duration_us: None,
+            has_audio: false,
+        })));
+        let clip: Clip = serde_json::from_value(serde_json::json!({
+            "id": 1, "start_frame": 10, "source_start_frame": 20,
+            "duration_frames": 30, "content": {"media": {"media_id": 1}},
+            "volume": 1.0, "muted": false,
+            "transform": {"scale":1.0,"x":0.0,"y":0.0,"rotation":0.0,
+                "opacity":1.0,"crop_left":0.1,"crop_right":0.0,"crop_top":0.0,"crop_bottom":0.0}
+        }))
+        .unwrap();
+        assert!(editor.apply(Command::InsertClip { track_id: 0, clip }));
+        let command = |keyframes| Command::SetClipKeyframes {
+            track_id: 0,
+            clip_id: 1,
+            keyframes,
+        };
+        assert!(!editor.apply(command(vec![])));
+        let first = Keyframe::new(5, Transform::default());
+        let last = Keyframe::new(
+            15,
+            Transform {
+                scale: 2.0,
+                x: 1.0,
+                y: -1.0,
+                rotation: 90.0,
+                opacity: 0.0,
+                ..Default::default()
+            },
+        );
+        for invalid in [
+            vec![last, first],
+            vec![first, first],
+            vec![Keyframe {
+                opacity: 2.0,
+                ..first
+            }],
+            vec![Keyframe {
+                scale: f32::NAN,
+                ..first
+            }],
+        ] {
+            assert!(!editor.apply(command(invalid)));
+        }
+        let keys = vec![first, last];
+        assert!(editor.apply(command(keys.clone())));
+        assert!(!editor.apply(command(keys.clone())));
+        let clip = &editor.project().tracks()[0].clips[0];
+        assert_eq!(clip.transform_at(10).scale, 1.0);
+        assert_eq!(clip.transform_at(39).scale, 2.0);
+        let middle = clip.transform_at(20);
+        assert_eq!(
+            (
+                middle.scale,
+                middle.x,
+                middle.y,
+                middle.rotation,
+                middle.opacity
+            ),
+            (1.5, 0.5, -0.5, 45.0, 0.5)
+        );
+        assert_eq!(middle.crop_left, 0.1);
+        let json = crate::project::format::to_json(editor.project()).unwrap();
+        assert_eq!(
+            &crate::project::format::from_json(&json).unwrap(),
+            editor.project()
+        );
+        let mut invalid: serde_json::Value = serde_json::from_str(&json).unwrap();
+        invalid["tracks"][0]["clips"][0]["keyframes"][0]["opacity"] = 2.0.into();
+        assert!(crate::project::format::from_json(&invalid.to_string()).is_err());
+        assert!(editor.undo());
+        assert!(editor.project().tracks()[0].clips[0].keyframes.is_empty());
+        assert!(editor.redo());
+        assert!(editor.apply(Command::Split {
+            track_id: 0,
+            clip_id: 1,
+            at_frame: 20,
+            new_id: 2
+        }));
+        let right = &editor.project().tracks()[0].clips[1];
+        assert_eq!(right.keyframes[0].frame, 0);
+        assert_eq!(right.transform_at(20), middle);
+        assert!(editor.apply(Command::Trim {
+            track_id: 0,
+            clip_id: 2,
+            start_frame: 22,
+            source_start_frame: 32,
+            duration_frames: 18
+        }));
+        let right = &editor.project().tracks()[0].clips[1];
+        assert_eq!(right.keyframes[0].frame, 0);
+        assert_eq!(right.transform_at(22).rotation, 63.0);
     }
 
     #[test]

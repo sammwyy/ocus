@@ -2419,6 +2419,7 @@ mod tests {
                     playback: crate::timeline::Playback::Forward,
                     speed,
                     transform: Transform::default(),
+                    keyframes: Vec::new(),
                     id: 1,
                     start_frame: 3,
                     source_start_frame: 2,

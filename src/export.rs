@@ -1052,6 +1052,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                keyframes: Vec::new(),
                 speed: 1.0,
                 transform: crate::timeline::Transform::default(),
                 noise_reduction: false,
@@ -1279,6 +1280,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             }
         }));
@@ -1380,6 +1382,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             }
         }));
@@ -1539,6 +1542,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -1618,6 +1622,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -1743,6 +1748,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -1817,6 +1823,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         }];
         layered[1].clips = vec![Clip {
@@ -1837,6 +1844,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         }];
         layered.push(Track {
@@ -1870,6 +1878,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             }],
         });
@@ -1985,6 +1994,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -2075,6 +2085,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -2245,6 +2256,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));
@@ -2376,6 +2388,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             },
         }));

@@ -1535,6 +1535,7 @@ impl UiState {
                         start: clip.start_frame,
                         source_start: clip.source_start_frame,
                         duration: clip.duration_frames,
+                        keyframes: clip.keyframes.clone(),
                         transform: clip.transform,
                     });
                 }
@@ -1598,6 +1599,7 @@ impl UiState {
                     start: 0,
                     source_start: range.source_start,
                     duration: range.duration,
+                    keyframes: Vec::new(),
                     transform: Transform::default(),
                 })
                 .collect(),
@@ -4491,6 +4493,7 @@ mod tests {
                     fade_out_frames: 0,
                     noise_reduction: false,
                     linked_audio: false,
+                    keyframes: Vec::new(),
                     transform: Transform::default(),
                 }
             }));
@@ -5347,6 +5350,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             }
         }));

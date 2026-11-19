@@ -22,6 +22,17 @@ pub struct FrameSource {
     pub duration: u64,
     pub speed: f64,
     pub transform: Transform,
+    pub keyframes: Vec<crate::timeline::Keyframe>,
+}
+
+impl FrameSource {
+    pub fn transform_at(&self, position: u64) -> Transform {
+        crate::timeline::evaluate_transform(
+            self.transform,
+            &self.keyframes,
+            position.saturating_sub(self.start),
+        )
+    }
 }
 
 impl FrameSource {
@@ -127,6 +138,7 @@ pub fn storyboard(
         start: 0,
         source_start: key.source_start,
         duration: key.duration,
+        keyframes: Vec::new(),
         transform: key.transform(),
     };
     let mut frames = Vec::new();
@@ -707,6 +719,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         }
     }
@@ -1006,6 +1019,7 @@ mod tests {
     fn speed_maps_timeline_offsets_to_source_frames() {
         for speed in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] {
             let source = super::FrameSource {
+                keyframes: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 transform: Transform::default(),
                 color: Default::default(),
@@ -1069,6 +1083,7 @@ mod tests {
                 path.clone()
             };
             let mut source = FrameSource {
+                keyframes: Vec::new(),
                 speed: 1.0,
                 transform: crate::timeline::Transform::default(),
                 lut: None,
@@ -1196,6 +1211,7 @@ mod tests {
                 .success()
         );
         let mut source = FrameSource {
+            keyframes: Vec::new(),
             speed: 1.0,
             transform: crate::timeline::Transform::default(),
             lut: None,
@@ -1292,6 +1308,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 30,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             };
             let cancelled = Arc::new(AtomicBool::new(false));
@@ -1333,6 +1350,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 1800,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             };
             for target in [0, 300, 901, 1500, 1790] {
@@ -1385,6 +1403,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 300,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -1432,6 +1451,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: frames,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             };
             let cancelled = Arc::new(AtomicBool::new(false));
@@ -1496,6 +1516,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 1,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -1571,6 +1592,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 1,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             };
             let cancelled = Arc::new(AtomicBool::new(false));
@@ -1632,6 +1654,7 @@ mod tests {
                 start: 0,
                 source_start: 0,
                 duration: 1,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             };
             let cancelled = Arc::new(AtomicBool::new(false));
@@ -1723,6 +1746,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 120,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         };
         let mut reader =
@@ -1771,6 +1795,7 @@ mod tests {
                 lut: None,
                 clip_id: 1,
                 path: quantized.clone(),
+                keyframes: Vec::new(),
                 kind: MediaKind::Video,
                 start: 0,
                 source_start: 0,
@@ -1819,6 +1844,7 @@ mod tests {
             start: 0,
             source_start: 0,
             duration: 6,
+            keyframes: Vec::new(),
             transform: Transform::default(),
         }];
         let plan = PreviewPlan {
@@ -1926,6 +1952,7 @@ mod tests {
                 start: 3,
                 source_start: 2,
                 duration: 2,
+                keyframes: Vec::new(),
                 transform: Transform::default(),
             }],
             visual: None,

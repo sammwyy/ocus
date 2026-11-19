@@ -178,6 +178,10 @@ impl Project {
                     || clip.start_frame < end
                     || !clip_ids.insert(clip.id)
                     || !clip.transform.valid()
+                    || !crate::timeline::valid_keyframes(&clip.keyframes)
+                    || (!clip.keyframes.is_empty()
+                        && (track.kind != TrackKind::Video
+                            || !matches!(clip.content, ClipContent::Media { .. })))
                     || !clip.color.valid()
                     || !clip.volume.is_finite()
                     || !(0.0..=2.0).contains(&clip.volume)

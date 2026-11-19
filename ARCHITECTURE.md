@@ -210,6 +210,22 @@ settings and LUT paths;
 disk cache keys also include LUT file metadata. Media-bin thumbnails and source
 preview remain ungraded.
 
+Video-track media clips may store transform keyframes in clip-relative frames.
+Position, scale, rotation and opacity interpolate linearly, holding the first
+and last values outside their keyed range; crop remains static. Splits and trims
+rebase keys, inserting an interpolated boundary key when trimming the start.
+Moving a clip leaves keys unchanged. Speed changes keep timeline key offsets;
+shortening a clip replaces keys past its end with an interpolated final-frame
+key. Reverse and freeze affect the media only;
+transform animation continues along the clip's timeline. The optional
+keyframes field is omitted when empty, retaining version 1 compatibility.
+`SetClipKeyframes` validates and records each animation edit for undo/redo.
+Preview and export evaluate the same keyframes in the shared compositor,
+including transition layers. The Transform Inspector can add or remove a
+keyframe at the playhead, jump between visible keys and edit interpolated
+values. Once keyed, animated-property edits upsert a key at the playhead;
+crop edits continue to update the base transform.
+
 ## Where new work belongs
 
 | Work | Place it when implemented | Boundary |

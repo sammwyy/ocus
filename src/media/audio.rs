@@ -15,6 +15,90 @@ pub const CHANNELS: usize = 2;
 /// Samples held ahead of playback; caps decode memory and restart latency.
 const CAPACITY: usize = RATE as usize / 4 * CHANNELS;
 const CHUNK: usize = 2_048;
+const PEAK_BUCKET_FRAMES: usize = RATE as usize / 100;
+const MAX_PEAK_BUCKETS: usize = 32_768;
+
+#[derive(Debug)]
+pub(crate) struct Waveform {
+    peaks: Vec<f32>,
+    bucket_frames: usize,
+    frames: u64,
+}
+
+impl Waveform {
+    fn collect(
+        mut read: impl FnMut(&mut Vec<f32>, usize) -> Result<usize, String>,
+    ) -> Result<Self, String> {
+        let mut peaks: Vec<f32> = Vec::new();
+        let mut samples = Vec::new();
+        let mut bucket_frames = PEAK_BUCKET_FRAMES;
+        let mut frames = 0;
+        let mut remaining = bucket_frames;
+        let mut peak = 0.0_f32;
+        loop {
+            samples.clear();
+            let requested = remaining.min(CHUNK);
+            let count = read(&mut samples, requested)?;
+            frames += count as u64;
+            peak = samples
+                .iter()
+                .fold(peak, |peak, sample| peak.max(sample.abs()).min(1.0));
+            if count < requested {
+                if remaining != bucket_frames || count > 0 {
+                    peaks.push(peak);
+                }
+                break;
+            }
+            remaining -= count;
+            if remaining > 0 {
+                continue;
+            }
+            peaks.push(peak);
+            // Merge adjacent peaks to bound the cache without cutting off long sources.
+            if peaks.len() == MAX_PEAK_BUCKETS {
+                for index in 0..peaks.len() / 2 {
+                    peaks[index] = peaks[2 * index].max(peaks[2 * index + 1]);
+                }
+                peaks.truncate(peaks.len() / 2);
+                bucket_frames *= 2;
+            }
+            remaining = bucket_frames;
+            peak = 0.0;
+        }
+        Ok(Self {
+            peaks,
+            bucket_frames,
+            frames,
+        })
+    }
+
+    pub(crate) fn peak(&self, start: f64, end: f64, fps: (u32, u32)) -> f32 {
+        let samples_per_frame = f64::from(RATE) * f64::from(fps.1) / f64::from(fps.0);
+        let start = start * samples_per_frame;
+        let end = (end * samples_per_frame).min(self.frames as f64);
+        if start >= end {
+            return 0.0;
+        }
+        let first = (start / self.bucket_frames as f64).floor() as usize;
+        let last = (end / self.bucket_frames as f64).ceil() as usize;
+        self.peaks[first.min(self.peaks.len())..last.min(self.peaks.len())]
+            .iter()
+            .copied()
+            .fold(0.0, f32::max)
+    }
+}
+
+pub(crate) fn waveform(
+    path: &Path,
+    cancelled: Arc<AtomicBool>,
+) -> Result<Option<Waveform>, String> {
+    ffmpeg::init().map_err(|error| error.to_string())?;
+    let Some(mut reader) = AudioReader::open(path, 0, (1, 1), cancelled.clone())? else {
+        return Ok(None);
+    };
+    let waveform = Waveform::collect(|samples, frames| reader.read(samples, frames, &cancelled))?;
+    Ok((waveform.frames > 0 && !cancelled.load(Ordering::Relaxed)).then_some(waveform))
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AudioSource {
@@ -23,6 +107,8 @@ pub struct AudioSource {
     pub source_start: u64,
     pub duration: u64,
     pub volume: f32,
+    pub fade_in_frames: u64,
+    pub fade_out_frames: u64,
 }
 
 #[derive(Debug, PartialEq)]
@@ -58,6 +144,8 @@ impl AudioPlan {
                         source_start: clip.source_start_frame,
                         duration: clip.duration_frames,
                         volume: clip.volume,
+                        fade_in_frames: clip.fade_in_frames,
+                        fade_out_frames: clip.fade_out_frames,
                     })
                 })
             })
@@ -204,6 +292,10 @@ pub fn feed(
         begin: u64,
         end: u64,
         volume: f32,
+        clip_begin: u64,
+        clip_end: u64,
+        fade_in: u64,
+        fade_out: u64,
     }
     let mut slots: Vec<Slot> = plan
         .sources
@@ -218,6 +310,10 @@ pub fn feed(
                 begin: to_samples(from),
                 end: to_samples(until),
                 volume: source.volume,
+                clip_begin: to_samples(source.start),
+                clip_end: to_samples(source.start.saturating_add(source.duration)),
+                fade_in: to_samples(source.fade_in_frames),
+                fade_out: to_samples(source.fade_out_frames),
             })
         })
         .collect();
@@ -258,8 +354,20 @@ pub fn feed(
                 Ok(_) => {
                     for (index, frame) in sound.as_chunks::<CHANNELS>().0.iter().enumerate() {
                         let offset = (from - position) as usize * CHANNELS + index * CHANNELS;
-                        mix[offset] += frame[0] * slot.volume;
-                        mix[offset + 1] += frame[1] * slot.volume;
+                        let sample = from + index as u64;
+                        let fade_in = if slot.fade_in == 0 {
+                            1.0
+                        } else {
+                            ((sample - slot.clip_begin) as f32 / slot.fade_in as f32).min(1.0)
+                        };
+                        let fade_out = if slot.fade_out == 0 {
+                            1.0
+                        } else {
+                            ((slot.clip_end - sample) as f32 / slot.fade_out as f32).min(1.0)
+                        };
+                        let gain = slot.volume * fade_in * fade_out;
+                        mix[offset] += frame[0] * gain;
+                        mix[offset + 1] += frame[1] * gain;
                     }
                 }
                 Err(error) => {
@@ -685,6 +793,8 @@ mod tests {
     fn timeline_audio_plan_preserves_sources_and_clock() {
         let project = mixed_project();
         let source = |path: &str, start, volume| AudioSource {
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             path: path.into(),
             start,
             source_start: 2,
@@ -768,6 +878,8 @@ mod tests {
             let queue = Arc::new(AudioQueue::new());
             let plan = AudioPlan {
                 sources: vec![AudioSource {
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
                     path,
                     start: 0,
                     source_start: 0,
@@ -834,6 +946,50 @@ mod tests {
         fs::write(path, bytes).unwrap();
     }
 
+    #[test]
+    fn waveform_maps_stereo_peaks_and_silence_to_source_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("peaks.wav");
+        let samples = [[0, 0], [8_192, -24_576], [-16_384, 16_384], [4_096, 0]]
+            .into_iter()
+            .zip([1_920, 1_920, 1_920, 240])
+            .flat_map(|(pair, frames)| std::iter::repeat_n(pair, frames).flatten())
+            .collect::<Vec<_>>();
+        write_wav(&path, RATE, CHANNELS as u16, &samples);
+        let peaks = waveform(&path, Arc::new(AtomicBool::new(false)))
+            .unwrap()
+            .unwrap();
+        let fps = (25, 1);
+        assert_eq!(peaks.peak(0.0, 1.0, fps), 0.0);
+        assert_eq!(peaks.peak(1.0, 2.0, fps), 0.75);
+        assert_eq!(peaks.peak(2.25, 2.5, fps), 0.5);
+        assert_eq!(peaks.peak(0.0, 3.0, fps), 0.75);
+        assert_eq!(peaks.peak(3.0, 4.0, fps), 0.125);
+        assert_eq!(peaks.peak(3.125, 4.0, fps), 0.0);
+    }
+
+    #[test]
+    fn waveform_coarsens_without_losing_earlier_peaks_or_truncating_long_sources() {
+        let frames = (MAX_PEAK_BUCKETS + 2) * PEAK_BUCKET_FRAMES;
+        let mut position = 0;
+        let peaks = Waveform::collect(|samples, requested| {
+            let count = requested.min(frames - position);
+            for (index, level) in [(PEAK_BUCKET_FRAMES, 0.75), (frames - 1, 0.5)] {
+                if (position..position + count).contains(&index) {
+                    samples.push(level);
+                }
+            }
+            position += count;
+            Ok(count)
+        })
+        .unwrap();
+        assert!(peaks.peaks.len() <= MAX_PEAK_BUCKETS);
+        let fps = (100, 1);
+        assert_eq!(peaks.peak(0.0, 2.0, fps), 0.75);
+        assert_eq!(peaks.peak(2.0, 3.0, fps), 0.0);
+        assert_eq!(peaks.peak(MAX_PEAK_BUCKETS as f64, frames as f64, fps), 0.5);
+    }
+
     fn drain(queue: &AudioQueue) -> (usize, usize) {
         let mut heard = 0;
         let mut loud = 0;
@@ -867,6 +1023,8 @@ mod tests {
             let plan = Arc::new(AudioPlan {
                 sources: (0..clips)
                     .map(|index| AudioSource {
+                        fade_in_frames: 0,
+                        fade_out_frames: 0,
                         path: path.clone(),
                         start: index * 240,
                         source_start: 0,
@@ -929,6 +1087,8 @@ mod tests {
         let plan = AudioPlan {
             sources: vec![
                 AudioSource {
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
                     path: mono.clone(),
                     start: 0,
                     source_start: 0,
@@ -936,6 +1096,8 @@ mod tests {
                     volume: 1.0,
                 },
                 AudioSource {
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
                     path: stereo.clone(),
                     start: 5,
                     source_start: 6,
@@ -943,6 +1105,8 @@ mod tests {
                     volume: 0.5,
                 },
                 AudioSource {
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
                     path: silent.clone(),
                     start: 0,
                     source_start: 0,
@@ -980,6 +1144,8 @@ mod tests {
         let queue = Arc::new(AudioQueue::new());
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 path: path.clone(),
                 start: 0,
                 source_start: 0,
@@ -1035,6 +1201,8 @@ mod tests {
         let queue = Arc::new(AudioQueue::new());
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 path: path.clone(),
                 start: 0,
                 source_start: 3,
@@ -1102,6 +1270,8 @@ mod tests {
             let queue = Arc::new(AudioQueue::new());
             let plan = AudioPlan {
                 sources: vec![AudioSource {
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
                     path: path.clone(),
                     start: 0,
                     source_start: 0,
@@ -1249,6 +1419,8 @@ mod tests {
             );
             let plan = Arc::new(AudioPlan {
                 sources: vec![AudioSource {
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
                     path,
                     start: 0,
                     source_start: 0,
@@ -1296,6 +1468,8 @@ mod tests {
             .collect();
         write_wav(&stereo, 48_000, 2, &stereo_samples);
         let source = |path: &PathBuf, start, source_start, duration, volume| AudioSource {
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             path: path.clone(),
             start,
             source_start,
@@ -1362,6 +1536,8 @@ mod tests {
         assert!(made.unwrap().success());
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 path: path.clone(),
                 start: 0,
                 source_start: 0,
@@ -1393,6 +1569,8 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(true));
         let plan = AudioPlan {
             sources: vec![AudioSource {
+                fade_in_frames: 0,
+                fade_out_frames: 0,
                 path: PathBuf::from("missing.wav"),
                 start: 0,
                 source_start: 0,
@@ -1412,5 +1590,41 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         assert!(reached.is_err());
+    }
+
+    #[test]
+    fn fades_follow_clip_time_including_seeks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("constant.wav");
+        write_wav(&path, RATE, 2, &vec![16_384; RATE as usize * 4 * CHANNELS]);
+        let plan = Arc::new(AudioPlan {
+            sources: vec![AudioSource {
+                path,
+                start: 30,
+                source_start: 0,
+                duration: 120,
+                volume: 1.0,
+                fade_in_frames: 30,
+                fade_out_frames: 30,
+            }],
+            end: 150,
+            fps: (30, 1),
+        });
+        for start in [0, 30, 45, 60, 135] {
+            let heard = play(&plan, start, None);
+            for frame in [30, 45, 60, 90, 120, 135, 149] {
+                if frame < start {
+                    continue;
+                }
+                let index = (frame - start) as usize * RATE as usize / 30 * CHANNELS;
+                let gain =
+                    ((frame - 30) as f32 / 30.0).min(1.0) * ((150 - frame) as f32 / 30.0).min(1.0);
+                assert!(
+                    (heard[index] - 0.5 * gain).abs() < 0.002,
+                    "start {start}, frame {frame}: {}",
+                    heard[index]
+                );
+            }
+        }
     }
 }

@@ -53,6 +53,8 @@ pub(super) fn accent_text() -> Color {
     colors().selection_text
 }
 pub(super) const PLAYHEAD: Color = Color::rgb(255, 94, 94);
+pub(super) const MARKER: Color = Color::rgb(242, 190, 70);
+pub(super) const MARKER_LINE: Color = Color::rgba(242, 190, 70, 110);
 pub(super) const VIDEO: Color = Color::rgb(84, 146, 232);
 pub(super) const AUDIO: Color = Color::rgb(70, 194, 132);
 pub(super) const TITLE: Color = Color::rgb(172, 130, 242);
@@ -136,6 +138,7 @@ pub(crate) enum Glyph {
     Trash,
     Ripple,
     Title,
+    Marker,
     Undo,
     Redo,
     Plus,
@@ -351,6 +354,16 @@ pub(super) fn draw_glyph(painter: &mut dyn Painter, glyph: Glyph, rect: Rect, co
             pen.line(&[(5.0, 8.0), (5.0, 5.0), (19.0, 5.0), (19.0, 8.0)]);
             pen.line(&[(12.0, 5.0), (12.0, 19.5)]);
             pen.line(&[(9.0, 19.5), (15.0, 19.5)]);
+        }
+        Glyph::Marker => {
+            pen.line(&[
+                (7.0, 4.5),
+                (17.0, 4.5),
+                (17.0, 19.0),
+                (12.0, 14.5),
+                (7.0, 19.0),
+                (7.0, 4.5),
+            ]);
         }
         Glyph::Undo | Glyph::Redo => {
             let flip = |(x, y): (f32, f32)| {

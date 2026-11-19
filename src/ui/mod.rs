@@ -5,6 +5,7 @@ mod state;
 mod timeline_view;
 pub(crate) mod title_fonts;
 pub(crate) mod title_markup;
+mod waveform;
 mod window;
 
 pub(crate) use state::{MediaFilter, Sidebar, UiState};

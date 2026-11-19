@@ -27,7 +27,11 @@ pub fn directory() -> Option<PathBuf> {
 }
 
 pub fn read(dir: &Path) -> Option<Snapshot> {
-    let result = (|| -> Option<Snapshot> {
+    read_with_repairs(dir).map(|(snapshot, _)| snapshot)
+}
+
+pub fn read_with_repairs(dir: &Path) -> Option<(Snapshot, usize)> {
+    let result = (|| -> Option<(Snapshot, usize)> {
         let mut bytes = Vec::new();
         fs::File::open(dir.join(FILE))
             .ok()?
@@ -41,10 +45,15 @@ pub fn read(dir: &Path) -> Option<Snapshot> {
         if document.version != 1 {
             return None;
         }
-        Some(Snapshot {
-            original_path: document.original_path,
-            project: format::from_json(&document.project).ok()?,
-        })
+        let (mut project, mut repaired) = format::from_json_with_repairs(&document.project).ok()?;
+        repaired += store::migrate_media(&mut project, document.original_path.as_deref()).ok()?;
+        Some((
+            Snapshot {
+                original_path: document.original_path,
+                project,
+            },
+            repaired,
+        ))
     })();
     if result.is_none() {
         let _ = clear(dir);
@@ -139,6 +148,40 @@ mod tests {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    #[test]
+    fn recovery_repairs_stale_sound_and_resolves_paths_beside_original_project() {
+        let dir = test_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let mut document: serde_json::Value =
+            serde_json::from_str(&format::to_json(&Project::new("Recovered")).unwrap()).unwrap();
+        document["media"] = serde_json::json!([{
+            "id": 4, "path": "missing.mp4", "kind": "video"
+        }]);
+        document["tracks"][0]["clips"] = serde_json::json!([{
+            "id": 1, "start_frame": 0, "source_start_frame": 0,
+            "duration_frames": 30, "content": {"media": {"media_id": 4}},
+            "volume": 1.0, "muted": false, "linked_audio": true
+        }]);
+        fs::write(
+            dir.join(FILE),
+            serde_json::json!({
+                "version": 1, "original_path": dir.join("projects/film.ocus"),
+                "project": document.to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (snapshot, repaired) = read_with_repairs(&dir).unwrap();
+        assert_eq!(repaired, 1);
+        assert_eq!(
+            snapshot.project.media()[0].path,
+            dir.join("projects/missing.mp4")
+        );
+        assert!(!snapshot.project.tracks()[0].clips[0].linked_audio);
+        assert!(super::super::Editor::recovered(snapshot.project).is_dirty());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -1130,6 +1130,9 @@ mod tests {
         layered.push(Track {
             id: 4,
             kind: TrackKind::Video,
+            name: String::new(),
+            locked: false,
+            hidden: false,
             clips: vec![Clip {
                 id: 6,
                 start_frame: 0,

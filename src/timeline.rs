@@ -4,7 +4,27 @@ use serde::{Deserialize, Serialize};
 pub struct Track {
     pub id: u64,
     pub kind: TrackKind,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
     pub clips: Vec<Clip>,
+}
+
+impl Track {
+    pub fn valid_name(name: &str) -> bool {
+        name == name.trim() && name.chars().count() <= 32 && !name.chars().any(char::is_control)
+    }
+
+    pub fn display_name(&self, positional: &str) -> String {
+        if self.name.is_empty() {
+            positional.to_owned()
+        } else {
+            self.name.clone()
+        }
+    }
 }
 
 /// A point in the sequence the editor can jump and snap to.

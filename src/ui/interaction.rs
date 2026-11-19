@@ -1714,6 +1714,7 @@ mod tests {
     use super::*;
     use crate::media::Media;
     use crate::timeline::Clip;
+    use crate::timeline::Transform;
     use creamui::core::Rect;
     use std::collections::HashSet;
 
@@ -1903,6 +1904,7 @@ mod tests {
                     muted: false,
                     noise_reduction: false,
                     linked_audio: false,
+                    transform: Transform::default(),
                 },
             }));
         }
@@ -1960,6 +1962,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: true,
+                transform: Transform::default(),
             },
         }));
 
@@ -2111,6 +2114,7 @@ mod tests {
                     fade_out_frames: 0,
                     noise_reduction: false,
                     linked_audio: false,
+                    transform: Transform::default(),
                 },
             }));
         }
@@ -2173,6 +2177,7 @@ mod tests {
             fade_out_frames: 0,
             noise_reduction: false,
             linked_audio: false,
+            transform: Transform::default(),
         };
         assert!(state.edit(Command::InsertClip {
             track_id: 3,
@@ -2446,6 +2451,7 @@ mod tests {
                     fade_out_frames: 0,
                     noise_reduction: false,
                     linked_audio: false,
+                    transform: Transform::default(),
                 },
             }));
         }

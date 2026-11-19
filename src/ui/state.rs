@@ -17,7 +17,7 @@ use crate::project::export_settings::{
 };
 use crate::project::{Command, Editor, Project, recovery, store};
 use crate::settings::{self, Settings, ThemeMode};
-use crate::timeline::{ClipContent, Title, TrackKind};
+use crate::timeline::{ClipContent, Title, TrackKind, Transform};
 use creamui::core::{Modifiers, Point, Rect, RgbaImage};
 use creamui::widgets::{
     ColorPickerController, ScrollController, TextController, TooltipController,
@@ -1499,6 +1499,7 @@ impl UiState {
                         start: clip.start_frame,
                         source_start: clip.source_start_frame,
                         duration: clip.duration_frames,
+                        transform: Transform::default(),
                     });
                 }
             }
@@ -1560,6 +1561,7 @@ impl UiState {
                     start: 0,
                     source_start: range.source_start,
                     duration: range.duration,
+                    transform: Transform::default(),
                 })
                 .collect(),
             fps,
@@ -3677,6 +3679,7 @@ mod tests {
         state.finish_storyboard(
             key.clone(),
             Ok(vec![FrameImage {
+                picture: (0, 0, 1, 1),
                 width: 1,
                 height: 1,
                 pixels: vec![255; 4],
@@ -4290,6 +4293,7 @@ mod tests {
                     fade_out_frames: 0,
                     noise_reduction: false,
                     linked_audio: false,
+                    transform: Transform::default(),
                 }
             }));
         }
@@ -5144,6 +5148,7 @@ mod tests {
                 fade_out_frames: 0,
                 noise_reduction: false,
                 linked_audio: false,
+                transform: Transform::default(),
             }
         }));
         state.play();

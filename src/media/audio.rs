@@ -1062,6 +1062,7 @@ fn stereo_samples(frame: &ffmpeg::frame::Audio, channels: u16) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::timeline::Transform;
     use std::fs;
 
     #[test]
@@ -2008,6 +2009,7 @@ mod tests {
                 track_id: 2,
                 clip: Clip {
                     speed,
+                    transform: Transform::default(),
                     id: 1,
                     start_frame: 3,
                     source_start_frame: 2,

@@ -90,10 +90,37 @@ pub fn render_with_settings(
         }
         return Err("Export destination already exists. Choose a different filename.".into());
     }
+    let sidecar = (!settings.burn_subtitles
+        && settings.container.uses_video_codec()
+        && project.tracks().iter().any(|track| track.subtitles))
+    .then(|| path.with_extension("srt"));
+    if sidecar.as_ref().is_some_and(|path| path.exists()) {
+        return Err("Subtitle sidecar already exists. Choose a different filename.".into());
+    }
+    let subtitles = sidecar
+        .as_ref()
+        .map(|_| crate::subtitles::write(project))
+        .transpose()?;
     write_export(path, settings.container.extension(), |temporary| {
         render_to(project, temporary, settings, control.clone())?;
         control.check()
-    })
+    })?;
+    if let Some((sidecar, subtitles)) = sidecar.zip(subtitles) {
+        let result = write_export(&sidecar, "srt", |temporary| {
+            control.check()?;
+            fs::write(temporary, subtitles).map_err(|error| error.to_string())?;
+            fs::File::open(temporary)
+                .and_then(|file| file.sync_all())
+                .map_err(|error| error.to_string())
+        });
+        if let Err(error) = result {
+            fs::remove_file(path).map_err(|cleanup| {
+                format!("{error}; could not remove exported video: {cleanup}")
+            })?;
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 fn write_export(
@@ -244,7 +271,7 @@ fn render_video(
         settings.height,
     );
     let mut compositor = Compositor::new(
-        VisualPlan::from_project(project),
+        VisualPlan::for_export(project, settings.burn_subtitles || gif),
         picture_width,
         picture_height,
         fps_pair,
@@ -868,6 +895,110 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn burn_off_excludes_subtitle_pixels_and_writes_an_atomic_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut document = serde_json::to_value(Project::new("Subtitles")).unwrap();
+        document["version"] = 1.into();
+        document["settings"]["width"] = 160.into();
+        document["settings"]["height"] = 90.into();
+        let project = format::from_json(&document.to_string()).unwrap();
+        let mut track = crate::subtitles::track(
+            &project,
+            &crate::subtitles::parse("1\n00:00:00,000 --> 00:00:00,100\nVisible subtitles")
+                .unwrap(),
+        )
+        .unwrap();
+        let ClipContent::Title(title) = &mut track.clips[0].content else {
+            unreachable!()
+        };
+        title.background = Some([255, 0, 0, 255]);
+        title.font_size = 20.0;
+        title.y = 0.5;
+        let mut tracks = project.tracks().to_vec();
+        tracks.push(track);
+        let mut editor = Editor::new(project);
+        assert!(editor.apply(Command::ReplaceTracks(tracks)));
+        let mut settings = crate::project::export_settings::ExportSettings::for_project(
+            160,
+            90,
+            editor.project().settings().frame_rate.clone(),
+        );
+        for burn in [true, false] {
+            settings.burn_subtitles = burn;
+            let path = dir.path().join(if burn { "on.mp4" } else { "off.mp4" });
+            render_with_settings(
+                editor.project(),
+                &path,
+                &settings,
+                Arc::new(ExportControl::default()),
+            )
+            .unwrap();
+            let image = crate::media::thumbnail(&path).unwrap();
+            let bright = image
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|pixel| pixel[0] > 100)
+                .count();
+            assert_eq!(bright > 0, burn);
+            assert_eq!(path.with_extension("srt").exists(), !burn);
+        }
+        let cues =
+            crate::subtitles::parse(&fs::read_to_string(dir.path().join("off.srt")).unwrap())
+                .unwrap();
+        assert_eq!(cues[0].text, "Visible subtitles");
+        assert_eq!(cues[0].end_us, 100_000);
+        fs::write(dir.path().join("collision.srt"), "keep").unwrap();
+        assert!(
+            render_with_settings(
+                editor.project(),
+                &dir.path().join("collision.mp4"),
+                &settings,
+                Arc::new(ExportControl::default())
+            )
+            .unwrap_err()
+            .contains("sidecar already exists")
+        );
+        assert!(!dir.path().join("collision.mp4").exists());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("collision.srt")).unwrap(),
+            "keep"
+        );
+        settings.container = crate::project::export_settings::Container::Gif;
+        let gif = dir.path().join("always-burns.gif");
+        render_with_settings(
+            editor.project(),
+            &gif,
+            &settings,
+            Arc::new(ExportControl::default()),
+        )
+        .unwrap();
+        assert!(
+            crate::media::thumbnail(&gif)
+                .unwrap()
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[0] > 100)
+        );
+        assert!(!gif.with_extension("srt").exists());
+        assert_eq!(
+            fs::read_dir(dir.path())
+                .unwrap()
+                .filter(|entry| entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".ocus-export-"))
+                .count(),
+            0
+        );
+    }
 
     fn export_test_base() -> PathBuf {
         std::env::var_os("OCUS_TEST_EXPORT_DIR").map_or_else(std::env::temp_dir, PathBuf::from)
@@ -1506,6 +1637,7 @@ mod tests {
         layered.push(Track {
             id: 4,
             kind: TrackKind::Video,
+            subtitles: false,
             name: String::new(),
             locked: false,
             hidden: false,

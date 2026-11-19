@@ -283,6 +283,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
                 transform: Transform::default(),
             },

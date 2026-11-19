@@ -22,7 +22,9 @@ use crate::media::{Media, MediaKind};
 use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, VideoCodec};
 use crate::project::{Command, Project};
 use crate::settings::ThemeMode;
-use crate::timeline::{Clip, ClipContent, Title, Track, TrackKind, Transition, TransitionKind};
+use crate::timeline::{
+    Clip, ClipContent, ColorAdjust, Title, Track, TrackKind, Transition, TransitionKind,
+};
 use creamui::core::layout::{Dimension, Style};
 use creamui::core::{Painter, Point, Rect, TextAlign, Widget};
 use creamui::fonts::{FontWeight, HorizontalAlign, LayoutSettings, cached_layout, resolve};
@@ -463,6 +465,140 @@ fn set_clip_audio(state: &UiState, change: impl FnOnce(&Clip) -> (f32, bool)) {
             muted,
         });
     }
+}
+
+fn set_clip_color(state: &UiState, change: impl FnOnce(&mut ColorAdjust)) {
+    if let Some((track_id, clip)) = selected_clip(state) {
+        let mut color = clip.color;
+        change(&mut color);
+        state.edit(Command::SetClipColor {
+            track_id,
+            clip_id: clip.id,
+            color,
+        });
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ColorProperty {
+    Brightness,
+    Contrast,
+    Saturation,
+}
+
+impl ColorProperty {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Brightness => "Brightness",
+            Self::Contrast => "Contrast",
+            Self::Saturation => "Saturation",
+        }
+    }
+
+    fn range(self) -> (f32, f32) {
+        match self {
+            Self::Brightness => (-1.0, 1.0),
+            Self::Contrast | Self::Saturation => (0.0, 2.0),
+        }
+    }
+
+    fn steps_per_unit(self) -> f32 {
+        match self {
+            Self::Brightness => 20.0,
+            Self::Contrast | Self::Saturation => 10.0,
+        }
+    }
+
+    fn get(self, color: ColorAdjust) -> f32 {
+        match self {
+            Self::Brightness => color.brightness,
+            Self::Contrast => color.contrast,
+            Self::Saturation => color.saturation,
+        }
+    }
+
+    fn set(self, color: &mut ColorAdjust, value: f32) {
+        match self {
+            Self::Brightness => color.brightness = value,
+            Self::Contrast => color.contrast = value,
+            Self::Saturation => color.saturation = value,
+        }
+    }
+
+    fn format(self, value: f32) -> String {
+        match self {
+            Self::Brightness => format!("{:+.0}", value * 100.0),
+            Self::Contrast | Self::Saturation => format!("{:.0}%", value * 100.0),
+        }
+    }
+
+    fn help(self, increase: bool) -> &'static str {
+        match (self, increase) {
+            (Self::Brightness, false) => "Decrease brightness",
+            (Self::Brightness, true) => "Increase brightness",
+            (Self::Contrast, false) => "Decrease contrast",
+            (Self::Contrast, true) => "Increase contrast",
+            (Self::Saturation, false) => "Decrease saturation",
+            (Self::Saturation, true) => "Increase saturation",
+        }
+    }
+
+    fn step(self, color: &mut ColorAdjust, increase: bool) {
+        let scale = self.steps_per_unit();
+        let (min, max) = self.range();
+        let ticks = (self.get(*color) * scale).round() + if increase { 1.0 } else { -1.0 };
+        self.set(color, (ticks / scale).clamp(min, max));
+    }
+}
+
+fn color_control(
+    state: &UiState,
+    inner: f32,
+    property: ColorProperty,
+    color: ColorAdjust,
+) -> BoxedWidget {
+    let value = property.get(color);
+    let (min, max) = property.range();
+    let mut row = Flex::row()
+        .gap(6.0)
+        .align(Align::Center)
+        .child(Box::new(Flex::row().width(68.0).child(text(
+            property.label(),
+            muted(),
+            11.0,
+        ))))
+        .child(Box::new(
+            Flex::row()
+                .width((inner - 184.0).max(8.0))
+                .height(6.0)
+                .background(surface())
+                .corner_radius(3.0)
+                .child(Box::new(
+                    Flex::row()
+                        .width(((inner - 184.0).max(8.0) * (value - min) / (max - min)).max(0.0))
+                        .height(6.0)
+                        .background(accent())
+                        .corner_radius(3.0),
+                )),
+        ))
+        .child(Box::new(Flex::row().width(38.0).child(text(
+            property.format(value),
+            text_color(),
+            11.0,
+        ))))
+        .child(spacer());
+    for increase in [false, true] {
+        row = row.child(sized_icon_button(
+            if increase { Glyph::Plus } else { Glyph::Minus },
+            Help::new(property.help(increase)),
+            24.0,
+            if increase { value < max } else { value > min },
+            false,
+            state,
+            move |s| set_clip_color(s, |color| property.step(color, increase)),
+        ));
+    }
+    Box::new(row)
 }
 
 fn change_clip_fade(state: &UiState, incoming: bool, increase: bool) {
@@ -2054,6 +2190,26 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     title_toggle(state, "Parse Markdown", title.parse_markdown, |title| {
                         title.parse_markdown = !title.parse_markdown
                     }),
+                ],
+            ));
+        }
+        if track_kind == TrackKind::Video
+            && media.is_some_and(|media| media.kind != MediaKind::Audio)
+        {
+            rows.push(section(
+                "Color",
+                vec![
+                    color_control(state, inner, ColorProperty::Brightness, clip.color),
+                    color_control(state, inner, ColorProperty::Contrast, clip.color),
+                    color_control(state, inner, ColorProperty::Saturation, clip.color),
+                    inline(secondary_button(
+                        None,
+                        "Reset color",
+                        !clip.color.neutral(),
+                        state,
+                        |s| set_clip_color(s, |color| *color = Default::default()),
+                    )),
+                    text("Color affects playback and export.", faint(), 10.0),
                 ],
             ));
         }
@@ -4443,6 +4599,7 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 1.0,
             muted: false,
+            color: Default::default(),
             transition: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
@@ -4554,6 +4711,103 @@ mod tests {
             Renderer::new().render(build(state, viewport), viewport, &mut painter);
         });
         painter
+    }
+
+    #[test]
+    fn inspector_color_controls_for_video_media_only() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/color.png".into(),
+            kind: MediaKind::Image,
+            duration_us: None,
+            has_audio: false
+        })));
+        let mut clip = destination_clip(0, 30);
+        clip.content = ClipContent::Media { media_id: 1 };
+        let id = clip.id;
+        assert!(state.edit(Command::InsertClip { track_id: 0, clip }));
+        state.select_clip(Some((0, id)));
+        let painter = render(&state, 1280.0, 1600.0);
+        for label in [
+            "COLOR",
+            "Brightness",
+            "Contrast",
+            "Saturation",
+            "Reset color",
+            "Color affects playback and export.",
+        ] {
+            assert!(painter.labels.iter().any(|text| text == label), "{label}");
+        }
+        set_clip_color(&state, |color| {
+            color.brightness = 0.2;
+            color.contrast = 1.3;
+            color.saturation = 0.0;
+        });
+        let painter = render(&state, 1280.0, 1600.0);
+        for label in ["+20", "130%", "0%"] {
+            assert!(painter.labels.iter().any(|text| text == label), "{label}");
+        }
+        state.select_clip(None);
+        assert!(
+            !render(&state, 1280.0, 900.0)
+                .labels
+                .iter()
+                .any(|text| text == "Reset color")
+        );
+        assert!(state.add_title());
+        assert!(
+            !render(&state, 1280.0, 900.0)
+                .labels
+                .iter()
+                .any(|text| text == "Reset color")
+        );
+    }
+
+    #[test]
+    fn color_property_steps_snap_to_grid_and_reach_limits() {
+        for property in [
+            ColorProperty::Brightness,
+            ColorProperty::Contrast,
+            ColorProperty::Saturation,
+        ] {
+            let mut color = ColorAdjust::default();
+            let (min, max) = property.range();
+            let scale = property.steps_per_unit();
+            property.set(&mut color, min);
+            for tick in 1..=((max - min) * scale) as u32 {
+                property.step(&mut color, true);
+                assert_eq!(property.get(color), (min * scale + tick as f32) / scale);
+            }
+            property.step(&mut color, true);
+            assert_eq!(property.get(color), max);
+            for tick in 1..=((max - min) * scale) as u32 {
+                property.step(&mut color, false);
+                assert_eq!(property.get(color), (max * scale - tick as f32) / scale);
+            }
+            property.step(&mut color, false);
+            assert_eq!(property.get(color), min);
+            property.set(&mut color, 0.123);
+            property.step(&mut color, true);
+            assert_eq!(
+                property.get(color),
+                if matches!(property, ColorProperty::Brightness) {
+                    0.15
+                } else {
+                    0.2
+                }
+            );
+            property.set(&mut color, 0.123);
+            property.step(&mut color, false);
+            assert_eq!(
+                property.get(color),
+                if matches!(property, ColorProperty::Brightness) {
+                    0.05
+                } else {
+                    0.0
+                }
+            );
+        }
     }
 
     #[test]
@@ -6065,6 +6319,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                color: Default::default(),
                 transition: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,

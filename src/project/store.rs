@@ -307,6 +307,7 @@ mod tests {
                 }),
                 volume: 1.0,
                 muted: false,
+                color: Default::default(),
                 transition: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,

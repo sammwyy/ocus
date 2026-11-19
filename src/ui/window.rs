@@ -1018,13 +1018,17 @@ fn transform_rows(state: &UiState, transform: Transform, inner: f32) -> Vec<Boxe
             muted(),
             11.0,
         ));
-        for pair in choices.chunks(3) {
+        for pair in choices.chunks(2) {
             let mut row = Flex::row().gap(4.0);
             for &(label, easing) in pair {
                 row = row.child(with_help(
-                    export_choice(label, current == easing, 86.0, state, move |state| {
-                        set_keyframe_easing(state, easing)
-                    }),
+                    export_choice(
+                        label,
+                        current == easing,
+                        (inner - 4.0) / 2.0,
+                        state,
+                        move |state| set_keyframe_easing(state, easing),
+                    ),
                     Help::new(match easing {
                         Easing::Linear => "Move at a steady speed to the next keyframe.",
                         Easing::Hold => "Keep this value until the next keyframe.",

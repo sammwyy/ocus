@@ -9,6 +9,21 @@ pub mod audio;
 pub mod composite;
 pub mod preview;
 
+fn seek_timestamp(input: &ffmpeg::format::context::Input, micros: u128) -> Option<i64> {
+    // A seek without a stream index uses AV_TIME_BASE and the format origin.
+    let start = unsafe { (*input.as_ptr()).start_time };
+    timestamp_from_start(micros, start)
+}
+
+fn timestamp_from_start(micros: u128, start: i64) -> Option<i64> {
+    let start = if start == ffmpeg::ffi::AV_NOPTS_VALUE {
+        0
+    } else {
+        start
+    };
+    i64::try_from(micros).ok()?.checked_add(start)
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct Rotation(u32);
 
@@ -320,6 +335,26 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn seek_timestamps_include_the_format_origin() {
+        assert_eq!(
+            timestamp_from_start(50_000_000, 30_000_000),
+            Some(80_000_000)
+        );
+        assert_eq!(timestamp_from_start(50_000_000, 0), Some(50_000_000));
+        assert_eq!(
+            timestamp_from_start(0, ffmpeg::ffi::AV_NOPTS_VALUE),
+            Some(0)
+        );
+        assert_eq!(
+            timestamp_from_start(50_000_000, ffmpeg::ffi::AV_NOPTS_VALUE),
+            Some(50_000_000)
+        );
+        assert_eq!(timestamp_from_start(0, -1_000_000), Some(-1_000_000));
+        assert_eq!(timestamp_from_start(i64::MAX as u128, 1), None);
+        assert_eq!(timestamp_from_start(u128::MAX, 0), None);
+    }
 
     #[test]
     fn probe_uses_playable_stream_durations() {

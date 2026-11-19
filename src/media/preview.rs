@@ -42,6 +42,7 @@ pub struct StoryboardKey {
 pub fn storyboard(
     key: &StoryboardKey,
     cancelled: Arc<AtomicBool>,
+    use_proxies: bool,
 ) -> Result<Vec<FrameImage>, String> {
     ffmpeg::init().map_err(|error| error.to_string())?;
     if key.duration == 0 || key.fps.0 == 0 || key.fps.1 == 0 || key.kind == MediaKind::Audio {
@@ -72,7 +73,14 @@ pub fn storyboard(
             .source_start
             .checked_add(offset)
             .ok_or("Storyboard frame range overflows")?;
-        let mut reader = FrameReader::open(&source, target, key.fps, (160, 90), cancelled.clone())?;
+        let mut reader = FrameReader::open_selected(
+            &source,
+            target,
+            key.fps,
+            (160, 90),
+            cancelled.clone(),
+            use_proxies,
+        )?;
         let mut image = Arc::unwrap_or_clone(reader.frame_at(target, &cancelled)?);
         for pixel in image.pixels.as_chunks_mut::<4>().0 {
             for channel in 0..3 {
@@ -86,6 +94,7 @@ pub fn storyboard(
 }
 
 pub struct PreviewPlan {
+    pub use_proxies: bool,
     pub sources: Vec<FrameSource>,
     pub visual: Option<VisualPlan>,
     pub end: u64,
@@ -94,6 +103,7 @@ pub struct PreviewPlan {
 }
 
 pub(crate) struct VideoLayers {
+    pub(crate) use_proxies: bool,
     fps: (u32, u32),
     output: (u32, u32),
     readers: HashMap<u64, FrameReader>,
@@ -102,6 +112,7 @@ pub(crate) struct VideoLayers {
 impl VideoLayers {
     pub(crate) fn new(fps: (u32, u32), output: (u32, u32)) -> Self {
         Self {
+            use_proxies: false,
             fps,
             output,
             readers: HashMap::new(),
@@ -153,7 +164,14 @@ impl VideoLayers {
         if !self.readers.contains_key(&source.clip_id) {
             self.readers.insert(
                 source.clip_id,
-                FrameReader::open(source, target, self.fps, self.output, cancelled.clone())?,
+                FrameReader::open_selected(
+                    source,
+                    target,
+                    self.fps,
+                    self.output,
+                    cancelled.clone(),
+                    self.use_proxies,
+                )?,
             );
         }
         self.readers
@@ -195,6 +213,7 @@ pub fn decode_sequence(
 ) -> Result<(), String> {
     ffmpeg::init().map_err(|error| error.to_string())?;
     let PreviewPlan {
+        use_proxies,
         sources,
         visual,
         end,
@@ -215,9 +234,13 @@ pub fn decode_sequence(
     );
     let started = Instant::now();
     let mut layers = VideoLayers::new(fps, output);
+    layers.use_proxies = *use_proxies;
     let mut compositor = visual
         .clone()
         .map(|plan| Compositor::new(plan, output.0, output.1, fps));
+    if let Some(compositor) = &mut compositor {
+        compositor.use_proxies(*use_proxies);
+    }
     let mut position = start;
     let elapsed = || {
         let wall = started.elapsed();
@@ -288,12 +311,49 @@ struct FrameReader {
 }
 
 impl FrameReader {
+    #[cfg(test)]
     fn open(
         source: &FrameSource,
         target: u64,
         fps: (u32, u32),
         output: (u32, u32),
         cancelled: Arc<AtomicBool>,
+    ) -> Result<Self, String> {
+        Self::open_selected(source, target, fps, output, cancelled, false)
+    }
+
+    fn open_selected(
+        source: &FrameSource,
+        target: u64,
+        fps: (u32, u32),
+        output: (u32, u32),
+        cancelled: Arc<AtomicBool>,
+        use_proxies: bool,
+    ) -> Result<Self, String> {
+        let proxy = (use_proxies && source.kind == MediaKind::Video)
+            .then(|| super::proxy::ready(&source.path))
+            .flatten();
+        if let Some(path) = proxy {
+            let mut selected = source.clone();
+            selected.path = path.clone();
+            match Self::open_path(&selected, target, fps, output, cancelled.clone(), true) {
+                Ok(reader) => return Ok(reader),
+                Err(_) if !cancelled.load(Ordering::Relaxed) => {
+                    let _ = std::fs::remove_file(path);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Self::open_path(source, target, fps, output, cancelled, false)
+    }
+
+    fn open_path(
+        source: &FrameSource,
+        target: u64,
+        fps: (u32, u32),
+        output: (u32, u32),
+        cancelled: Arc<AtomicBool>,
+        proxy: bool,
     ) -> Result<Self, String> {
         let interrupted = cancelled.clone();
         let mut input = ffmpeg::format::input_with_interrupt(&source.path, move || {
@@ -311,7 +371,11 @@ impl FrameReader {
             .ok_or("Preview source has no video")?;
         let stream_index = stream.index();
         let time_base = stream.time_base();
-        let origin_pts = super::format_origin(&input, time_base);
+        let origin_pts = if proxy {
+            0
+        } else {
+            super::format_origin(&input, time_base)
+        };
         let rotation = super::Rotation::from_stream(&stream);
         let mut decoder = super::hardware::video_decoder(stream.parameters())?;
         if decoder.format() == ffmpeg::format::Pixel::None || decoder.width() == 0 {
@@ -324,7 +388,12 @@ impl FrameReader {
         let scaler = super::rgba_scaler(&decoder, decoder.format(), coded.0, coded.1)?;
         if source.kind == MediaKind::Video && target > 0 {
             let micros = u128::from(target) * u128::from(fps.1) * 1_000_000 / u128::from(fps.0);
-            if let Some(timestamp) = super::seek_timestamp(&input, micros)
+            let timestamp = if proxy {
+                i64::try_from(micros).ok()
+            } else {
+                super::seek_timestamp(&input, micros)
+            };
+            if let Some(timestamp) = timestamp
                 && input.seek(timestamp, ..timestamp).is_ok()
             {
                 decoder.flush();
@@ -466,6 +535,238 @@ mod tests {
     use super::*;
     use std::fs;
     use std::process::Command;
+
+    fn proxy_source(path: PathBuf, duration: u64) -> FrameSource {
+        FrameSource {
+            lut: None,
+            color: ColorAdjust::default(),
+            clip_id: 1,
+            path,
+            kind: MediaKind::Video,
+            start: 0,
+            source_start: 0,
+            duration,
+            transform: Transform::default(),
+        }
+    }
+
+    #[test]
+    fn proxy_frames_align_with_original_and_setting_selects_original() {
+        let directory = tempfile::tempdir().unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        for late in [false, true] {
+            let path = directory.path().join(format!("numbered-{late}.mp4"));
+            let mut command = Command::new("ffmpeg");
+            command.args(["-v", "error", "-y"]);
+            if late {
+                command.args(["-itsoffset", "0.5"]);
+            }
+            command.args([
+                "-f",
+                "lavfi",
+                "-i",
+                "nullsrc=s=2048x1152:r=30:d=1,geq=lum='32+N*6':cb=128:cr=128",
+            ]);
+            if late {
+                command.args([
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "anullsrc=r=48000:cl=stereo",
+                    "-t",
+                    "1.5",
+                    "-c:a",
+                    "aac",
+                    "-output_ts_offset",
+                    "30",
+                ]);
+            }
+            assert!(
+                command
+                    .args(["-c:v", "mpeg4", "-threads", "2", "-vsync", "0"])
+                    .arg(&path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            assert!(super::super::proxy::generate(&path, &cancelled).unwrap());
+            let proxy = super::super::proxy::ready(&path).unwrap();
+            let source = proxy_source(path, if late { 45 } else { 30 });
+            let mut sequential_original = FrameReader::open_selected(
+                &source,
+                0,
+                (30, 1),
+                (160, 90),
+                cancelled.clone(),
+                false,
+            )
+            .unwrap();
+            let mut sequential_proxy =
+                FrameReader::open_selected(&source, 0, (30, 1), (160, 90), cancelled.clone(), true)
+                    .unwrap();
+            for target in 0..source.duration {
+                let original = FrameReader::open_selected(
+                    &source,
+                    target,
+                    (30, 1),
+                    (160, 90),
+                    cancelled.clone(),
+                    false,
+                )
+                .unwrap()
+                .frame_at(target, &cancelled)
+                .unwrap();
+                let preview = FrameReader::open_selected(
+                    &source,
+                    target,
+                    (30, 1),
+                    (160, 90),
+                    cancelled.clone(),
+                    true,
+                )
+                .unwrap()
+                .frame_at(target, &cancelled)
+                .unwrap();
+                assert!(
+                    original.pixels[0].abs_diff(preview.pixels[0]) <= 3,
+                    "late={late}, frame={target}: original={} proxy={}",
+                    original.pixels[0],
+                    preview.pixels[0]
+                );
+                assert_eq!(
+                    original.pixels[0],
+                    sequential_original
+                        .frame_at(target, &cancelled)
+                        .unwrap()
+                        .pixels[0]
+                );
+                assert_eq!(
+                    preview.pixels[0],
+                    sequential_proxy
+                        .frame_at(target, &cancelled)
+                        .unwrap()
+                        .pixels[0]
+                );
+            }
+            // A deliberately different cache entry makes source selection observable.
+            assert!(
+                Command::new("ffmpeg")
+                    .args([
+                        "-v",
+                        "error",
+                        "-y",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "color=white:s=1280x720:r=30:d=2",
+                        "-an",
+                        "-c:v",
+                        "mjpeg",
+                        "-threads",
+                        "2",
+                        "-f",
+                        "nut"
+                    ])
+                    .arg(&proxy)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            for (enabled, white) in [(false, false), (true, true)] {
+                let image = FrameReader::open_selected(
+                    &source,
+                    0,
+                    (30, 1),
+                    (160, 90),
+                    cancelled.clone(),
+                    enabled,
+                )
+                .unwrap()
+                .frame_at(0, &cancelled)
+                .unwrap();
+                assert_eq!(image.pixels[0] > 240, white);
+            }
+            fs::write(&proxy, b"corrupt").unwrap();
+            let image =
+                FrameReader::open_selected(&source, 0, (30, 1), (160, 90), cancelled.clone(), true)
+                    .unwrap()
+                    .frame_at(0, &cancelled)
+                    .unwrap();
+            assert!(image.pixels[0] < 100);
+            assert!(!proxy.exists());
+        }
+    }
+
+    #[test]
+    #[ignore = "release preview throughput benchmark; set OCUS_PROXY_BENCH_DIR"]
+    fn proxy_decode_benchmark() {
+        let directory = PathBuf::from(std::env::var("OCUS_PROXY_BENCH_DIR").unwrap());
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("4k-h264.mp4");
+        if !path.exists() {
+            assert!(
+                Command::new("ffmpeg")
+                    .args([
+                        "-v",
+                        "error",
+                        "-y",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "testsrc2=s=3840x2160:r=30:d=10",
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "fast",
+                        "-crf",
+                        "20",
+                        "-threads",
+                        "2",
+                        "-pix_fmt",
+                        "yuv420p"
+                    ])
+                    .arg(&path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        if let Some(proxy) = super::super::proxy::ready(&path) {
+            fs::remove_file(proxy).unwrap();
+        }
+        let started = Instant::now();
+        assert!(super::super::proxy::generate(&path, &cancelled).unwrap());
+        println!("Proxy generation: {:.3} s", started.elapsed().as_secs_f64());
+        let source = proxy_source(path, 300);
+        for enabled in [false, true] {
+            let mut runs = Vec::new();
+            for _ in 0..5 {
+                let started = Instant::now();
+                let mut reader = FrameReader::open_selected(
+                    &source,
+                    0,
+                    (30, 1),
+                    (960, 540),
+                    cancelled.clone(),
+                    enabled,
+                )
+                .unwrap();
+                for target in 0..300 {
+                    std::hint::black_box(reader.frame_at(target, &cancelled).unwrap());
+                }
+                runs.push(started.elapsed());
+            }
+            runs.sort();
+            let seconds = runs[2].as_secs_f64();
+            println!(
+                "{}: {:.2} fps, {:.3} ms/frame (median of 5, 300 frames, 960x540)",
+                if enabled { "Proxy" } else { "Original" },
+                300.0 / seconds,
+                seconds * 1000.0 / 300.0
+            );
+        }
+    }
 
     #[test]
     fn decoded_colors_match_ffmpeg() {
@@ -894,6 +1195,7 @@ mod tests {
     #[test]
     fn slow_frame_delivery_does_not_slow_timeline_playback() {
         let plan = PreviewPlan {
+            use_proxies: false,
             sources: Vec::new(),
             visual: None,
             end: 30,
@@ -987,6 +1289,7 @@ mod tests {
             transform: Transform::default(),
         }];
         let plan = PreviewPlan {
+            use_proxies: false,
             sources: clips.to_vec(),
             visual: None,
             end: 6,
@@ -1063,6 +1366,7 @@ mod tests {
                 fps: (30, 1),
             },
             Arc::new(AtomicBool::new(false)),
+            false,
         )
         .unwrap();
         assert_eq!(storyboard_frames.len(), 3);
@@ -1070,6 +1374,7 @@ mod tests {
         assert!(storyboard_frames[0].pixels[center] < 120);
         assert!(storyboard_frames[2].pixels[center] > 140);
         let cut = PreviewPlan {
+            use_proxies: false,
             sources: vec![FrameSource {
                 lut: None,
                 color: Default::default(),

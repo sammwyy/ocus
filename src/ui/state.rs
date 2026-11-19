@@ -316,6 +316,8 @@ pub(crate) struct UiState {
     pub thumbnail_loading: Signal<HashSet<PathBuf>>,
     pub storyboards: Rc<RefCell<HashMap<StoryboardKey, Storyboard>>>,
     waveforms: Waveforms,
+    pub proxy_status: Signal<HashMap<PathBuf, String>>,
+    proxy_pending: Rc<RefCell<Option<Arc<AtomicBool>>>>,
     pub media_scroll: ScrollController,
     pub inspector_scroll: ScrollController,
     pub timeline_start: Signal<u64>,
@@ -485,6 +487,8 @@ impl UiState {
             thumbnail_loading: Signal::new(HashSet::new()),
             storyboards: Rc::new(RefCell::new(HashMap::new())),
             waveforms: Waveforms::default(),
+            proxy_status: Signal::new(HashMap::new()),
+            proxy_pending: Rc::new(RefCell::new(None)),
             media_scroll: ScrollController::default(),
             inspector_scroll: ScrollController::default(),
             timeline_start: Signal::new(0),
@@ -739,6 +743,17 @@ impl UiState {
         let mut settings = self.settings.peek();
         settings.accent = Some(id.to_owned());
         self.update_settings(settings);
+    }
+
+    pub fn toggle_proxies(&self) {
+        let mut settings = self.settings.peek();
+        settings.use_proxies = !settings.use_proxies;
+        self.update_settings(settings);
+        self.cancel_storyboards();
+        self.storyboards.borrow_mut().clear();
+        self.queue_storyboards();
+        self.request_preview();
+        self.request_source_preview();
     }
 
     pub fn toggle_hardware_acceleration(&self) {
@@ -1492,6 +1507,7 @@ impl UiState {
         drop(editor);
         let end = self.sequence_end();
         let plan = PreviewPlan {
+            use_proxies: self.settings.peek().use_proxies,
             sources,
             visual: Some(visual),
             end,
@@ -1520,6 +1536,7 @@ impl UiState {
         );
         let end = range.as_ref().map_or(0, |range| range.duration);
         let plan = PreviewPlan {
+            use_proxies: self.settings.peek().use_proxies,
             end,
             visual: None,
             sources: range
@@ -1553,6 +1570,7 @@ impl UiState {
                     source_start: range.source_start,
                     duration: range.duration,
                     volume: 1.0,
+                    noise_reduction: false,
                 })
                 .collect(),
             fps,
@@ -1795,6 +1813,7 @@ impl UiState {
     }
 
     fn queue_waveforms(&self) {
+        self.queue_proxies();
         let Some(app) = self.app.borrow().clone() else {
             return;
         };
@@ -1861,10 +1880,66 @@ impl UiState {
     }
 
     fn reset_waveforms(&self) {
+        if let Some(cancelled) = self.proxy_pending.borrow().as_ref() {
+            cancelled.store(true, Ordering::Relaxed);
+        }
+        self.proxy_status.set(HashMap::new());
         if let Some(cancelled) = self.waveforms.pending.borrow_mut().take() {
             cancelled.store(true, Ordering::Relaxed);
         }
         self.waveforms.peaks.borrow_mut().clear();
+    }
+
+    fn queue_proxies(&self) {
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        if self.proxy_pending.borrow().is_some() {
+            return;
+        }
+        let statuses = self.proxy_status.peek();
+        let path = self
+            .editor
+            .borrow()
+            .project()
+            .media()
+            .iter()
+            .find(|media| media.kind == MediaKind::Video && !statuses.contains_key(&media.path))
+            .map(|media| media.path.clone());
+        let Some(path) = path else { return };
+        self.proxy_status.update(|statuses| {
+            statuses.insert(path.clone(), "Generating proxy…".into());
+        });
+        let cancelled = Arc::new(AtomicBool::new(false));
+        *self.proxy_pending.borrow_mut() = Some(cancelled.clone());
+        let worker_cancel = cancelled.clone();
+        let state = self.clone();
+        app.spawn_background(
+            move || {
+                let result = crate::media::proxy::generate(&path, &worker_cancel);
+                (path, result)
+            },
+            move |(path, result)| {
+                state.proxy_pending.borrow_mut().take();
+                if !cancelled.load(Ordering::Relaxed) {
+                    let label = match result {
+                        Ok(true) => "Proxy",
+                        Ok(false) => "",
+                        Err(_) => "Proxy unavailable",
+                    };
+                    state.proxy_status.update(|statuses| {
+                        statuses.insert(path, label.into());
+                    });
+                    if !state.program.playing.peek() {
+                        state.request_preview();
+                    }
+                    if !state.source.playing.peek() {
+                        state.request_source_preview();
+                    }
+                }
+                state.queue_proxies();
+            },
+        );
     }
 
     fn cancel_storyboards(&self) {
@@ -1888,13 +1963,14 @@ impl UiState {
         *self.storyboard_cancel.borrow_mut() = Some(cancelled.clone());
         let serial = self.storyboard_serial.get();
         let state = self.clone();
+        let use_proxies = self.settings.peek().use_proxies;
         app.spawn_stream(
             move |emit| {
                 for key in requests {
                     if cancelled.load(Ordering::Relaxed) {
                         break;
                     }
-                    let result = storyboard(&key, cancelled.clone());
+                    let result = storyboard(&key, cancelled.clone(), use_proxies);
                     emit((key, result));
                 }
             },
@@ -3474,6 +3550,23 @@ mod tests {
     use crate::timeline::Clip;
 
     #[test]
+    fn proxy_preference_is_applied_to_preview_plans_without_changing_project() {
+        let state = UiState::new();
+        let before = crate::project::format::to_json(state.editor.borrow().project()).unwrap();
+        state
+            .settings
+            .update(|settings| settings.use_proxies = true);
+        assert!(state.program_plan().0.use_proxies);
+        state.toggle_proxies();
+        assert!(!state.program_plan().0.use_proxies);
+        assert!(!state.settings.peek().use_proxies);
+        assert_eq!(
+            before,
+            crate::project::format::to_json(state.editor.borrow().project()).unwrap()
+        );
+    }
+
+    #[test]
     fn export_validation_preserves_a_dedicated_error() {
         let state = UiState::new();
         state.set_export_draft(state.export_draft.peek());
@@ -3852,6 +3945,7 @@ mod tests {
                 source_start: clip.source_start_frame,
                 duration: clip.duration_frames,
                 volume: 1.0,
+                noise_reduction: false,
             }],
             end: 1,
             fps: (30, 1),
@@ -4177,6 +4271,7 @@ mod tests {
                     transition_out: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
+                    noise_reduction: false,
                     linked_audio: false,
                     transform: Transform::default(),
                 }
@@ -4208,7 +4303,7 @@ mod tests {
             .iter()
             .find(|key| key.source_start == 89 * 30)
             .unwrap();
-        let frames = storyboard(range, Arc::new(AtomicBool::new(false))).unwrap();
+        let frames = storyboard(range, Arc::new(AtomicBool::new(false)), false).unwrap();
         assert_eq!(frames.len(), 3);
         assert!(
             frames
@@ -5053,6 +5148,7 @@ mod tests {
                 transition_out: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
+                noise_reduction: false,
                 linked_audio: false,
                 transform: Transform::default(),
             }

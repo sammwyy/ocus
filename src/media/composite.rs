@@ -205,6 +205,10 @@ enum Layer<'a> {
 }
 
 impl Compositor {
+    pub(crate) fn use_proxies(&mut self, enabled: bool) {
+        self.layers.use_proxies = enabled;
+    }
+
     pub fn new(plan: VisualPlan, width: u32, height: u32, fps: (u32, u32)) -> Self {
         Self {
             luts: HashMap::new(),
@@ -855,6 +859,73 @@ mod tests {
     use crate::media::preview::{PreviewEvent, PreviewPlan, decode_sequence};
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn proxy_crop_uses_the_fitted_picture() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wide.mp4");
+        assert!(
+            std::process::Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=red:s=2048x1024:r=30:d=0.1",
+                    "-c:v",
+                    "mpeg4",
+                    "-threads",
+                    "2"
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let cancelled = Arc::new(AtomicBool::new(false));
+        assert!(crate::media::proxy::generate(&path, &cancelled).unwrap());
+        let source = FrameSource {
+            clip_id: 1,
+            path,
+            kind: MediaKind::Video,
+            start: 0,
+            source_start: 0,
+            duration: 3,
+            color: Default::default(),
+            lut: None,
+            transform: Transform {
+                crop_left: 0.25,
+                ..Default::default()
+            },
+        };
+        for use_proxies in [false, true] {
+            let mut layers = VideoLayers::new((30, 1), (32, 32));
+            layers.use_proxies = use_proxies;
+            let image = layers.layer_at(&source, 0, &cancelled).unwrap();
+            assert_eq!(image.picture, (0, 8, 32, 16));
+            assert!(image.pixels[(16 * 32 + 16) * 4] > 100);
+            let fitted = image;
+            let plan = VisualPlan {
+                tracks: vec![vec![VisualClip::Media(source.clone())]],
+                resolution: (32, 32),
+                transitions: HashMap::new(),
+                transitions_out: HashMap::new(),
+            };
+            let mut compositor = Compositor::new(plan, 32, 32, (30, 1));
+            compositor.use_proxies(use_proxies);
+            let image = compositor.frame(0, &cancelled).unwrap().unwrap();
+            for (index, pixel) in image.pixels.as_chunks::<4>().0.iter().enumerate() {
+                let (x, y) = (index % 32, index / 32);
+                if x < 8 || !(8..24).contains(&y) {
+                    assert_eq!(pixel, &[0, 0, 0, 255]);
+                } else {
+                    assert_eq!(pixel, &fitted.pixels[index * 4..index * 4 + 4]);
+                }
+            }
+        }
+    }
 
     #[test]
     fn color_adjust_maps_pixels() {
@@ -2704,6 +2775,7 @@ mod tests {
         let mut preview = None;
         decode_sequence(
             &PreviewPlan {
+                use_proxies: false,
                 sources: Vec::new(),
                 visual: Some(plan.clone()),
                 end: 3,

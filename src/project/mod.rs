@@ -38,6 +38,7 @@ impl Project {
         .map(|(id, kind)| Track {
             id: id as u64,
             kind,
+            subtitles: false,
             clips: Vec::new(),
         })
         .collect();
@@ -125,6 +126,15 @@ impl Project {
         let mut track_ids = HashSet::new();
         let mut clip_ids = HashSet::new();
         for track in &self.tracks {
+            if track.subtitles
+                && (track.kind != TrackKind::Video
+                    || track
+                        .clips
+                        .iter()
+                        .any(|clip| !matches!(clip.content, ClipContent::Title(_))))
+            {
+                return Err("Subtitle tracks must contain only titles on a video track".into());
+            }
             if !track_ids.insert(track.id) {
                 return Err("Duplicate track ID".into());
             }

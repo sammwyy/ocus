@@ -75,6 +75,12 @@ pub struct ExportSettings {
     pub video_quality: Option<u8>,
     #[serde(default)]
     pub speed: EncodingSpeed,
+    #[serde(default = "default_burn_subtitles")]
+    pub burn_subtitles: bool,
+}
+
+fn default_burn_subtitles() -> bool {
+    true
 }
 
 impl ExportSettings {
@@ -90,6 +96,7 @@ impl ExportSettings {
             audio_bitrate_kbps: 192,
             video_quality: None,
             speed: EncodingSpeed::Fast,
+            burn_subtitles: true,
         }
     }
 
@@ -163,5 +170,53 @@ impl LastExport {
             return Err("Last export path must match its container".into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_export_settings_default_to_burning_subtitles() {
+        let settings = ExportSettings::for_project(
+            1920,
+            1080,
+            FrameRate {
+                numerator: 30,
+                denominator: 1,
+            },
+        );
+        assert!(settings.burn_subtitles);
+        let mut legacy = serde_json::to_value(&settings).unwrap();
+        legacy.as_object_mut().unwrap().remove("burn_subtitles");
+        assert!(
+            serde_json::from_value::<ExportSettings>(legacy.clone())
+                .unwrap()
+                .burn_subtitles
+        );
+        let last = serde_json::json!({ "settings": legacy.clone(), "path": "output.mp4" });
+        assert!(
+            serde_json::from_value::<LastExport>(last)
+                .unwrap()
+                .settings
+                .burn_subtitles
+        );
+        let preset = serde_json::json!({ "name": "Legacy", "settings": legacy });
+        assert!(
+            serde_json::from_value::<crate::export::presets::NamedPreset>(preset)
+                .unwrap()
+                .settings
+                .burn_subtitles
+        );
+        let settings = ExportSettings {
+            burn_subtitles: false,
+            ..settings
+        };
+        assert_eq!(
+            serde_json::from_str::<ExportSettings>(&serde_json::to_string(&settings).unwrap())
+                .unwrap(),
+            settings
+        );
     }
 }

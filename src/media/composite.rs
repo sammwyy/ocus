@@ -33,10 +33,18 @@ impl VisualPlan {
 
     /// The project's visuals with clips of the `missing` media left out.
     pub fn without_media(project: &Project, missing: &HashSet<u64>) -> Self {
+        Self::build(project, missing, true)
+    }
+
+    pub fn for_export(project: &Project, burn_subtitles: bool) -> Self {
+        Self::build(project, &HashSet::new(), burn_subtitles)
+    }
+
+    fn build(project: &Project, missing: &HashSet<u64>, subtitles: bool) -> Self {
         let tracks = project
             .tracks()
             .iter()
-            .filter(|track| track.kind == TrackKind::Video)
+            .filter(|track| track.kind == TrackKind::Video && (subtitles || !track.subtitles))
             .map(|track| {
                 track
                     .clips
@@ -210,6 +218,10 @@ pub(crate) fn title_outline_radius(scaled_font_size: f32) -> f32 {
     scaled_font_size * 0.02
 }
 
+pub(crate) fn title_background_padding(size: f32) -> (f32, f32) {
+    (size * 0.2, size * 0.08)
+}
+
 impl Glyphs {
     fn draw(
         &mut self,
@@ -273,6 +285,23 @@ impl Glyphs {
                 .collect();
             let mut x = width as f32 * title.x
                 - layouts.iter().map(|(_, _, width)| width).sum::<f32>() / 2.0;
+            if let Some(color) = title.background
+                && !line.is_empty()
+            {
+                let line_width = layouts.iter().map(|(_, _, width)| width).sum::<f32>();
+                let (pad_x, pad_y) = title_background_padding(size);
+                let top = start_y + line_index as f32 * line_height;
+                for py in ((top + pad_y).floor() as i32).max(0)
+                    ..((top + line_height - pad_y).ceil() as i32).min(height as i32)
+                {
+                    for px in ((x - pad_x).floor() as i32).max(0)
+                        ..((x + line_width + pad_x).ceil() as i32).min(width as i32)
+                    {
+                        let offset = py as usize * canvas.stride + px as usize * 4;
+                        blend(&mut canvas.pixels[offset..offset + 4], &color);
+                    }
+                }
+            }
             for (run, (face, layout, run_width)) in line.iter().zip(layouts) {
                 for glyph in &layout.glyphs {
                     let face = if glyph.face == 0 {
@@ -383,6 +412,53 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn title_background_is_optional_alpha_blended_and_resolution_scaled() {
+        let render = |background, width: u32| {
+            let height = width * 9 / 16;
+            let mut pixels = vec![0; width as usize * height as usize * 4];
+            for pixel in pixels.as_chunks_mut::<4>().0 {
+                *pixel = [100, 100, 100, 255];
+            }
+            Glyphs::default().draw(
+                &Title {
+                    text: "Subtitle".into(),
+                    font_size: 48.0,
+                    background,
+                    ..Title::default()
+                },
+                width,
+                height,
+                640,
+                width as usize * 4,
+                &mut pixels,
+            );
+            pixels
+        };
+        let plain = render(None, 640);
+        let transparent = render(Some([0, 0, 0, 0]), 640);
+        assert_eq!(plain, transparent);
+        let mut areas = Vec::new();
+        for width in [320, 640, 1280] {
+            let pixels = render(Some([0, 0, 0, 128]), width);
+            let area = pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|pixel| **pixel == [50, 50, 50, 255])
+                .count();
+            assert!(area > 0);
+            areas.push(area as f64 / f64::from(width * width));
+        }
+        assert!(
+            areas.iter().all(|area| (area / areas[1] - 1.0).abs() < 0.1),
+            "{areas:?}"
+        );
+        let opaque = render(Some([0, 0, 0, 255]), 640);
+        assert!(opaque.as_chunks::<4>().0.contains(&[0, 0, 0, 255]));
+        assert!(!plain.as_chunks::<4>().0.contains(&[0, 0, 0, 255]));
+    }
 
     #[test]
     #[ignore = "release-mode still-image benchmark; requires ffmpeg"]

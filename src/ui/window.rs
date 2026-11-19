@@ -258,11 +258,31 @@ fn change_title(state: &UiState, change: impl FnOnce(&mut Title)) {
     let old = title.clone();
     change(&mut title);
     if title != old {
-        state.edit(Command::SetTitle {
-            track_id,
-            clip_id: selected.id,
-            title,
-        });
+        let subtitles = state
+            .editor
+            .borrow()
+            .project()
+            .tracks()
+            .iter()
+            .any(|track| track.id == track_id && track.subtitles);
+        state.edit(
+            if subtitles
+                && title.text == old.text
+                && title.parse_html == old.parse_html
+                && title.parse_markdown == old.parse_markdown
+            {
+                Command::SetSubtitleStyle {
+                    track_id,
+                    style: title,
+                }
+            } else {
+                Command::SetTitle {
+                    track_id,
+                    clip_id: selected.id,
+                    title,
+                }
+            },
+        );
     }
 }
 
@@ -290,6 +310,18 @@ fn parse_hex_color(value: &str) -> Option<Color> {
     (matches!(hex.len(), 3 | 4 | 6 | 8) && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .then(|| value.parse().ok())
         .flatten()
+}
+
+fn apply_title_background(state: &UiState) {
+    let Some(color) = parse_hex_color(&state.title_background.peek()) else {
+        state
+            .status
+            .set("Enter a background color such as #000000B3".into());
+        return;
+    };
+    change_title(state, |title| {
+        title.background = Some([color.r, color.g, color.b, color.a])
+    });
 }
 
 fn apply_title_style(state: &UiState) {
@@ -440,12 +472,15 @@ fn frame_rate_label(fps: (u32, u32)) -> String {
 }
 
 fn track_labels(project: &Project) -> Vec<(u64, String)> {
-    let (mut video, mut audio) = (0, 0);
+    let (mut video, mut audio, mut subtitles) = (0, 0, 0);
     project
         .tracks()
         .iter()
         .map(|track| {
-            let label = if track.kind == TrackKind::Video {
+            let label = if track.subtitles {
+                subtitles += 1;
+                format!("S{subtitles}")
+            } else if track.kind == TrackKind::Video {
                 video += 1;
                 format!("V{video}")
             } else {
@@ -673,8 +708,13 @@ fn title_box(title: &Title, bounds: Rect, resolution: (u32, u32)) -> Rect {
             line_width += run_width(part, size, &family, run.bold);
         }
     }
-    let box_width = (longest.max(line_width) + 16.0).max(32.0);
-    let box_height = lines as f32 * size * 1.35 + 10.0;
+    let (pad_x, pad_y) = if title.background.is_some() {
+        crate::media::composite::title_background_padding(size)
+    } else {
+        (0.0, 0.0)
+    };
+    let box_width = (longest.max(line_width) + 16.0 + 2.0 * pad_x).max(32.0);
+    let box_height = lines as f32 * size * 1.35 + 10.0 + 2.0 * pad_y;
     Rect {
         x: x + width * title.x - box_width / 2.0,
         y: y + height * title.y - box_height / 2.0,
@@ -753,6 +793,21 @@ impl Widget for ProgramCanvas {
                     .collect();
                 let line_width: f32 = widths.iter().sum();
                 let mut x = bounds.x + width * title.x - line_width / 2.0;
+                if let Some(color) = title.background
+                    && !line.is_empty()
+                {
+                    let (pad_x, pad_y) = crate::media::composite::title_background_padding(size);
+                    painter.fill_rect(
+                        Rect {
+                            x: x - pad_x,
+                            y: start_y + index as f32 * line_height + pad_y,
+                            width: line_width + 2.0 * pad_x,
+                            height: line_height - 2.0 * pad_y,
+                        },
+                        Color::rgba(color[0], color[1], color[2], color[3]),
+                        0.0,
+                    );
+                }
                 for (run, text_width) in line.iter().zip(widths) {
                     let line_rect = Rect {
                         x,
@@ -1688,7 +1743,9 @@ fn compatible_destinations(tracks: &[Track], track_id: u64, clip: &Clip) -> Vec<
     };
     tracks
         .iter()
-        .filter(|track| track.id != track_id && track.kind == source.kind)
+        .filter(|track| {
+            track.id != track_id && track.kind == source.kind && track.subtitles == source.subtitles
+        })
         .map(|track| {
             let occupied = track.clips.iter().any(|other| {
                 clip.start_frame < other.start_frame.saturating_add(other.duration_frames)
@@ -1820,6 +1877,25 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         state,
                         set_title_text,
                     )),
+                    title_toggle(state, "Parse HTML tags", title.parse_html, |title| {
+                        title.parse_html = !title.parse_html
+                    }),
+                    title_toggle(state, "Parse Markdown", title.parse_markdown, |title| {
+                        title.parse_markdown = !title.parse_markdown
+                    }),
+                ],
+            ));
+            let subtitles = project
+                .tracks()
+                .iter()
+                .any(|track| track.id == track_id && track.subtitles);
+            rows.push(section(
+                if subtitles {
+                    "Subtitle style"
+                } else {
+                    "Title style"
+                },
+                vec![
                     text("Font family", muted(), 11.0),
                     Box::new(title_input(
                         &state.title_font,
@@ -1878,12 +1954,50 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                     title_toggle(state, "Outline", title.outline, |title| {
                         title.outline = !title.outline
                     }),
-                    title_toggle(state, "Parse HTML tags", title.parse_html, |title| {
-                        title.parse_html = !title.parse_html
+                    title_toggle(state, "Background", title.background.is_some(), |title| {
+                        title.background = if title.background.is_some() {
+                            None
+                        } else {
+                            Some([0, 0, 0, 179])
+                        };
                     }),
-                    title_toggle(state, "Parse Markdown", title.parse_markdown, |title| {
-                        title.parse_markdown = !title.parse_markdown
-                    }),
+                    text("Background (#RRGGBBAA)", muted(), 11.0),
+                    Box::new(title_input(
+                        &state.title_background,
+                        inner,
+                        state,
+                        apply_title_background,
+                    )),
+                    inline(secondary_button(
+                        None,
+                        "Apply background",
+                        true,
+                        state,
+                        apply_title_background,
+                    )),
+                    text("Position", muted(), 11.0),
+                    Box::new(
+                        Flex::row()
+                            .gap(4.0)
+                            .child(secondary_button(None, "Bottom", true, state, |state| {
+                                change_title(state, |title| {
+                                    title.x = 0.5;
+                                    title.y = 0.9;
+                                })
+                            }))
+                            .child(secondary_button(None, "Top", true, state, |state| {
+                                change_title(state, |title| {
+                                    title.x = 0.5;
+                                    title.y = 0.1;
+                                })
+                            }))
+                            .child(secondary_button(None, "Middle", true, state, |state| {
+                                change_title(state, |title| {
+                                    title.x = 0.5;
+                                    title.y = 0.5;
+                                })
+                            })),
+                    ),
                 ],
             ));
         }
@@ -2503,6 +2617,13 @@ pub(crate) fn build(state: &UiState, viewport: Size) -> BoxedWidget {
                     !busy,
                     state,
                     UiState::import_dialog,
+                ))
+                .child(secondary_button(
+                    None,
+                    "Import subtitles…",
+                    !busy,
+                    state,
+                    UiState::subtitle_dialog,
                 ))
                 .child(if state.exporting.get() {
                     secondary_button(None, "Cancel export", true, state, UiState::cancel_export)
@@ -3364,6 +3485,38 @@ fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidg
             Flex::column()
                 .width(inner)
                 .gap(16.0)
+                .child(
+                    if draft.container.uses_video_codec()
+                        && project.tracks().iter().any(|track| track.subtitles)
+                    {
+                        let state = state.clone();
+                        form_section(
+                            "Subtitles",
+                            Box::new(
+                                Flex::column()
+                                    .gap(8.0)
+                                    .child(Box::new(
+                                        Flex::row()
+                                            .gap(8.0)
+                                            .align(Align::Center)
+                                            .child(Box::new(Checkbox::new(
+                                                draft.burn_subtitles,
+                                                move || state.toggle_burn_subtitles(),
+                                            )))
+                                            .child(text("Burn in subtitles", text_color(), 12.0)),
+                                    ))
+                                    .child(text(
+                                        "When off, save an SRT beside the video.",
+                                        muted(),
+                                        11.0,
+                                    )),
+                            ),
+                            card_width,
+                        )
+                    } else {
+                        Box::new(Flex::row().size(0.0, 0.0))
+                    },
+                )
                 .child(form_section(
                     "Format",
                     Box::new(
@@ -3653,23 +3806,27 @@ fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidg
                 .child(footer_actions),
         )
     };
-    let mut footer = Flex::column().width(inner).gap(8.0).child(Box::new(
-        Flex::row()
-            .width(inner)
-            .gap(8.0)
-            .align(Align::Center)
-            .child(text("Save to", muted(), 11.0))
-            .child(text(
-                fit(&state.export_path.value(), inner - 150.0, 11.0),
-                text_color(),
-                11.0,
-            ))
-            .child(spacer())
-            .child(secondary_button(None, "Change…", true, state, |state| {
-                state.export_scroll.set(0.0);
-                state.export_page.set(ExportPage::Output);
-            })),
-    ));
+    let mut footer = Flex::column()
+        .width(inner)
+        .shrink(0.0)
+        .gap(8.0)
+        .child(Box::new(
+            Flex::row()
+                .width(inner)
+                .gap(8.0)
+                .align(Align::Center)
+                .child(text("Save to", muted(), 11.0))
+                .child(text(
+                    fit(&state.export_path.value(), inner - 150.0, 11.0),
+                    text_color(),
+                    11.0,
+                ))
+                .child(spacer())
+                .child(secondary_button(None, "Change…", true, state, |state| {
+                    state.export_scroll.set(0.0);
+                    state.export_page.set(ExportPage::Output);
+                })),
+        ));
     if state.project_path.get().is_some() {
         footer = footer.child(Box::new(
             Flex::row()
@@ -3702,7 +3859,7 @@ fn export_modal(state: &UiState, project: &Project, viewport: Size) -> BoxedWidg
                         .corner_radius(12.0)
                         .child(Box::new(
                             Flex::column()
-                                .width(width - 40.0)
+                                .size(width - 40.0, height - 40.0)
                                 .gap(12.0)
                                 .child(Box::new(
                                     Flex::row()
@@ -4194,6 +4351,182 @@ fn context_menu(state: &UiState, menu: MenuState, viewport: Size) -> BoxedWidget
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn subtitle_destinations_and_burn_option_are_contextual() {
+        let state = UiState::new();
+        assert!(state.add_title());
+        let cues = crate::subtitles::parse("1\n00:00:00,000 --> 00:00:01,000\nHello").unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let mut track =
+                crate::subtitles::track(state.editor.borrow().project(), &cues).unwrap();
+            ids.push((track.id, track.clips[0].id));
+            if ids.len() == 2 {
+                track.clips.clear();
+            }
+            let mut tracks = state.editor.borrow().project().tracks().to_vec();
+            tracks.push(track);
+            assert!(state.edit(Command::ReplaceTracks(tracks)));
+        }
+        {
+            let editor = state.editor.borrow();
+            let tracks = editor.project().tracks();
+            let subtitle = &tracks[4].clips[0];
+            assert_eq!(
+                compatible_destinations(tracks, ids[0].0, subtitle),
+                vec![(ids[1].0, false)]
+            );
+            let regular = tracks
+                .iter()
+                .find(|track| !track.subtitles && !track.clips.is_empty())
+                .unwrap();
+            assert!(
+                compatible_destinations(tracks, regular.id, &regular.clips[0])
+                    .iter()
+                    .all(|(id, _)| !ids.iter().any(|(subtitle, _)| subtitle == id))
+            );
+        }
+        assert!(!state.edit(Command::Move {
+            track_id: ids[0].0,
+            target_track_id: 0,
+            clip_id: ids[0].1,
+            to_frame: 0
+        }));
+        assert!(state.edit(Command::Move {
+            track_id: ids[0].0,
+            target_track_id: ids[1].0,
+            clip_id: ids[0].1,
+            to_frame: 0
+        }));
+        state.export_dialog();
+        state.export_page.set(ExportPage::Video);
+        state.project_path.set(Some("/project.ocus".into()));
+        assert!(state.export_form().unwrap().burn_subtitles);
+        for width in [420.0, 680.0, 1280.0] {
+            let painter = render(&state, width, 900.0);
+            let (_, rect) = painter
+                .bounds
+                .iter()
+                .find(|(text, _)| text == "Burn in subtitles")
+                .unwrap();
+            assert!(rect.x >= 0.0 && rect.x + rect.width <= width);
+            for (_, rect) in painter.bounds.iter().filter(|(text, _)| text == "Cancel") {
+                assert!(
+                    rect.y + rect.height <= (900.0 + 520.0) / 2.0 - 12.0,
+                    "{width}: {rect:?}"
+                );
+            }
+        }
+        state.toggle_burn_subtitles();
+        assert!(!state.export_form().unwrap().burn_subtitles);
+        for container in [Container::Gif, Container::Wav] {
+            state.change_export_codecs(Some(container), None, None);
+            assert!(
+                !render(&state, 1280.0, 900.0)
+                    .labels
+                    .iter()
+                    .any(|text| text == "Burn in subtitles")
+            );
+        }
+        let plain = UiState::new();
+        assert!(plain.add_title());
+        plain.export_dialog();
+        plain.export_page.set(ExportPage::Video);
+        assert!(
+            !render(&plain, 1280.0, 900.0)
+                .labels
+                .iter()
+                .any(|text| text == "Burn in subtitles")
+        );
+    }
+
+    #[test]
+    fn subtitle_inspector_style_controls_fit_narrow_panels() {
+        let state = UiState::new();
+        let cues = crate::subtitles::parse(
+            "1\n00:00:00,000 --> 00:00:01,000\nHello\n\n2\n00:00:01,000 --> 00:00:02,000\nWorld",
+        )
+        .unwrap();
+        let track = crate::subtitles::track(state.editor.borrow().project(), &cues).unwrap();
+        let selected = (track.id, track.clips[0].id);
+        let mut tracks = state.editor.borrow().project().tracks().to_vec();
+        tracks.push(track);
+        assert!(state.edit(Command::ReplaceTracks(tracks)));
+        state.select_clip(Some(selected));
+        state.title_background.set_value("#102030B3");
+        apply_title_background(&state);
+        change_title(&state, |title| {
+            title.font_size = 52.0;
+            title.y = 0.9;
+        });
+        for width in [264.0, 288.0] {
+            let mut painter = TestPainter::default();
+            creamui::reactive::with_context_scope(|| {
+                creamui::reactive::provide_context(creamui::theme::ThemeProvider::new(
+                    creamui::Theme::dark(),
+                ));
+                Renderer::new().render(
+                    inspector(&state, state.editor.borrow().project(), width, false),
+                    Size {
+                        width,
+                        height: 2000.0,
+                    },
+                    &mut painter,
+                );
+            });
+            for label in [
+                "SUBTITLE STYLE",
+                "Font family",
+                "Font size (px)",
+                "Outline",
+                "Background",
+                "Background (#RRGGBBAA)",
+                "Bottom",
+                "Top",
+                "Middle",
+            ] {
+                let (_, rect) = painter
+                    .bounds
+                    .iter()
+                    .find(|(text, _)| text == label)
+                    .unwrap_or_else(|| panic!("missing {label}"));
+                assert!(
+                    rect.x >= 0.0 && rect.x + rect.width <= width + 0.1,
+                    "{label}: {rect:?}"
+                );
+            }
+        }
+        let editor = state.editor.borrow();
+        for clip in &editor.project().tracks().last().unwrap().clips {
+            let ClipContent::Title(title) = &clip.content else {
+                unreachable!()
+            };
+            assert_eq!(title.background, Some([16, 32, 48, 179]));
+            assert_eq!(title.font_size, 52.0);
+        }
+        let title = Title {
+            text: "Background".into(),
+            font_size: 180.0,
+            ..Title::default()
+        };
+        let frame = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+        };
+        let plain = title_box(&title, frame, (1920, 1080));
+        let background = title_box(
+            &Title {
+                background: Some([0, 0, 0, 179]),
+                ..title
+            },
+            frame,
+            (1920, 1080),
+        );
+        assert!(background.width > plain.width && background.height > plain.height);
+    }
+
     use super::*;
     use creamui::core::{Painter, Point, Rect, Renderer, RgbaImage, TextAlign, Widget};
     use std::sync::Arc;
@@ -4226,6 +4559,7 @@ mod tests {
         .map(|(id, kind)| Track {
             id: id as u64,
             kind,
+            subtitles: false,
             clips: Vec::new(),
         })
         .collect::<Vec<_>>();
@@ -4252,6 +4586,7 @@ mod tests {
         let mut tracks = vec![Track {
             id: 0,
             kind: TrackKind::Video,
+            subtitles: false,
             clips: Vec::new(),
         }];
         for (index, (start, duration)) in [(0, 10), (30, 10), (9, 2), (29, 2), (15, 5), (0, 40)]
@@ -4261,6 +4596,7 @@ mod tests {
             tracks.push(Track {
                 id: index as u64 + 1,
                 kind: TrackKind::Video,
+                subtitles: false,
                 clips: vec![destination_clip(start, duration)],
             });
         }

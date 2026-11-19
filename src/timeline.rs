@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub struct Track {
     pub id: u64,
     pub kind: TrackKind,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subtitles: bool,
     pub clips: Vec<Clip>,
 }
 
@@ -70,6 +72,8 @@ pub struct Title {
     pub font_family: String,
     pub font_size: f32,
     pub color: [u8; 4],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<[u8; 4]>,
     pub x: f32,
     pub y: f32,
     #[serde(default = "default_bold")]
@@ -95,6 +99,7 @@ impl Default for Title {
             font_family: "Sans".into(),
             font_size: 64.0,
             color: [255; 4],
+            background: None,
             x: 0.5,
             y: 0.5,
             bold: true,

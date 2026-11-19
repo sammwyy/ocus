@@ -38,6 +38,9 @@ impl Project {
         .map(|(id, kind)| Track {
             id: id as u64,
             kind,
+            name: String::new(),
+            locked: false,
+            hidden: false,
             clips: Vec::new(),
         })
         .collect();
@@ -125,14 +128,22 @@ impl Project {
         let mut track_ids = HashSet::new();
         let mut clip_ids = HashSet::new();
         for track in &self.tracks {
+            if !Track::valid_name(&track.name) {
+                return Err("Invalid track name".into());
+            }
             if !track_ids.insert(track.id) {
                 return Err("Duplicate track ID".into());
             }
             let mut end = 0;
             for clip in &track.clips {
-                if clip.transition.as_ref().is_some_and(|transition| {
-                    track.kind != TrackKind::Video || transition.duration_frames == 0
-                }) {
+                if clip
+                    .transition
+                    .iter()
+                    .chain(&clip.transition_out)
+                    .any(|transition| {
+                        track.kind != TrackKind::Video || transition.duration_frames == 0
+                    })
+                {
                     return Err("Transitions need a video track and a positive duration".into());
                 }
                 let next = clip
@@ -149,6 +160,7 @@ impl Project {
                 if clip.duration_frames == 0
                     || clip.start_frame < end
                     || !clip_ids.insert(clip.id)
+                    || !clip.color.valid()
                     || !clip.volume.is_finite()
                     || !(0.0..=2.0).contains(&clip.volume)
                     || !clip.valid_fades()

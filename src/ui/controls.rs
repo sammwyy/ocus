@@ -156,6 +156,9 @@ pub(crate) enum Glyph {
     Picture,
     Volume,
     Mute,
+    Lock,
+    Eye,
+    EyeOff,
     ChevronUp,
     ChevronDown,
     ChevronLeft,
@@ -443,6 +446,26 @@ pub(super) fn draw_glyph(painter: &mut dyn Painter, glyph: Glyph, rect: Rect, co
             pen.disc((6.6, 17.2), 2.6);
             pen.disc((16.6, 15.2), 2.6);
         }
+        Glyph::Lock => {
+            pen.outline(5.0, 10.0, 14.0, 11.0);
+            pen.arc((12.0, 10.0), 5.0, 180.0, 360.0);
+            pen.line(&[(12.0, 14.0), (12.0, 17.0)]);
+        }
+        Glyph::Eye | Glyph::EyeOff => {
+            pen.line(&[
+                (2.0, 12.0),
+                (7.0, 6.0),
+                (17.0, 6.0),
+                (22.0, 12.0),
+                (17.0, 18.0),
+                (7.0, 18.0),
+                (2.0, 12.0),
+            ]);
+            pen.disc((12.0, 12.0), 3.0);
+            if glyph == Glyph::EyeOff {
+                pen.line(&[(3.0, 3.0), (21.0, 21.0)]);
+            }
+        }
         Glyph::Volume | Glyph::Mute => {
             pen.bar(3.0, 9.0, 4.8, 6.0);
             pen.fill(&[(7.5, 9.0), (12.5, 4.5), (12.5, 19.5), (7.5, 15.0)]);
@@ -640,6 +663,10 @@ impl Help {
     pub fn instance(mut self, instance: u64) -> Self {
         self.instance = instance;
         self
+    }
+
+    pub fn register(&self, state: &UiState) {
+        state.tooltip_controller((self.label, self.instance));
     }
 }
 

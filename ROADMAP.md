@@ -116,7 +116,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [x] Timeline markers
 
 ### v0.6: Color and audio
-- [ ] Brightness, contrast and saturation
+- [x] Brightness, contrast and saturation
 - [ ] LUT support (.cube)
 - [x] Audio waveforms on the timeline and in the Source monitor
 - [x] Audio fade in and fade out
@@ -130,7 +130,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [ ] Basic keyframes for position, scale, rotation and opacity
 
 ### v0.8: Performance and safety
-- [ ] Hardware accelerated encoding and decoding (NVENC, VAAPI, VideoToolbox)
+- [x] Hardware accelerated encoding and decoding (NVENC, VAAPI, VideoToolbox)
 - [ ] Proxy media for smooth 4K editing
 - [x] Frame and thumbnail cache
 - [x] Autosave

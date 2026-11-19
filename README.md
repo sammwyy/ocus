@@ -7,6 +7,14 @@ file also reconnects missing files with matching names in the same folder. Each
 relinked file can be undone independently. Relink missing timeline media before
 exporting, then save the project to keep its updated source paths.
 
+Relative media paths resolve beside the project file. Opening a project (or
+restoring unsaved work) refreshes available sources' duration and sound metadata
+in the background, retaining stored metadata if a source cannot be probed or
+the new metadata would invalidate existing clips. Linked clips whose source no
+longer has sound are unlinked, with a note in the status line. Opening repairs
+do not mark the project as edited. Relinking to a silent video also unlinks its
+sound; undo restores both the original source and its linked clips.
+
 Ocus is an early-stage, lightweight video editor written in Rust. The
 [roadmap](ROADMAP.md) tracks its intended milestones. The CreamUI editor
 supports importing media, editing and previewing a multitrack timeline,

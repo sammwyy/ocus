@@ -54,9 +54,16 @@ and the in-memory project. It rejects missing or unsupported versions and
 round-trips media references and title clips. Project load validates settings,
 IDs, clip ranges and reference existence. `project::store` loads and saves on
 background jobs, with same-directory temporary files, sync, and rename for
-atomic writes. Imported media paths are absolute. Format migrations do not
-exist yet; optional probe metadata and title style/parse flags keep version 1
-files readable. Media
+atomic writes. Imported media paths are absolute; loaded relative paths resolve
+against the project file's directory, not the working directory. The JSON
+format stays path-agnostic and clears stale linked-audio flags before validation.
+On the existing open/recovery worker, the store probes present sources and
+adopts matching-kind metadata only if the repaired project still validates.
+Failed probes and incompatible metadata retain the stored values. Repairs are
+not undo steps and normal opens remain clean; the status line reports unlinked
+clips alongside missing files. Relink commands repair linked flags atomically
+with the source replacement, so undo restores both. Optional probe metadata and
+title style/parse flags keep version 1 files readable. Media
 probing and bounded first-frame thumbnails use the `ffmpeg-next` library on
 workers. `media/preview.rs` decodes and scales frames off the UI thread,
 maintaining a small frame buffer during playback and seeking to source frames

@@ -369,6 +369,12 @@ impl UiState {
                 }
             });
         }
+        if self.rename_track.peek().is_some() {
+            if action == Action::Escape {
+                self.rename_track.set(None);
+            }
+            return;
+        }
         if self.settings_modal.peek() {
             if action == Action::Escape {
                 self.close_settings();
@@ -477,7 +483,8 @@ impl UiState {
                 .max();
             if let Some(top) = top_footage {
                 if let Some(track) = project.tracks().iter().skip(top + 1).find(|track| {
-                    track.kind == TrackKind::Video
+                    !track.locked
+                        && track.kind == TrackKind::Video
                         && track.clips.iter().all(|clip| {
                             clip.start_frame >= end
                                 || clip.start_frame.saturating_add(clip.duration_frames) <= frame
@@ -620,10 +627,17 @@ impl UiState {
         *self.clipboard.borrow_mut() = saved;
     }
 
-    /// Selected clips under the playhead, or every clip there if none are.
+    /// Selected editable clips under the playhead, or every editable clip there if none are.
     pub fn split_targets(&self) -> Vec<ClipRef> {
         let editor = self.editor.borrow();
-        let under = edits::clips_at(editor.project(), self.program.position.peek());
+        let mut under = edits::clips_at(editor.project(), self.program.position.peek());
+        under.retain(|(track_id, _)| {
+            editor
+                .project()
+                .tracks()
+                .iter()
+                .any(|track| track.id == *track_id && !track.locked)
+        });
         let selection = self.selected.peek();
         let selected: Vec<_> = under
             .iter()
@@ -809,11 +823,11 @@ impl UiState {
                 } else {
                     TrackKind::Video
                 };
-                let lane = geometry
-                    .nearest_lane(drag.pointer.y, |index| {
-                        project.tracks()[index].kind == wanted
-                    })
-                    .unwrap_or(0);
+                let Some(lane) = geometry.nearest_lane(drag.pointer.y, |index| {
+                    !project.tracks()[index].locked && project.tracks()[index].kind == wanted
+                }) else {
+                    return Some(refuse("Unlock a compatible track before dropping clips"));
+                };
                 let track_id = project.tracks()[lane].id;
                 let rate = &project.settings().frame_rate;
                 let duration =
@@ -1015,6 +1029,10 @@ pub(crate) enum MenuCommand {
     AddTrack(TrackKind),
     RemoveTrack(u64),
     SelectTrack(u64),
+    RenameTrack(u64),
+    LockTrack(u64, bool),
+    HideTrack(u64, bool),
+    MoveTrack(u64, bool),
     InsertMedia(u64),
     InsertMediaAt(u64, u64),
     ShowMedia(u64),
@@ -1119,6 +1137,16 @@ impl UiState {
             MenuCommand::ToggleMute => self.toggle_mute(),
             MenuCommand::AddTrack(kind) => self.add_track(kind),
             MenuCommand::RemoveTrack(track_id) => self.remove_track(track_id),
+            MenuCommand::RenameTrack(track_id) => self.begin_track_rename(track_id),
+            MenuCommand::LockTrack(track_id, locked) => {
+                self.edit(Command::SetTrackLocked { track_id, locked });
+            }
+            MenuCommand::HideTrack(track_id, hidden) => {
+                self.edit(Command::SetTrackHidden { track_id, hidden });
+            }
+            MenuCommand::MoveTrack(track_id, down) => {
+                self.edit(Command::MoveTrack { track_id, down });
+            }
             MenuCommand::SelectTrack(track_id) => {
                 let clips = self
                     .editor
@@ -1278,6 +1306,67 @@ impl UiState {
             ),
         ];
         if let Some((track_id, label)) = track {
+            let editor = self.editor.borrow();
+            let tracks = editor.project().tracks();
+            let Some(index) = tracks.iter().position(|track| track.id == track_id) else {
+                return entries;
+            };
+            let track = &tracks[index];
+            entries.push(MenuEntry::new(
+                "Rename track…",
+                Glyph::Title,
+                "",
+                MenuCommand::RenameTrack(track_id),
+            ));
+            entries.push(
+                MenuEntry::new(
+                    "Move up",
+                    Glyph::ChevronUp,
+                    "",
+                    MenuCommand::MoveTrack(track_id, false),
+                )
+                .enabled(tracks[..index].iter().any(|other| other.kind == track.kind)),
+            );
+            entries.push(
+                MenuEntry::new(
+                    "Move down",
+                    Glyph::ChevronDown,
+                    "",
+                    MenuCommand::MoveTrack(track_id, true),
+                )
+                .enabled(
+                    tracks[index + 1..]
+                        .iter()
+                        .any(|other| other.kind == track.kind),
+                ),
+            );
+            entries.push(MenuEntry::new(
+                if track.locked {
+                    "Unlock track"
+                } else {
+                    "Lock track"
+                },
+                Glyph::Lock,
+                "",
+                MenuCommand::LockTrack(track_id, !track.locked),
+            ));
+            entries.push(MenuEntry::new(
+                match (track.kind, track.hidden) {
+                    (TrackKind::Audio, false) => "Mute track",
+                    (TrackKind::Audio, true) => "Unmute track",
+                    (TrackKind::Video, false) => "Hide track",
+                    (TrackKind::Video, true) => "Show track",
+                },
+                if track.kind == TrackKind::Audio {
+                    Glyph::Volume
+                } else {
+                    Glyph::Eye
+                },
+                "",
+                MenuCommand::HideTrack(track_id, !track.hidden),
+            ));
+            entries.push(MenuEntry::separator());
+            drop(editor);
             let removable = edits::remove_track(self.editor.borrow().project(), track_id).is_ok();
             entries.push(MenuEntry::new(
                 format!("Select all on {label}"),
@@ -1346,7 +1435,7 @@ impl UiState {
         else {
             return;
         };
-        let (track_id, kind, label, hit) = {
+        let (track_id, kind, label, locked, hit) = {
             let editor = self.editor.borrow();
             let tracks = editor.project().tracks();
             let Some(track) = tracks.get(lane) else {
@@ -1364,6 +1453,7 @@ impl UiState {
                     "A"
                 }
             );
+            let label = track.display_name(&label);
             let frame = geometry.frame_at(point.x).max(0.0) as u64;
             let hit = (point.x >= geometry.left())
                 .then(|| {
@@ -1377,9 +1467,9 @@ impl UiState {
                         .map(|clip| (track.id, clip.id))
                 })
                 .flatten();
-            (track.id, track.kind, label, hit)
+            (track.id, track.kind, label, track.locked, hit)
         };
-        if point.x < geometry.left() {
+        if point.x < geometry.left() || locked {
             let entries = self.track_entries(Some((track_id, label.clone())));
             self.open_menu(point, format!("Track {label}"), entries);
             return;
@@ -1778,6 +1868,61 @@ mod tests {
     }
 
     #[test]
+    fn playhead_split_skips_locked_video_and_splits_unselected_audio_tracks() {
+        let state = UiState::new();
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "/tmp/footage.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(3_000_000),
+            has_audio: true,
+        })));
+        for track_id in [0, 2, 3] {
+            assert!(state.edit(Command::InsertClip {
+                track_id,
+                clip: Clip {
+                    id: track_id + 1,
+                    color: Default::default(),
+                    transition: None,
+                    start_frame: 0,
+                    source_start_frame: 0,
+                    duration_frames: 90,
+                    content: ClipContent::Media { media_id: 1 },
+                    volume: 1.0,
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
+                    muted: false,
+                    noise_reduction: false,
+                    linked_audio: false,
+                },
+            }));
+        }
+        assert!(state.edit(Command::SetTrackLocked {
+            track_id: 0,
+            locked: true
+        }));
+        state.program.position.set(30);
+        assert!(state.selected.peek().is_empty());
+        let original = state.editor.borrow().project().tracks().to_vec();
+        state.run(Action::Split);
+        assert_eq!(starts(&state, 2), vec![0, 30]);
+        assert_eq!(starts(&state, 3), vec![0, 30]);
+        assert_eq!(state.editor.borrow().project().tracks()[0], original[0]);
+        state.undo();
+        assert_eq!(state.editor.borrow().project().tracks(), original);
+        for track_id in [2, 3] {
+            assert!(state.edit(Command::SetTrackLocked {
+                track_id,
+                locked: true
+            }));
+        }
+        assert!(state.split_targets().is_empty());
+        let locked = state.editor.borrow().project().clone();
+        state.run(Action::Split);
+        assert_eq!(state.editor.borrow().project(), &locked);
+    }
+
+    #[test]
     fn insert_at_playhead_uses_the_next_free_compatible_track() {
         let state = UiState::new();
         assert!(state.edit(Command::ImportMedia(crate::media::Media {
@@ -1797,6 +1942,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                color: Default::default(),
                 transition: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
@@ -1944,6 +2090,7 @@ mod tests {
                     content: ClipContent::Media { media_id: 1 },
                     volume: 1.0,
                     muted: false,
+                    color: Default::default(),
                     transition: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
@@ -2002,6 +2149,7 @@ mod tests {
             content: ClipContent::Media { media_id: 1 },
             volume: 0.5,
             muted: false,
+            color: Default::default(),
             transition: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
@@ -2095,6 +2243,54 @@ mod tests {
         assert_eq!(plan.ghosts[0].start, 0);
         state.finish_drag();
         assert_eq!(starts(&state, 1), vec![0]);
+    }
+
+    #[test]
+    fn track_menu_offers_rename_order_lock_and_kind_specific_visibility() {
+        let state = UiState::new();
+        let entries = state.track_entries(Some((0, "V1".into())));
+        for label in [
+            "Rename track…",
+            "Move up",
+            "Move down",
+            "Lock track",
+            "Hide track",
+        ] {
+            assert!(entries.iter().any(|entry| entry.label == label));
+        }
+        assert!(
+            !entries
+                .iter()
+                .find(|entry| entry.label == "Move up")
+                .unwrap()
+                .enabled
+        );
+        state.run_menu(MenuCommand::RenameTrack(0));
+        assert_eq!(state.rename_track.peek(), Some(0));
+        state.track_name.set_value(" Main picture ");
+        state.apply_track_rename();
+        assert_eq!(
+            state.editor.borrow().project().tracks()[0].name,
+            "Main picture"
+        );
+        state.run_menu(MenuCommand::LockTrack(0, true));
+        assert!(
+            !state
+                .track_entries(Some((0, "Main picture".into())))
+                .iter()
+                .find(|entry| entry.label == "Delete track Main picture")
+                .unwrap()
+                .enabled
+        );
+        state.run_menu(MenuCommand::HideTrack(2, true));
+        assert!(
+            state
+                .track_entries(Some((2, "A1".into())))
+                .iter()
+                .any(|entry| entry.label == "Unmute track")
+        );
+        state.undo();
+        assert!(!state.editor.borrow().project().tracks()[2].hidden);
     }
 
     #[test]
@@ -2225,6 +2421,7 @@ mod tests {
                     content: ClipContent::Title(crate::timeline::Title::default()),
                     volume: 1.0,
                     muted: false,
+                    color: Default::default(),
                     transition: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
@@ -2380,7 +2577,7 @@ mod tests {
                 .unwrap_or_default()
         };
         let clip_point = Point {
-            x: 128.0 + 50.0,
+            x: super::super::timeline_view::HEADER_WIDTH + 50.0,
             y: 50.0,
         };
         state.open_timeline_menu(clip_point);

@@ -1,7 +1,9 @@
 use super::Project;
 use super::export_settings::LastExport;
 use crate::media::{Media, MediaKind};
-use crate::timeline::{Clip, ClipContent, Marker, Title, Track, TrackKind, Transition};
+use crate::timeline::{
+    Clip, ClipContent, ColorAdjust, Marker, Title, Track, TrackKind, Transition,
+};
 use std::collections::HashSet;
 
 pub(crate) fn split_tracks(
@@ -15,6 +17,9 @@ pub(crate) fn split_tracks(
     let mut changed = false;
     for &(track_id, clip_id) in targets {
         let track = tracks.iter_mut().find(|track| track.id == track_id)?;
+        if track.locked {
+            return None;
+        }
         let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) else {
             continue;
         };
@@ -54,6 +59,22 @@ pub enum Command {
         transition: Option<Transition>,
     },
     RenameProject(String),
+    RenameTrack {
+        track_id: u64,
+        name: String,
+    },
+    SetTrackLocked {
+        track_id: u64,
+        locked: bool,
+    },
+    SetTrackHidden {
+        track_id: u64,
+        hidden: bool,
+    },
+    MoveTrack {
+        track_id: u64,
+        down: bool,
+    },
     SetLastExport(Option<LastExport>),
     InsertClip {
         track_id: u64,
@@ -89,6 +110,11 @@ pub enum Command {
         start_frame: u64,
         source_start_frame: u64,
         duration_frames: u64,
+    },
+    SetClipColor {
+        track_id: u64,
+        clip_id: u64,
+        color: ColorAdjust,
     },
     SetClipAudio {
         track_id: u64,
@@ -135,7 +161,7 @@ fn ripple_delete(project: &Project, selection: &[(u64, u64)]) -> Option<Vec<Trac
         let clip = project
             .tracks
             .iter()
-            .find(|track| track.id == track_id)?
+            .find(|track| track.id == track_id && !track.locked)?
             .clips
             .iter()
             .find(|clip| clip.id == clip_id)?;
@@ -163,6 +189,9 @@ fn ripple_delete(project: &Project, selection: &[(u64, u64)]) -> Option<Vec<Trac
         .max()
         .unwrap_or(0);
     for track in &mut tracks {
+        if track.locked {
+            continue;
+        }
         track
             .clips
             .retain(|clip| !selected.contains(&(track.id, clip.id)));
@@ -170,6 +199,9 @@ fn ripple_delete(project: &Project, selection: &[(u64, u64)]) -> Option<Vec<Trac
     for (start, end) in merged.into_iter().rev() {
         let length = end - start;
         for track in &mut tracks {
+            if track.locked {
+                continue;
+            }
             let mut kept = Vec::with_capacity(track.clips.len());
             for mut clip in std::mem::take(&mut track.clips) {
                 let clip_end = clip.start_frame.checked_add(clip.duration_frames)?;
@@ -362,7 +394,111 @@ impl Editor {
     }
 
     fn execute(&mut self, command: Command) -> Option<Command> {
+        let editable = |id| {
+            self.project
+                .tracks
+                .iter()
+                .any(|track| track.id == id && !track.locked)
+        };
+        let allowed = match &command {
+            Command::InsertClip { track_id, .. }
+            | Command::RemoveClip { track_id, .. }
+            | Command::Split { track_id, .. }
+            | Command::Trim { track_id, .. }
+            | Command::SetClipAudio { track_id, .. }
+            | Command::SetClipColor { track_id, .. }
+            | Command::SetClipFades { track_id, .. }
+            | Command::SetClipNoiseReduction { track_id, .. }
+            | Command::SetTransition { track_id, .. }
+            | Command::SetTitle { track_id, .. } => editable(*track_id),
+            Command::Move {
+                track_id,
+                target_track_id,
+                ..
+            } => editable(*track_id) && editable(*target_track_id),
+            Command::ReplaceTracks(tracks) => self
+                .project
+                .tracks
+                .iter()
+                .filter(|track| track.locked)
+                .all(|old| {
+                    tracks.iter().any(|new| {
+                        new.id == old.id && new.kind == old.kind && new.clips == old.clips
+                    })
+                }),
+            _ => true,
+        };
+        if !allowed {
+            return None;
+        }
         match command {
+            Command::RenameTrack { track_id, name } => {
+                let name = name.trim().to_owned();
+                if !Track::valid_name(&name) {
+                    return None;
+                }
+                let track = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.id == track_id)?;
+                if track.name == name {
+                    return None;
+                }
+                Some(Command::RenameTrack {
+                    track_id,
+                    name: std::mem::replace(&mut track.name, name),
+                })
+            }
+            Command::SetTrackLocked { track_id, locked } => {
+                let track = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.id == track_id)?;
+                if track.locked == locked {
+                    return None;
+                }
+                Some(Command::SetTrackLocked {
+                    track_id,
+                    locked: std::mem::replace(&mut track.locked, locked),
+                })
+            }
+            Command::SetTrackHidden { track_id, hidden } => {
+                let track = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.id == track_id)?;
+                if track.hidden == hidden {
+                    return None;
+                }
+                Some(Command::SetTrackHidden {
+                    track_id,
+                    hidden: std::mem::replace(&mut track.hidden, hidden),
+                })
+            }
+            Command::MoveTrack { track_id, down } => {
+                let index = self
+                    .project
+                    .tracks
+                    .iter()
+                    .position(|track| track.id == track_id)?;
+                let kind = self.project.tracks[index].kind;
+                let target = if down {
+                    (index + 1..self.project.tracks.len())
+                        .find(|&i| self.project.tracks[i].kind == kind)
+                } else {
+                    (0..index)
+                        .rev()
+                        .find(|&i| self.project.tracks[i].kind == kind)
+                }?;
+                self.project.tracks.swap(index, target);
+                Some(Command::MoveTrack {
+                    track_id,
+                    down: !down,
+                })
+            }
             Command::RenameProject(name)
                 if name != self.project.name() && !name.trim().is_empty() =>
             {
@@ -389,6 +525,7 @@ impl Editor {
                         .source_start_frame
                         .checked_add(clip.duration_frames)
                         .is_none()
+                    || !clip.color.valid()
                     || !clip.volume.is_finite()
                     || !(0.0..=2.0).contains(&clip.volume)
                     || !clip.valid_fades()
@@ -640,6 +777,30 @@ impl Editor {
                 clip.clamp_fades();
                 self.execute(Command::ReplaceTracks(tracks))
             }
+            Command::SetClipColor {
+                track_id,
+                clip_id,
+                color,
+            } => {
+                if !color.valid() {
+                    return None;
+                }
+                let track = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.id == track_id && track.kind == TrackKind::Video)?;
+                let clip = track.clips.iter_mut().find(|clip| clip.id == clip_id)?;
+                if !matches!(clip.content, ClipContent::Media { .. }) || clip.color == color {
+                    return None;
+                }
+                let old = std::mem::replace(&mut clip.color, color);
+                Some(Command::SetClipColor {
+                    track_id,
+                    clip_id,
+                    color: old,
+                })
+            }
             Command::SetClipFades {
                 track_id,
                 clip_id,
@@ -838,7 +999,355 @@ impl Editor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn track_metadata_and_order_are_validated_and_undoable() {
+        let original = super::Project::new("Tracks");
+        let mut editor = super::Editor::new(original.clone());
+        use super::Command;
+        assert!(editor.apply(Command::RenameTrack {
+            track_id: 0,
+            name: "  Main picture  ".into()
+        }));
+        assert_eq!(editor.project().tracks()[0].name, "Main picture");
+        assert!(!editor.apply(Command::RenameTrack {
+            track_id: 0,
+            name: "x".repeat(33)
+        }));
+        assert!(!editor.apply(Command::RenameTrack {
+            track_id: 99,
+            name: "Missing".into()
+        }));
+        assert!(editor.apply(Command::SetTrackLocked {
+            track_id: 0,
+            locked: true
+        }));
+        assert!(editor.apply(Command::SetTrackHidden {
+            track_id: 0,
+            hidden: true
+        }));
+        assert!(!editor.apply(Command::MoveTrack {
+            track_id: 0,
+            down: false
+        }));
+        assert!(editor.apply(Command::MoveTrack {
+            track_id: 0,
+            down: true
+        }));
+        assert_eq!(editor.project().tracks()[1].id, 0);
+        for _ in 0..4 {
+            assert!(editor.undo());
+        }
+        assert_eq!(editor.project(), &original);
+        for _ in 0..4 {
+            assert!(editor.redo());
+        }
+        assert!(editor.project().tracks()[1].locked);
+        assert!(editor.apply(Command::RenameTrack {
+            track_id: 0,
+            name: String::new()
+        }));
+        assert_eq!(editor.project().tracks()[1].display_name("V2"), "V2");
+    }
+
+    #[test]
+    fn locked_tracks_refuse_clip_edits_and_survive_ripple_delete() {
+        use super::{Command, Editor, Project};
+        use crate::timeline::{Clip, ClipContent, Title};
+        let mut editor = Editor::new(Project::new("Locked"));
+        let clip = Clip {
+            color: ColorAdjust::default(),
+            transition: None,
+            id: 1,
+            start_frame: 0,
+            source_start_frame: 0,
+            duration_frames: 90,
+            content: ClipContent::Title(Title::default()),
+            volume: 1.0,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
+            muted: false,
+            noise_reduction: false,
+            linked_audio: false,
+        };
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 0,
+            clip: clip.clone()
+        }));
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 1,
+            clip: Clip {
+                id: 2,
+                ..clip.clone()
+            }
+        }));
+        assert!(editor.apply(Command::SetTrackLocked {
+            track_id: 0,
+            locked: true
+        }));
+        let locked = editor.project().clone();
+        for command in [
+            Command::InsertClip {
+                track_id: 0,
+                clip: Clip {
+                    id: 3,
+                    start_frame: 90,
+                    ..clip.clone()
+                },
+            },
+            Command::RemoveClip {
+                track_id: 0,
+                clip_id: 1,
+            },
+            Command::Split {
+                track_id: 0,
+                clip_id: 1,
+                at_frame: 30,
+                new_id: 3,
+            },
+            Command::Move {
+                track_id: 0,
+                target_track_id: 1,
+                clip_id: 1,
+                to_frame: 90,
+            },
+            Command::Move {
+                track_id: 1,
+                target_track_id: 0,
+                clip_id: 2,
+                to_frame: 90,
+            },
+            Command::Trim {
+                track_id: 0,
+                clip_id: 1,
+                start_frame: 0,
+                source_start_frame: 0,
+                duration_frames: 30,
+            },
+            Command::SetTitle {
+                track_id: 0,
+                clip_id: 1,
+                title: Title {
+                    text: "Changed".into(),
+                    ..Title::default()
+                },
+            },
+            Command::SetClipAudio {
+                track_id: 0,
+                clip_id: 1,
+                volume: 0.5,
+                muted: true,
+            },
+            Command::SetClipFades {
+                track_id: 0,
+                clip_id: 1,
+                fade_in_frames: 10,
+                fade_out_frames: 10,
+            },
+            Command::SetTransition {
+                track_id: 0,
+                clip_id: 1,
+                transition: Some(crate::timeline::Transition {
+                    kind: crate::timeline::TransitionKind::Fade,
+                    duration_frames: 10,
+                }),
+            },
+            Command::RippleDelete {
+                track_id: 0,
+                clip_id: 1,
+            },
+        ] {
+            assert!(!editor.apply(command));
+            assert_eq!(editor.project(), &locked);
+        }
+        let mut tracks = locked.tracks().to_vec();
+        tracks[0].clips.clear();
+        assert!(!editor.apply(Command::ReplaceTracks(tracks)));
+        let mut tracks = locked.tracks().to_vec();
+        tracks.remove(0);
+        assert!(!editor.apply(Command::ReplaceTracks(tracks)));
+        assert!(editor.apply(Command::RippleDelete {
+            track_id: 1,
+            clip_id: 2
+        }));
+        assert_eq!(editor.project().tracks()[0], locked.tracks()[0]);
+        assert!(editor.undo());
+        assert_eq!(editor.project(), &locked);
+    }
     use super::*;
+
+    #[test]
+    fn locked_tracks_reject_clip_color_changes() {
+        let mut editor = Editor::new(Project::new("Locked color"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "/color.png".into(),
+            kind: MediaKind::Image,
+            duration_us: None,
+            has_audio: false,
+        })));
+        let clip = serde_json::from_value(serde_json::json!({
+            "id": 1, "start_frame": 0, "source_start_frame": 0,
+            "duration_frames": 30, "content": {"media": {"media_id": 1}},
+            "volume": 1.0, "muted": false
+        }))
+        .unwrap();
+        assert!(editor.apply(Command::InsertClip { track_id: 0, clip }));
+        let command = Command::SetClipColor {
+            track_id: 0,
+            clip_id: 1,
+            color: ColorAdjust {
+                brightness: 0.2,
+                contrast: 1.3,
+                saturation: 0.5,
+            },
+        };
+        assert!(editor.apply(command.clone()));
+        assert!(editor.undo());
+        assert!(editor.apply(Command::SetTrackLocked {
+            track_id: 0,
+            locked: true
+        }));
+        let locked = editor.project().clone();
+        assert!(!editor.apply(command.clone()));
+        assert_eq!(editor.project(), &locked);
+        assert!(editor.undo());
+        assert!(editor.apply(command));
+    }
+
+    #[test]
+    fn clip_color_command_rejects_missing_clip() {
+        let mut editor = Editor::new(Project::new("Color"));
+        assert!(!editor.apply(Command::SetClipColor {
+            track_id: 0,
+            clip_id: 1,
+            color: ColorAdjust::default()
+        }));
+    }
+
+    #[test]
+    fn clip_color_validation_undo_and_serialization() {
+        let mut editor = Editor::new(Project::new("Color"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "/color.png".into(),
+            kind: MediaKind::Image,
+            duration_us: None,
+            has_audio: false
+        })));
+        let clip = Clip {
+            id: 1,
+            start_frame: 0,
+            source_start_frame: 0,
+            duration_frames: 30,
+            content: ClipContent::Media { media_id: 1 },
+            volume: 1.0,
+            muted: false,
+            noise_reduction: false,
+            linked_audio: false,
+            color: ColorAdjust::default(),
+            transition: None,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
+        };
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 0,
+            clip: clip.clone()
+        }));
+        let json = crate::project::format::to_json(editor.project()).unwrap();
+        assert!(!json.contains("\"brightness\""));
+        assert_eq!(
+            crate::project::format::to_json(&crate::project::format::from_json(&json).unwrap())
+                .unwrap(),
+            json
+        );
+        let command = |color| Command::SetClipColor {
+            track_id: 0,
+            clip_id: 1,
+            color,
+        };
+        assert!(!editor.apply(command(ColorAdjust::default())));
+        for color in [
+            ColorAdjust {
+                brightness: f32::NAN,
+                ..Default::default()
+            },
+            ColorAdjust {
+                brightness: 1.1,
+                ..Default::default()
+            },
+            ColorAdjust {
+                contrast: -0.1,
+                ..Default::default()
+            },
+            ColorAdjust {
+                saturation: 2.1,
+                ..Default::default()
+            },
+        ] {
+            assert!(!editor.apply(command(color)));
+            let mut invalid = clip.clone();
+            invalid.id = 2;
+            invalid.start_frame = 30;
+            invalid.color = color;
+            assert!(!editor.apply(Command::InsertClip {
+                track_id: 0,
+                clip: invalid
+            }));
+        }
+        let color = ColorAdjust {
+            brightness: 0.2,
+            contrast: 1.3,
+            saturation: 0.0,
+        };
+        assert!(editor.apply(command(color)));
+        assert!(!editor.apply(command(color)));
+        let json = crate::project::format::to_json(editor.project()).unwrap();
+        assert_eq!(
+            crate::project::format::from_json(&json).unwrap().tracks()[0].clips[0].color,
+            color
+        );
+        let invalid = json.replace("\"brightness\": 0.2", "\"brightness\": 2.0");
+        assert!(crate::project::format::from_json(&invalid).is_err());
+        assert!(editor.undo());
+        assert!(editor.project().tracks()[0].clips[0].color.neutral());
+        assert!(editor.redo());
+        assert_eq!(editor.project().tracks()[0].clips[0].color, color);
+        let split = split_tracks(editor.project().tracks(), &[(0, 1)], 15, 10).unwrap();
+        assert!(split[0].clips.iter().all(|clip| clip.color == color));
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 1,
+            clip: Clip {
+                id: 2,
+                content: ClipContent::Title(Title::default()),
+                ..clip.clone()
+            }
+        }));
+        assert!(!editor.apply(Command::SetClipColor {
+            track_id: 1,
+            clip_id: 2,
+            color
+        }));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 2,
+            path: "/sound.wav".into(),
+            kind: MediaKind::Audio,
+            duration_us: Some(1_000_000),
+            has_audio: true
+        })));
+        assert!(editor.apply(Command::InsertClip {
+            track_id: 2,
+            clip: Clip {
+                id: 3,
+                content: ClipContent::Media { media_id: 2 },
+                ..clip
+            }
+        }));
+        assert!(!editor.apply(Command::SetClipColor {
+            track_id: 2,
+            clip_id: 3,
+            color
+        }));
+    }
 
     #[test]
     fn saved_checkpoint_survives_undo_redo_but_not_a_diverging_branch() {
@@ -969,6 +1478,7 @@ mod tests {
                 noise_reduction: false,
                 transition: None,
                 linked_audio: true,
+                color: Default::default(),
             }
         }));
         let before = editor.project().clone();
@@ -1030,6 +1540,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                color: Default::default(),
                 transition: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
@@ -1107,6 +1618,7 @@ mod tests {
             content: ClipContent::Media { media_id: 1 },
             volume: 1.0,
             muted: false,
+            color: Default::default(),
             transition: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
@@ -1187,6 +1699,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            color: Default::default(),
             transition: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
@@ -1234,6 +1747,7 @@ mod tests {
                 content: ClipContent::Title(title.clone()),
                 volume: 1.0,
                 muted: false,
+                color: Default::default(),
                 transition: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
@@ -1367,6 +1881,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            color: Default::default(),
             transition: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
@@ -1450,6 +1965,7 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 0.75,
             muted: true,
+            color: Default::default(),
             transition: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
@@ -1552,6 +2068,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            color: Default::default(),
             transition: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
@@ -1644,6 +2161,7 @@ mod tests {
                     },
                     volume: if id == 2 { 0.4 } else { 1.0 },
                     muted: id == 2,
+                    color: Default::default(),
                     transition: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
@@ -1700,6 +2218,7 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 1.0,
             muted: false,
+            color: Default::default(),
             transition: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
@@ -1724,6 +2243,7 @@ mod tests {
                     content: ClipContent::Media { media_id: 1 },
                     volume: 0.5,
                     muted: true,
+                    color: Default::default(),
                     transition: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
@@ -1793,6 +2313,7 @@ mod tests {
                     content: ClipContent::Title(Title::default()),
                     volume: 1.0,
                     muted: false,
+                    color: Default::default(),
                     transition: None,
                     fade_in_frames: 0,
                     fade_out_frames: 0,
@@ -1827,6 +2348,7 @@ mod tests {
             content: ClipContent::Media { media_id: 1 },
             volume: 1.0,
             muted: false,
+            color: Default::default(),
             transition: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
@@ -1870,6 +2392,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                color: Default::default(),
                 transition: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
@@ -1892,6 +2415,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                color: Default::default(),
                 transition: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
@@ -1929,6 +2453,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                color: Default::default(),
                 transition: None,
                 fade_in_frames: 0,
                 fade_out_frames: 0,
@@ -2021,5 +2546,14 @@ mod tests {
         let mut invalid = editor.project().tracks().to_vec();
         invalid[2].clips[0].fade_out_frames = 100;
         assert!(!editor.apply(Command::ReplaceTracks(invalid)));
+        assert!(editor.apply(Command::SetTrackLocked {
+            track_id: 2,
+            locked: true
+        }));
+        let locked = editor.project().clone();
+        assert!(!editor.apply(fades(2, 10, 10)));
+        assert_eq!(editor.project(), &locked);
+        assert!(editor.undo());
+        assert!(editor.apply(fades(2, 10, 10)));
     }
 }

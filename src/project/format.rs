@@ -57,6 +57,28 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn version_one_track_metadata_is_optional_and_round_trips() {
+        let original = Project::new("Legacy");
+        let json = to_json(&original).unwrap();
+        assert!(!json.contains("locked"));
+        assert!(!json.contains("hidden"));
+        assert_eq!(from_json(&json).unwrap(), original);
+        let mut document: serde_json::Value = serde_json::from_str(&json).unwrap();
+        document["tracks"][0]["name"] = "Main picture".into();
+        document["tracks"][0]["locked"] = true.into();
+        document["tracks"][0]["hidden"] = true.into();
+        let project = from_json(&document.to_string()).unwrap();
+        assert_eq!(project.tracks()[0].name, "Main picture");
+        assert!(project.tracks()[0].locked && project.tracks()[0].hidden);
+        assert_eq!(from_json(&to_json(&project).unwrap()).unwrap(), project);
+        assert_eq!(PROJECT_VERSION, 1);
+        for name in [" untrimmed", "line\nbreak", &"x".repeat(33)] {
+            document["tracks"][0]["name"] = name.into();
+            assert!(from_json(&document.to_string()).is_err());
+        }
+    }
+
+    #[test]
     fn transitions_round_trip_and_validate_without_changing_version() {
         let mut document = serde_json::to_value(Project::new("Transitions")).unwrap();
         document["version"] = 1.into();
@@ -119,6 +141,7 @@ mod tests {
             content: ClipContent::Media { media_id: 4 },
             volume: 1.0,
             muted: false,
+            color: Default::default(),
             transition: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
@@ -145,6 +168,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            color: Default::default(),
             transition: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
@@ -237,6 +261,7 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 1.0,
             muted: false,
+            color: Default::default(),
             transition: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
@@ -323,6 +348,7 @@ mod tests {
             content: ClipContent::Media { media_id: 8 },
             volume: 1.0,
             muted: false,
+            color: Default::default(),
             transition: None,
             fade_in_frames: 0,
             fade_out_frames: 0,

@@ -190,6 +190,7 @@ impl AudioPlan {
         let sources = project
             .tracks()
             .iter()
+            .filter(|track| !track.hidden)
             .flat_map(|track| {
                 track.clips.iter().filter_map(|clip| {
                     let ClipContent::Media { media_id } = clip.content else {
@@ -842,6 +843,30 @@ mod tests {
             clip(12, 3, 40, false, true, 1.0)
         ]);
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn hidden_tracks_exclude_linked_video_and_audio_but_keep_the_clock() {
+        let project = mixed_project();
+        let expected_end = AudioPlan::from_project(&project).end;
+        let mut value = serde_json::to_value(&project).unwrap();
+        for track in value["tracks"].as_array_mut().unwrap() {
+            track["hidden"] = true.into();
+        }
+        let hidden: Project = serde_json::from_value(value.clone()).unwrap();
+        let plan = AudioPlan::from_project(&hidden);
+        assert!(plan.sources.is_empty());
+        assert_eq!(plan.end, expected_end);
+        value["tracks"][1]["hidden"] = false.into();
+        let one: Project = serde_json::from_value(value).unwrap();
+        let plan = AudioPlan::from_project(&one);
+        assert_eq!(plan.sources.len(), 1);
+        assert_eq!(plan.sources[0].start, 5);
+        assert!(
+            AudioPlan::without_media(&one, &HashSet::from([1]))
+                .sources
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1550,6 +1575,7 @@ mod tests {
                 muted: false,
                 noise_reduction: false,
                 linked_audio: false,
+                color: Default::default(),
             },
         }));
         let dry_plan = Arc::new(AudioPlan::from_project(editor.project()));

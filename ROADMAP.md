@@ -176,7 +176,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [ ] Animated title templates
 
 **Automation**
-- [ ] Local automatic subtitles (Whisper)
+- [x] Local automatic subtitles (Whisper)
 - [x] Automatic silence removal
 
 **Export**

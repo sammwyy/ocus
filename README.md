@@ -12,7 +12,7 @@
 
 - **Cut and arrange.** Import video, audio, and stills; then trim, split, snap, and layer clips on a multitrack timeline. Use markers to find your place and undo or redo project edits.
 - **Refine the picture.** Preview clips in **Source** and the whole sequence in **Program**. Add transitions, change clip speed, remove green/blue screens with Chroma key, adjust color or apply a `.cube` LUT, and position picture-in-picture overlays.
-- **Add titles and subtitles.** Style text directly on your footage or import an SRT file. Burn subtitles into a video or write an SRT alongside it.
+- **Add titles and subtitles.** Style text directly on your footage, import an SRT file, or generate subtitles locally with Whisper. Burn subtitles into a video or write an SRT alongside it. The first generation downloads a multilingual base model (~142 MB); audio stays on your computer.
 - **Shape the sound.** See waveforms on the timeline, keep sound linked to its video or detach it, and adjust volume, fades, loudness, and noise reduction per clip.
 - **Export for your destination.** Start with H.264/AAC MP4, pick a preset for vertical or square video, or export WebM, animated GIF, or audio-only WAV.
 
@@ -24,7 +24,7 @@ On Ubuntu/Debian, install the build dependencies:
 
 ```sh
 sudo apt update
-sudo apt install build-essential pkg-config libclang-dev \
+sudo apt install build-essential cmake pkg-config libclang-dev \
   libavformat-dev libavcodec-dev libavfilter-dev libavutil-dev \
   libswscale-dev libswresample-dev libasound2-dev libdbus-1-dev \
   libudev-dev libwayland-dev libxkbcommon-dev

@@ -21,7 +21,7 @@ jobs:
       - name: Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config ffmpeg libavformat-dev libavcodec-dev libavfilter-dev libavutil-dev libswscale-dev libswresample-dev libclang-dev libasound2-dev libudev-dev libdbus-1-dev libwayland-dev libxkbcommon-dev
+          sudo apt-get install -y build-essential cmake pkg-config ffmpeg libavformat-dev libavcodec-dev libavfilter-dev libavutil-dev libswscale-dev libswresample-dev libclang-dev libasound2-dev libudev-dev libdbus-1-dev libwayland-dev libxkbcommon-dev
       - uses: Swatinem/rust-cache@v2
       - name: Run release benchmarks
         run: cargo bench --locked --bench performance

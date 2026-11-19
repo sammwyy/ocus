@@ -30,7 +30,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libavformat-dev libavcodec-dev libavfilter-dev libavutil-dev libswscale-dev libswresample-dev libclang-dev libasound2-dev libudev-dev libdbus-1-dev libxkbcommon-dev libfuse2 patchelf desktop-file-utils
+          sudo apt-get install -y build-essential cmake pkg-config libavformat-dev libavcodec-dev libavfilter-dev libavutil-dev libswscale-dev libswresample-dev libclang-dev libasound2-dev libudev-dev libdbus-1-dev libxkbcommon-dev libfuse2 patchelf desktop-file-utils
       - name: macOS dependencies
         if: runner.os == 'macOS'
         run: |

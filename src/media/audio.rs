@@ -1977,9 +1977,9 @@ mod tests {
 
     #[test]
     fn noise_reduction_reaches_playback_and_wav_export() {
-        use crate::export::{ExportControl, render_with_settings};
+        use crate::export::queue::{Queue, Request};
         use crate::project::edit::{Command, Editor};
-        use crate::project::export_settings::{Container, ExportSettings};
+        use crate::project::export_settings::{Container, ExportSettings, LastExport};
 
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("noise.wav");
@@ -2058,14 +2058,24 @@ mod tests {
                 project_settings.frame_rate.clone(),
             );
             settings.container = Container::Wav;
-            let output = dir.path().join("denoised.wav");
-            render_with_settings(
-                editor.project(),
-                &output,
-                &settings,
-                Arc::new(ExportControl::default()),
-            )
-            .unwrap();
+            let output = dir.path().join(format!("denoised-{speed}x.wav"));
+            let mut queue = Queue::default();
+            queue
+                .enqueue(Request {
+                    project: editor.project().clone(),
+                    output: LastExport {
+                        path: output.clone(),
+                        settings,
+                    },
+                    total: plan.end,
+                    auto_number: false,
+                })
+                .unwrap();
+            let work = queue.start_next().unwrap();
+            let id = work.id;
+            let (destination, result) = work.render(|path| queue.set_active_path(id, path));
+            queue.finish(id, destination.path, &result);
+            result.unwrap();
             let cancelled = Arc::new(AtomicBool::new(false));
             let mut exported = Vec::new();
             AudioReader::open(&output, 0, plan.fps, cancelled.clone())

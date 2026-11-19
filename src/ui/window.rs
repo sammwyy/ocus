@@ -3,7 +3,7 @@ use super::controls::{
     Thumb, VIDEO, ZoomSlider, accent, accent_button, background, border, chip, faint, fit, glyph,
     heading, icon_button, kind_color, list_row, media_item, menu_row, muted, panel, panel_raised,
     play_button, secondary_button, segment, short_duration, sized_icon_button, surface,
-    surface_hover, text, text_color, timecode, tool_button,
+    surface_hover, text, text_color, timecode, tool_button, with_help,
 };
 use super::edits::ClipRef;
 use super::interaction::{Action, DragPayload, MenuState};
@@ -1892,6 +1892,19 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         true,
                         state,
                         |s| set_clip_audio(s, |clip| (clip.volume, !clip.muted)),
+                    )),
+                    inline(with_help(
+                        secondary_button(
+                            None,
+                            "Normalize loudness",
+                            true,
+                            state,
+                            UiState::normalize_loudness,
+                        ),
+                        Help::new(
+                            "Set volume so this clip plays at a standard loudness (-14 LUFS)",
+                        ),
+                        state,
                     )),
                     if clip.linked_audio {
                         inline(secondary_button(

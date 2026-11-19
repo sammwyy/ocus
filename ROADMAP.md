@@ -120,7 +120,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [ ] LUT support (.cube)
 - [x] Audio waveforms on the timeline and in the Source monitor
 - [ ] Audio fade in and fade out
-- [ ] Loudness normalization
+- [x] Loudness normalization
 - [ ] Noise reduction
 
 ### v0.7: Subtitles and keyframes

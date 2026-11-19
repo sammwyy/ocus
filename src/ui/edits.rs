@@ -243,6 +243,7 @@ pub(crate) fn title_clip(project: &Project, placement: Option<(u64, u64)>) -> Op
     Some((
         track.id,
         Clip {
+            lut: None,
             id,
             start_frame,
             source_start_frame: 0,
@@ -395,6 +396,7 @@ pub(crate) fn insert_media(
         None => track.clips.iter().map(clip_end).max().unwrap_or(0),
     };
     let clip = Clip {
+        lut: None,
         id: next_clip_id(project).ok_or("Clip ID limit reached")?,
         start_frame: start,
         source_start_frame: 0,
@@ -515,7 +517,11 @@ pub(crate) fn detach_audio(project: &Project, selection: &[ClipRef]) -> Option<P
             continue;
         };
         clip.linked_audio = false;
-        detached.push(Clip { id, ..clip.clone() });
+        detached.push(Clip {
+            id,
+            lut: None,
+            ..clip.clone()
+        });
         clip.fade_in_frames = 0;
         clip.fade_out_frames = 0;
         kept.push((track_id, clip_id));
@@ -614,6 +620,7 @@ mod tests {
 
     fn title(id: u64, start_frame: u64) -> Clip {
         Clip {
+            lut: None,
             id,
             start_frame,
             source_start_frame: 0,
@@ -747,6 +754,43 @@ mod tests {
         assert_eq!(pasted.selection, vec![(0, 4), (1, 5)]);
         assert_eq!(pasted.tracks[1].clips[1].start_frame, 150);
         assert!(paste_clips(&project, &copied, 10).is_none());
+    }
+
+    #[test]
+    fn copied_video_keeps_lut_and_detached_audio_drops_it() {
+        let mut editor = Editor::new(Project::new("LUT copies"));
+        assert!(editor.apply(Command::ImportMedia(Media {
+            id: 1,
+            path: "scene.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(3_000_000),
+            has_audio: true
+        })));
+        let inserted = insert_media(editor.project(), 1, Some((0, 0))).unwrap();
+        assert!(editor.apply(inserted.command));
+        let path = Some(std::path::PathBuf::from("look.cube"));
+        assert!(editor.apply(Command::SetClipLut {
+            track_id: 0,
+            clip_id: 1,
+            path: path.clone()
+        }));
+        let copied = CopiedClip {
+            track_id: 0,
+            track_kind: TrackKind::Video,
+            clip: editor.project().tracks()[0].clips[0].clone(),
+        };
+        let pasted = paste_clips(editor.project(), &[copied], 90).unwrap();
+        assert!(editor.apply(Command::ReplaceTracks(pasted.tracks)));
+        assert!(
+            editor.project().tracks()[0]
+                .clips
+                .iter()
+                .all(|clip| clip.lut == path)
+        );
+        let detached = detach_audio(editor.project(), &[(0, 1)]).unwrap();
+        assert!(editor.apply(Command::ReplaceTracks(detached.tracks)));
+        assert!(editor.project().tracks()[2].clips[0].lut.is_none());
+        assert_eq!(editor.project().tracks()[0].clips[0].lut, path);
     }
 
     #[test]

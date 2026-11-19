@@ -2367,6 +2367,40 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         rows.push(section("Timing", timing));
         if track_kind == TrackKind::Video {
             rows.push(transition_section(state, &clip, busy));
+            if matches!(clip.content, ClipContent::Media { .. }) {
+                let clip_id = clip.id;
+                let name = clip
+                    .lut
+                    .as_ref()
+                    .and_then(|path| path.file_name())
+                    .map_or_else(|| "None".into(), |name| name.to_string_lossy().into_owned());
+                rows.push(section(
+                    "Color LUT",
+                    vec![
+                        property("LUT", name),
+                        inline(secondary_button(
+                            None,
+                            "Choose .cube file…",
+                            !busy,
+                            state,
+                            move |state| state.choose_lut(track_id, clip_id),
+                        )),
+                        inline(secondary_button(
+                            None,
+                            "Clear LUT",
+                            !busy && clip.lut.is_some(),
+                            state,
+                            move |state| {
+                                state.edit(Command::SetClipLut {
+                                    track_id,
+                                    clip_id,
+                                    path: None,
+                                });
+                            },
+                        )),
+                    ],
+                ));
+            }
         }
         if let ClipContent::Title(title) = &clip.content {
             rows.push(section(
@@ -5028,6 +5062,7 @@ mod tests {
 
     fn destination_clip(start_frame: u64, duration_frames: u64) -> Clip {
         Clip {
+            lut: None,
             id: 10,
             start_frame,
             source_start_frame: 0,
@@ -6863,6 +6898,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                lut: None,
                 transition_out: None,
                 id: 1,
                 start_frame: 0,
@@ -6950,6 +6986,7 @@ mod tests {
                 track_id,
                 clip: Clip {
                     id: id + 100,
+                    lut: None,
                     transition_out: None,
                     start_frame: 400,
                     source_start_frame: 0,
@@ -7262,6 +7299,51 @@ mod tests {
     }
 
     #[test]
+    fn lut_inspector_shows_media_filename_but_not_titles_or_audio() {
+        let state = UiState::new();
+        state.run(Action::AddTitle);
+        assert!(
+            !render(&state, 1280.0, 1100.0)
+                .labels
+                .iter()
+                .any(|label| label == "LUT")
+        );
+        for (id, kind, path) in [
+            (1, MediaKind::Video, "/scene.mp4"),
+            (2, MediaKind::Audio, "/sound.wav"),
+        ] {
+            assert!(state.edit(Command::ImportMedia(Media {
+                id,
+                path: path.into(),
+                kind,
+                duration_us: Some(1_000_000),
+                has_audio: false
+            })));
+            state.insert_media(id);
+            let labels = render(&state, 1280.0, 1100.0).labels;
+            assert_eq!(
+                labels.iter().any(|label| label == "LUT"),
+                kind == MediaKind::Video
+            );
+            if kind == MediaKind::Video {
+                assert!(labels.iter().any(|label| label == "Choose .cube file…"));
+                let (track_id, clip) = selected_clip(&state).unwrap();
+                assert!(state.edit(Command::SetClipLut {
+                    track_id,
+                    clip_id: clip.id,
+                    path: Some("/looks/summer.cube".into())
+                }));
+                assert!(
+                    render(&state, 1280.0, 1100.0)
+                        .labels
+                        .iter()
+                        .any(|label| label == "summer.cube")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn inspector_source_steps_preserve_length_and_clamp_to_media() {
         let state = UiState::new();
         assert!(state.edit(Command::ImportMedia(Media {
@@ -7274,6 +7356,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
             clip: Clip {
+                lut: None,
                 id: 1,
                 start_frame: 0,
                 source_start_frame: 0,

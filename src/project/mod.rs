@@ -136,9 +136,14 @@ impl Project {
             }
             let mut end = 0;
             for clip in &track.clips {
-                if clip.transition.as_ref().is_some_and(|transition| {
-                    track.kind != TrackKind::Video || transition.duration_frames == 0
-                }) {
+                if clip
+                    .transition
+                    .iter()
+                    .chain(&clip.transition_out)
+                    .any(|transition| {
+                        track.kind != TrackKind::Video || transition.duration_frames == 0
+                    })
+                {
                     return Err("Transitions need a video track and a positive duration".into());
                 }
                 let next = clip

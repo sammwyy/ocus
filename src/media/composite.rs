@@ -242,64 +242,148 @@ fn draw_transformed(
         bounds[2] = bounds[2].max(x);
         bounds[3] = bounds[3].max(y);
     }
+    let integer_translation = transform.scale == 1.0
+        && transform.rotation == 0.0
+        && (transform.x * width as f32).fract() == 0.0
+        && (transform.y * height as f32).fract() == 0.0;
+    let source_pixels = image.pixels.as_chunks::<4>().0;
+    let x_bounds =
+        (bounds[0].floor().max(0.0) as u32)..(bounds[2].ceil().min(width as f32).max(0.0) as u32);
     for y in
         (bounds[1].floor().max(0.0) as u32)..(bounds[3].ceil().min(height as f32).max(0.0) as u32)
     {
-        for x in (bounds[0].floor().max(0.0) as u32)
-            ..(bounds[2].ceil().min(width as f32).max(0.0) as u32)
-        {
+        let delta_y = y as f32 + 0.5 - offset_y;
+        let source_x = |x: u32| {
             let delta_x = x as f32 + 0.5 - offset_x;
-            let delta_y = y as f32 + 0.5 - offset_y;
-            let source_x = center_x + (cosine * delta_x + sine * delta_y) / transform.scale;
-            let source_y = center_y + (-sine * delta_x + cosine * delta_y) / transform.scale;
-            if source_x < crop_left
-                || source_x >= crop_right
-                || source_y < crop_top
-                || source_y >= crop_bottom
+            center_x + (cosine * delta_x + sine * delta_y) / transform.scale
+        };
+        let source_y = |x: u32| {
+            let delta_x = x as f32 + 0.5 - offset_x;
+            center_y + (-sine * delta_x + cosine * delta_y) / transform.scale
+        };
+        let mut span = x_bounds.clone();
+        clip_span(&mut span, crop_left, crop_right, cosine >= 0.0, source_x);
+        clip_span(&mut span, crop_top, crop_bottom, sine <= 0.0, source_y);
+        if span.is_empty() {
+            continue;
+        }
+        let row_start = (y as usize * width as usize + span.start as usize) * 4;
+        let row_end = (y as usize * width as usize + span.end as usize) * 4;
+        let destination_row = destination[row_start..row_end].as_chunks_mut::<4>().0;
+        if integer_translation {
+            let source_start = source_y(span.start) as usize * image.width as usize
+                + source_x(span.start) as usize;
+            for (dest, pixel) in destination_row
+                .iter_mut()
+                .zip(&source_pixels[source_start..source_start + span.len()])
             {
-                continue;
+                let mut rgba = *pixel;
+                rgba[3] = (pixel[3] as f32 * transform.opacity).round() as u8;
+                blend(dest, &rgba);
             }
-            let sample_x = (source_x - 0.5).clamp(left as f32, (left + picture_width - 1) as f32);
-            let sample_y = (source_y - 0.5).clamp(top as f32, (top + picture_height - 1) as f32);
-            let sample_left = sample_x.floor() as u32;
-            let sample_top = sample_y.floor() as u32;
-            let mut sample = [0.0; 4];
-            for (pixel_x, weight_x) in [
-                (sample_left, 1.0 - (sample_x - sample_left as f32)),
-                (
-                    (sample_left + 1).min(left + picture_width - 1),
-                    sample_x - sample_left as f32,
-                ),
-            ] {
-                for (pixel_y, weight_y) in [
-                    (sample_top, 1.0 - (sample_y - sample_top as f32)),
-                    (
-                        (sample_top + 1).min(top + picture_height - 1),
-                        sample_y - sample_top as f32,
-                    ),
+            continue;
+        }
+        for (x, dest) in span.zip(destination_row) {
+            let sample_x =
+                (source_x(x) - 0.5).clamp(left as f32, (left + picture_width - 1) as f32);
+            let sample_y = (source_y(x) - 0.5).clamp(top as f32, (top + picture_height - 1) as f32);
+            let sample_left = sample_x as u32;
+            let sample_top = sample_y as u32;
+            let sample_right = (sample_left + 1).min(left + picture_width - 1);
+            let sample_bottom = (sample_top + 1).min(top + picture_height - 1);
+            let taps = [
+                source_pixels[(sample_top * image.width + sample_left) as usize],
+                source_pixels[(sample_bottom * image.width + sample_left) as usize],
+                source_pixels[(sample_top * image.width + sample_right) as usize],
+                source_pixels[(sample_bottom * image.width + sample_right) as usize],
+            ];
+            let fraction_x = sample_x - sample_left as f32;
+            let fraction_y = sample_y - sample_top as f32;
+            let mut rgba = [0; 4];
+            if taps.iter().all(|pixel| pixel[3] == 255) {
+                // Q12 fractions give Q24 weights; even 255 * 2^24 fits u32.
+                let weight_x = (fraction_x * 4096.0 + 0.5) as u32;
+                let weight_y = (fraction_y * 4096.0 + 0.5) as u32;
+                let weights = [
+                    (4096 - weight_x) * (4096 - weight_y),
+                    (4096 - weight_x) * weight_y,
+                    weight_x * (4096 - weight_y),
+                    weight_x * weight_y,
+                ];
+                for channel in 0..3 {
+                    rgba[channel] = ((u32::from(taps[0][channel]) * weights[0]
+                        + u32::from(taps[1][channel]) * weights[1]
+                        + u32::from(taps[2][channel]) * weights[2]
+                        + u32::from(taps[3][channel]) * weights[3]
+                        + (1 << 23))
+                        >> 24) as u8;
+                }
+                let alpha = 255.0 * (1.0 - fraction_x) * (1.0 - fraction_y)
+                    + 255.0 * (1.0 - fraction_x) * fraction_y
+                    + 255.0 * fraction_x * (1.0 - fraction_y)
+                    + 255.0 * fraction_x * fraction_y;
+                rgba[3] = (alpha * transform.opacity).round() as u8;
+            } else {
+                let mut sample = [0.0; 4];
+                for (pixel, weight_x, weight_y) in [
+                    (taps[0], 1.0 - fraction_x, 1.0 - fraction_y),
+                    (taps[1], 1.0 - fraction_x, fraction_y),
+                    (taps[2], fraction_x, 1.0 - fraction_y),
+                    (taps[3], fraction_x, fraction_y),
                 ] {
-                    let pixel_offset = ((pixel_y * image.width + pixel_x) * 4) as usize;
-                    let source_alpha = image.pixels[pixel_offset + 3] as f32 / 255.0;
+                    let source_alpha = pixel[3] as f32 / 255.0;
                     for (channel, value) in sample.iter_mut().enumerate() {
-                        *value += image.pixels[pixel_offset + channel] as f32
+                        *value += pixel[channel] as f32
                             * weight_x
                             * weight_y
                             * if channel == 3 { 1.0 } else { source_alpha };
                     }
                 }
-            }
-            let alpha = sample[3];
-            let mut rgba = [0; 4];
-            if alpha > 0.0 {
-                for channel in 0..3 {
-                    rgba[channel] = (sample[channel] * 255.0 / alpha).round() as u8;
+                let alpha = sample[3];
+                if alpha > 0.0 {
+                    for channel in 0..3 {
+                        rgba[channel] = (sample[channel] * 255.0 / alpha).round() as u8;
+                    }
                 }
+                rgba[3] = (alpha * transform.opacity).round() as u8;
             }
-            rgba[3] = (alpha * transform.opacity).round() as u8;
-            let pixel_offset = ((y * width + x) * 4) as usize;
-            blend(&mut destination[pixel_offset..pixel_offset + 4], &rgba);
+            blend(dest, &rgba);
         }
     }
+}
+
+// Each inverse-mapped axis is monotonic along a destination row. Searching with
+// the sampler's f32 expression preserves its inclusive/exclusive crop edges.
+fn clip_span(
+    span: &mut std::ops::Range<u32>,
+    minimum: f32,
+    maximum: f32,
+    increasing: bool,
+    coordinate: impl Fn(u32) -> f32,
+) {
+    let partition = |mut start: u32, mut end: u32, threshold: f32| {
+        while start < end {
+            let middle = start + (end - start) / 2;
+            let value = coordinate(middle);
+            if if increasing {
+                value < threshold
+            } else {
+                value >= threshold
+            } {
+                start = middle + 1;
+            } else {
+                end = middle;
+            }
+        }
+        start
+    };
+    let (first, last) = if increasing {
+        (minimum, maximum)
+    } else {
+        (maximum, minimum)
+    };
+    span.start = partition(span.start, span.end, first);
+    span.end = partition(span.start, span.end, last);
 }
 
 #[derive(Default)]
@@ -490,6 +574,377 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn transformed_sampler_matches_original() {
+        let mut seed = 0x9e37_79b9_u32;
+        let mut random = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        let mut transforms = vec![
+            Transform::default(),
+            Transform {
+                scale: 0.5,
+                x: 0.2,
+                rotation: 15.0,
+                crop_left: 0.1,
+                opacity: 0.8,
+                ..Default::default()
+            },
+            Transform {
+                x: -0.25,
+                y: 0.25,
+                crop_left: 0.13,
+                crop_bottom: 0.2,
+                opacity: 0.5,
+                ..Default::default()
+            },
+            Transform {
+                rotation: 360.0,
+                ..Default::default()
+            },
+            Transform {
+                rotation: -360.0,
+                ..Default::default()
+            },
+            Transform {
+                rotation: 90.0,
+                ..Default::default()
+            },
+            Transform {
+                rotation: -90.0,
+                ..Default::default()
+            },
+            Transform {
+                rotation: 180.0,
+                ..Default::default()
+            },
+            Transform {
+                rotation: 15.0,
+                opacity: 0.5,
+                ..Default::default()
+            },
+            Transform {
+                scale: 0.1,
+                rotation: -37.0,
+                ..Default::default()
+            },
+            Transform {
+                scale: 4.0,
+                rotation: 137.0,
+                ..Default::default()
+            },
+            Transform {
+                x: 1.0,
+                y: -1.0,
+                ..Default::default()
+            },
+            Transform {
+                crop_left: 0.999,
+                crop_top: 0.999,
+                ..Default::default()
+            },
+            Transform {
+                opacity: 0.0,
+                ..Default::default()
+            },
+        ];
+        for _ in 0..32 {
+            transforms.push(Transform {
+                scale: 0.1 + (random() % 3901) as f32 / 1000.0,
+                x: (random() % 2001) as f32 / 1000.0 - 1.0,
+                y: (random() % 2001) as f32 / 1000.0 - 1.0,
+                rotation: (random() % 72001) as f32 / 100.0 - 360.0,
+                crop_left: (random() % 400) as f32 / 1000.0,
+                crop_right: (random() % 400) as f32 / 1000.0,
+                crop_top: (random() % 400) as f32 / 1000.0,
+                crop_bottom: (random() % 400) as f32 / 1000.0,
+                opacity: (random() % 1001) as f32 / 1000.0,
+            });
+        }
+        for (width, height, picture) in [
+            (1, 1, (0, 0, 1, 1)),
+            (16, 12, (7, 5, 1, 1)),
+            (97, 61, (7, 5, 83, 51)),
+            (1920, 1080, (0, 0, 1920, 1080)),
+        ] {
+            for alpha_mode in 0..3 {
+                if width == 1920 && alpha_mode != 0 {
+                    continue;
+                }
+                let mut image = FrameImage {
+                    picture,
+                    width,
+                    height,
+                    pixels: (0..width * height * 4).map(|_| random() as u8).collect(),
+                };
+                for (index, pixel) in image.pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                    let (x, y) = (index as u32 % width, index as u32 / width);
+                    pixel[3] = if x < picture.0
+                        || x >= picture.0 + picture.2
+                        || y < picture.1
+                        || y >= picture.1 + picture.3
+                    {
+                        0
+                    } else {
+                        match alpha_mode {
+                            0 => 255,
+                            1 => 0,
+                            _ => pixel[3],
+                        }
+                    };
+                }
+                let destination: Vec<u8> =
+                    (0..width * height * 4).map(|_| random() as u8).collect();
+                let count = if width == 1920 { 9 } else { transforms.len() };
+                for transform in &transforms[..count] {
+                    assert!(transform.valid());
+                    let mut expected = destination.clone();
+                    let mut actual = destination.clone();
+                    reference_draw_transformed(&mut expected, width, height, &image, *transform);
+                    draw_transformed(&mut actual, width, height, &image, *transform);
+                    for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+                        assert!(
+                            actual.abs_diff(*expected) <= 1,
+                            "{width}x{height}, alpha mode {alpha_mode}, {transform:?}, byte {index}: {actual} != {expected}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Keep the original scalar sampler as an independent pixel-equivalence oracle.
+    fn reference_draw_transformed(
+        destination: &mut [u8],
+        width: u32,
+        height: u32,
+        image: &FrameImage,
+        transform: Transform,
+    ) {
+        let (left, top, picture_width, picture_height) = image.picture;
+        let center_x = left as f32 + picture_width as f32 / 2.0;
+        let center_y = top as f32 + picture_height as f32 / 2.0;
+        let crop_left = left as f32 + picture_width as f32 * transform.crop_left;
+        let crop_right = left as f32 + picture_width as f32 * (1.0 - transform.crop_right);
+        let crop_top = top as f32 + picture_height as f32 * transform.crop_top;
+        let crop_bottom = top as f32 + picture_height as f32 * (1.0 - transform.crop_bottom);
+        let (sine, cosine) = transform.rotation.to_radians().sin_cos();
+        let offset_x = center_x + transform.x * width as f32;
+        let offset_y = center_y + transform.y * height as f32;
+        let mut bounds = [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        for (x, y) in [
+            (crop_left, crop_top),
+            (crop_right, crop_top),
+            (crop_left, crop_bottom),
+            (crop_right, crop_bottom),
+        ] {
+            let x = (x - center_x) * transform.scale;
+            let y = (y - center_y) * transform.scale;
+            let (x, y) = (
+                offset_x + cosine * x - sine * y,
+                offset_y + sine * x + cosine * y,
+            );
+            bounds[0] = bounds[0].min(x);
+            bounds[1] = bounds[1].min(y);
+            bounds[2] = bounds[2].max(x);
+            bounds[3] = bounds[3].max(y);
+        }
+        for y in (bounds[1].floor().max(0.0) as u32)
+            ..(bounds[3].ceil().min(height as f32).max(0.0) as u32)
+        {
+            for x in (bounds[0].floor().max(0.0) as u32)
+                ..(bounds[2].ceil().min(width as f32).max(0.0) as u32)
+            {
+                let delta_x = x as f32 + 0.5 - offset_x;
+                let delta_y = y as f32 + 0.5 - offset_y;
+                let source_x = center_x + (cosine * delta_x + sine * delta_y) / transform.scale;
+                let source_y = center_y + (-sine * delta_x + cosine * delta_y) / transform.scale;
+                if source_x < crop_left
+                    || source_x >= crop_right
+                    || source_y < crop_top
+                    || source_y >= crop_bottom
+                {
+                    continue;
+                }
+                let sample_x =
+                    (source_x - 0.5).clamp(left as f32, (left + picture_width - 1) as f32);
+                let sample_y =
+                    (source_y - 0.5).clamp(top as f32, (top + picture_height - 1) as f32);
+                let sample_left = sample_x.floor() as u32;
+                let sample_top = sample_y.floor() as u32;
+                let mut sample = [0.0; 4];
+                for (pixel_x, weight_x) in [
+                    (sample_left, 1.0 - (sample_x - sample_left as f32)),
+                    (
+                        (sample_left + 1).min(left + picture_width - 1),
+                        sample_x - sample_left as f32,
+                    ),
+                ] {
+                    for (pixel_y, weight_y) in [
+                        (sample_top, 1.0 - (sample_y - sample_top as f32)),
+                        (
+                            (sample_top + 1).min(top + picture_height - 1),
+                            sample_y - sample_top as f32,
+                        ),
+                    ] {
+                        let pixel_offset = ((pixel_y * image.width + pixel_x) * 4) as usize;
+                        let source_alpha = image.pixels[pixel_offset + 3] as f32 / 255.0;
+                        for (channel, value) in sample.iter_mut().enumerate() {
+                            *value += image.pixels[pixel_offset + channel] as f32
+                                * weight_x
+                                * weight_y
+                                * if channel == 3 { 1.0 } else { source_alpha };
+                        }
+                    }
+                }
+                let alpha = sample[3];
+                let mut rgba = [0; 4];
+                if alpha > 0.0 {
+                    for channel in 0..3 {
+                        rgba[channel] = (sample[channel] * 255.0 / alpha).round() as u8;
+                    }
+                }
+                rgba[3] = (alpha * transform.opacity).round() as u8;
+                let pixel_offset = ((y * width + x) * 4) as usize;
+                blend(&mut destination[pixel_offset..pixel_offset + 4], &rgba);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "release-mode transform benchmark; requires ffmpeg"]
+    fn benchmark_clip_transform() {
+        use std::time::Instant;
+
+        let root =
+            std::env::temp_dir().join(format!("ocus-transform-bench-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let make_source = |clip_id, name: &str, filter: &str| {
+            let path = root.join(name);
+            assert!(
+                std::process::Command::new("ffmpeg")
+                    .args([
+                        "-v",
+                        "error",
+                        "-y",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        filter,
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "ultrafast",
+                        "-crf",
+                        "18",
+                        "-threads",
+                        "2"
+                    ])
+                    .arg(&path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            FrameSource {
+                clip_id,
+                path,
+                kind: MediaKind::Video,
+                start: 0,
+                source_start: 0,
+                duration: 90,
+                transform: Transform::default(),
+            }
+        };
+        let lower = make_source(1, "lower.mp4", "testsrc2=size=1280x720:rate=30:duration=3");
+        let upper = make_source(2, "upper.mp4", "smptebars=size=1280x720:rate=30:duration=3");
+        let transform = Transform {
+            scale: 0.5,
+            x: 0.2,
+            rotation: 15.0,
+            crop_left: 0.1,
+            opacity: 0.8,
+            ..Default::default()
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        fn median(label: &str, mut run: impl FnMut() -> f64) {
+            let mut timings: Vec<_> = (0..5).map(|_| run()).collect();
+            timings.sort_by(f64::total_cmp);
+            println!("{label}: median_ms={:.3} runs={timings:?}", timings[2]);
+        }
+        for (label, source) in [("decode_lower", &lower), ("decode_upper", &upper)] {
+            median(
+                label,
+                Box::new(|| {
+                    let mut layers = VideoLayers::new((30, 1), (1920, 1080));
+                    layers.layer_at(source, 0, &cancelled).unwrap();
+                    let started = Instant::now();
+                    for position in 1..61 {
+                        std::hint::black_box(
+                            layers.layer_at(source, position, &cancelled).unwrap(),
+                        );
+                    }
+                    started.elapsed().as_secs_f64() * 1000.0 / 60.0
+                }),
+            );
+        }
+        let image = VideoLayers::new((30, 1), (1920, 1080))
+            .layer_at(&upper, 0, &cancelled)
+            .unwrap();
+        median(
+            "draw_transformed",
+            Box::new(|| {
+                let mut pixels = [0, 0, 0, 255].repeat(1920 * 1080);
+                let started = Instant::now();
+                for _ in 0..60 {
+                    draw_transformed(
+                        std::hint::black_box(&mut pixels),
+                        1920,
+                        1080,
+                        &image,
+                        transform,
+                    );
+                }
+                std::hint::black_box(pixels);
+                started.elapsed().as_secs_f64() * 1000.0 / 60.0
+            }),
+        );
+        for (label, transform) in [
+            ("frame_identity", Transform::default()),
+            ("frame_transformed", transform),
+        ] {
+            median(
+                label,
+                Box::new(|| {
+                    let mut upper = upper.clone();
+                    upper.transform = transform;
+                    let plan = VisualPlan {
+                        tracks: vec![
+                            vec![VisualClip::Media(lower.clone())],
+                            vec![VisualClip::Media(upper)],
+                        ],
+                        resolution: (1280, 720),
+                    };
+                    let mut compositor = Compositor::new(plan, 1920, 1080, (30, 1));
+                    compositor.frame(0, &cancelled).unwrap();
+                    let started = Instant::now();
+                    for position in 1..61 {
+                        std::hint::black_box(compositor.frame(position, &cancelled).unwrap());
+                    }
+                    started.elapsed().as_secs_f64() * 1000.0 / 60.0
+                }),
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     #[ignore = "release-mode still-image benchmark; requires ffmpeg"]

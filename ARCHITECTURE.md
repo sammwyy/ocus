@@ -116,9 +116,9 @@ tracks for video sources with audio. Detaching turns it into an aligned clip on
 an audio track. Context menus and the drag label are UI overlays drawn as
 absolutely positioned layers above the workspace. During playback
 `media/audio.rs` decodes each audible clip (linked audio on video tracks and
-any clip on audio tracks, honoring volume and mute), resamples and mixes it to
-48 kHz stereo on a worker, and `playback.rs` streams it through rodio to the
-default output device; video pacing follows the consumed-sample clock so
+any clip on audio tracks) to 48 kHz stereo and applies optional per-clip noise
+reduction before volume and mixing on its worker. `playback.rs` streams the mix
+through rodio to the default output device; video pacing follows the consumed-sample clock so
 picture and sound stay aligned, skipping late video frames instead of delaying
 the timeline when composition is slower than playback. Source preview decodes
 one clip; the Program monitor and export share the layered composition rules.

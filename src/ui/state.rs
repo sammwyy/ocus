@@ -1304,6 +1304,7 @@ impl UiState {
                     source_start: range.source_start,
                     duration: range.duration,
                     volume: 1.0,
+                    noise_reduction: false,
                 })
                 .collect(),
             fps,
@@ -3178,6 +3179,7 @@ mod tests {
                 source_start: clip.source_start_frame,
                 duration: clip.duration_frames,
                 volume: 1.0,
+                noise_reduction: false,
             }],
             end: 1,
             fps: (30, 1),
@@ -3497,6 +3499,7 @@ mod tests {
                     content: ClipContent::Media { media_id: 1 },
                     volume: 1.0,
                     muted: false,
+                    noise_reduction: false,
                     linked_audio: false,
                 }
             }));
@@ -4366,6 +4369,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: true,
+                noise_reduction: false,
                 linked_audio: false,
             }
         }));

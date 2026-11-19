@@ -86,6 +86,11 @@ pub enum Command {
         volume: f32,
         muted: bool,
     },
+    SetClipNoiseReduction {
+        track_id: u64,
+        clip_id: u64,
+        enabled: bool,
+    },
     SetTitle {
         track_id: u64,
         clip_id: u64,
@@ -642,6 +647,28 @@ impl Editor {
                 clip.muted = muted;
                 Some(inverse)
             }
+            Command::SetClipNoiseReduction {
+                track_id,
+                clip_id,
+                enabled,
+            } => {
+                let track = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.id == track_id)?;
+                let clip = track.clips.iter_mut().find(|clip| clip.id == clip_id)?;
+                if !(track.kind == TrackKind::Audio || clip.linked_audio)
+                    || clip.noise_reduction == enabled
+                {
+                    return None;
+                }
+                Some(Command::SetClipNoiseReduction {
+                    track_id,
+                    clip_id,
+                    enabled: std::mem::replace(&mut clip.noise_reduction, enabled),
+                })
+            }
             Command::SetTitle {
                 track_id,
                 clip_id,
@@ -852,6 +879,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 4 },
                 volume: 1.0,
                 muted: false,
+                noise_reduction: false,
                 linked_audio: true,
             }
         }));
@@ -914,6 +942,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                noise_reduction: false,
                 linked_audio: false,
             };
             assert!(editor.apply(Command::InsertClip {
@@ -987,6 +1016,7 @@ mod tests {
             content: ClipContent::Media { media_id: 1 },
             volume: 1.0,
             muted: false,
+            noise_reduction: false,
             linked_audio: false,
         };
         assert!(editor.apply(Command::InsertClip {
@@ -1063,6 +1093,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            noise_reduction: false,
             linked_audio: false,
         };
         assert!(editor.apply(Command::InsertClip {
@@ -1106,6 +1137,7 @@ mod tests {
                 content: ClipContent::Title(title.clone()),
                 volume: 1.0,
                 muted: false,
+                noise_reduction: false,
                 linked_audio: false,
             },
         }));
@@ -1167,6 +1199,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            noise_reduction: false,
             linked_audio: false,
         };
         let insert =
@@ -1246,6 +1279,7 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 0.75,
             muted: true,
+            noise_reduction: false,
             linked_audio: false,
         };
         project.tracks[0].clips = vec![
@@ -1344,6 +1378,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            noise_reduction: false,
             linked_audio: false,
         };
         for (id, start_frame, track_id) in [(1, 0, 0), (2, 30, 0), (3, 30, 1)] {
@@ -1432,6 +1467,7 @@ mod tests {
                     },
                     volume: if id == 2 { 0.4 } else { 1.0 },
                     muted: id == 2,
+                    noise_reduction: false,
                     linked_audio: id == 2,
                 },
             }));
@@ -1484,6 +1520,7 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 1.0,
             muted: false,
+            noise_reduction: false,
             linked_audio: false,
         };
         for (track_id, clip) in [
@@ -1504,6 +1541,7 @@ mod tests {
                     content: ClipContent::Media { media_id: 1 },
                     volume: 0.5,
                     muted: true,
+                    noise_reduction: false,
                     linked_audio: false,
                 },
             ),
@@ -1569,6 +1607,7 @@ mod tests {
                     content: ClipContent::Title(Title::default()),
                     volume: 1.0,
                     muted: false,
+                    noise_reduction: false,
                     linked_audio: false,
                 },
             }));
@@ -1599,6 +1638,7 @@ mod tests {
             content: ClipContent::Media { media_id: 1 },
             volume: 1.0,
             muted: false,
+            noise_reduction: false,
             linked_audio: false,
         };
         assert!(!editor.apply(Command::InsertClip {
@@ -1638,6 +1678,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                noise_reduction: false,
                 linked_audio: false,
             },
         }));
@@ -1656,6 +1697,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                noise_reduction: false,
                 linked_audio: false,
             },
         }));
@@ -1689,6 +1731,7 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
+                noise_reduction: false,
                 linked_audio: false,
             },
         }));

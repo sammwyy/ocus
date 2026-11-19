@@ -75,6 +75,7 @@ mod tests {
             content: ClipContent::Media { media_id: 4 },
             volume: 1.0,
             muted: false,
+            noise_reduction: false,
             linked_audio: false,
         }]);
         fixture["tracks"][1]["clips"] = serde_json::json!([Clip {
@@ -97,6 +98,7 @@ mod tests {
             }),
             volume: 1.0,
             muted: false,
+            noise_reduction: false,
             linked_audio: false,
         }]);
         let project = from_json(&fixture.to_string()).unwrap();
@@ -185,6 +187,7 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 1.0,
             muted: false,
+            noise_reduction: false,
             linked_audio: false,
         })
         .unwrap();
@@ -267,6 +270,7 @@ mod tests {
             content: ClipContent::Media { media_id: 8 },
             volume: 1.0,
             muted: false,
+            noise_reduction: false,
             linked_audio: false,
         };
         document["tracks"][0]["clips"] = serde_json::json!([clip.clone()]);
@@ -279,6 +283,12 @@ mod tests {
         document["tracks"][0]["clips"][0]["linked_audio"] = serde_json::json!(true);
         let linked = from_json(&document.to_string()).unwrap();
         assert!(linked.tracks()[0].clips[0].linked_audio);
+        assert!(!linked.tracks()[0].clips[0].noise_reduction);
+        assert!(!to_json(&linked).unwrap().contains("noise_reduction"));
+        document["tracks"][0]["clips"][0]["noise_reduction"] = true.into();
+        let enabled = from_json(&document.to_string()).unwrap();
+        assert!(enabled.tracks()[0].clips[0].noise_reduction);
+        assert_eq!(from_json(&to_json(&enabled).unwrap()).unwrap(), enabled);
         assert_eq!(from_json(&to_json(&linked).unwrap()).unwrap(), linked);
         document["media"][0]["has_audio"] = serde_json::json!(false);
         assert!(!from_json(&document.to_string()).unwrap().tracks()[0].clips[0].linked_audio);

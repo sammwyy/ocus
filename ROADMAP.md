@@ -121,7 +121,7 @@ Feature-complete for most everyday editing, with a focus on polish and stability
 - [x] Audio waveforms on the timeline and in the Source monitor
 - [ ] Audio fade in and fade out
 - [ ] Loudness normalization
-- [ ] Noise reduction
+- [x] Noise reduction
 
 ### v0.7: Subtitles and keyframes
 - [ ] Import SRT files

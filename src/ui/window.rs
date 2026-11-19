@@ -327,6 +327,16 @@ fn set_clip_audio(state: &UiState, change: impl FnOnce(&Clip) -> (f32, bool)) {
     }
 }
 
+fn toggle_clip_noise_reduction(state: &UiState) {
+    if let Some((track_id, clip)) = selected_clip(state) {
+        state.edit(Command::SetClipNoiseReduction {
+            track_id,
+            clip_id: clip.id,
+            enabled: !clip.noise_reduction,
+        });
+    }
+}
+
 fn media_name(media: &Media) -> String {
     media.path.file_name().map_or_else(
         || media.path.display().to_string(),
@@ -1813,6 +1823,7 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
         }
         if (track_kind == TrackKind::Audio || clip.linked_audio) && media.is_some() {
             let volume = clip.volume;
+            let audio_state = state.clone();
             rows.push(section(
                 "Audio",
                 vec![
@@ -1893,6 +1904,16 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
                         state,
                         |s| set_clip_audio(s, |clip| (clip.volume, !clip.muted)),
                     )),
+                    Box::new(
+                        Flex::row()
+                            .gap(8.0)
+                            .align(Align::Center)
+                            .child(Box::new(Checkbox::new(clip.noise_reduction, move || {
+                                toggle_clip_noise_reduction(&audio_state);
+                            })))
+                            .child(text("Noise reduction", text_color(), 11.0)),
+                    ),
+                    text("Best for speech with background noise.", faint(), 10.0),
                     if clip.linked_audio {
                         inline(secondary_button(
                             Some(Glyph::Unlink),
@@ -4123,6 +4144,7 @@ mod tests {
             content: ClipContent::Title(Title::default()),
             volume: 1.0,
             muted: false,
+            noise_reduction: false,
             linked_audio: false,
         }
     }
@@ -5375,7 +5397,8 @@ mod tests {
                 content: ClipContent::Media { media_id: 1 },
                 volume: 1.0,
                 muted: false,
-                linked_audio: false
+                noise_reduction: false,
+                linked_audio: false,
             }
         }));
         state.select_clip(Some((0, 1)));
@@ -5568,6 +5591,7 @@ mod tests {
         let painter = render(&state, 1440.0, 900.0);
         assert!(painter.labels.iter().any(|text| text == "Title 1"));
         assert!(painter.labels.iter().any(|text| text == "Title clip"));
+        assert!(!painter.labels.iter().any(|text| text == "Noise reduction"));
         state.title_text.set_value("Opening scene");
         set_title_text(&state);
         assert_eq!(
@@ -5603,7 +5627,21 @@ mod tests {
         );
         assert!(painter.labels.iter().any(|label| label == "100%"));
         assert!(painter.labels.iter().any(|label| label == "Audio source"));
+        assert!(
+            painter
+                .labels
+                .iter()
+                .any(|label| label == "Noise reduction")
+        );
+        assert!(!selected_clip(&state).unwrap().1.noise_reduction);
+        toggle_clip_noise_reduction(&state);
+        assert!(selected_clip(&state).unwrap().1.noise_reduction);
+        state.undo();
+        assert!(!selected_clip(&state).unwrap().1.noise_reduction);
+        state.redo();
+        assert!(selected_clip(&state).unwrap().1.noise_reduction);
         set_clip_audio(&state, |clip| (clip.volume - 0.5, true));
+        assert!(selected_clip(&state).unwrap().1.noise_reduction);
         let painter = render(&state, 1440.0, 900.0);
         assert!(painter.labels.iter().any(|label| label == "50%"));
         assert!(painter.labels.iter().any(|label| label == "Unmute"));

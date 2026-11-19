@@ -1,6 +1,6 @@
 use super::preview::{FrameImage, FrameSource, VideoLayers, blend};
 use crate::project::Project;
-use crate::timeline::{ClipContent, Title, TrackKind};
+use crate::timeline::{ClipContent, ColorAdjust, Title, TrackKind};
 use crate::ui::{title_fonts, title_markup};
 use creamui::fonts::{FontWeight, HorizontalAlign, LayoutSettings, cached_layout, resolve};
 use std::collections::{HashMap, HashSet};
@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicBool;
 use swash::scale::{Render, ScaleContext, Source, image::Image};
 use swash::zeno::{Format, Join, Stroke};
 
-fn adjust_color(image: Arc<FrameImage>, color: crate::timeline::ColorAdjust) -> Arc<FrameImage> {
+fn adjust_color(image: Arc<FrameImage>, color: ColorAdjust) -> Arc<FrameImage> {
     if color.neutral() {
         return image;
     }
@@ -32,94 +32,6 @@ fn adjust_color(image: Arc<FrameImage>, color: crate::timeline::ColorAdjust) -> 
         }
     }
     Arc::new(adjusted)
-}
-
-#[cfg(test)]
-mod color_tests {
-    use super::*;
-    use crate::timeline::ColorAdjust;
-
-    #[test]
-    fn color_pixels() {
-        let image = Arc::new(FrameImage {
-            width: 1,
-            height: 1,
-            pixels: vec![100, 150, 200, 73],
-        });
-        assert!(Arc::ptr_eq(
-            &image,
-            &adjust_color(image.clone(), ColorAdjust::default())
-        ));
-        let grey = adjust_color(
-            image.clone(),
-            ColorAdjust {
-                saturation: 0.0,
-                ..Default::default()
-            },
-        );
-        assert_eq!(grey.pixels, vec![143, 143, 143, 73]);
-        let bright = adjust_color(
-            image.clone(),
-            ColorAdjust {
-                brightness: 0.2,
-                ..Default::default()
-            },
-        );
-        assert_eq!(bright.pixels, vec![151, 201, 251, 73]);
-        let flat = adjust_color(
-            image,
-            ColorAdjust {
-                contrast: 0.0,
-                ..Default::default()
-            },
-        );
-        assert_eq!(flat.pixels, vec![128, 128, 128, 73]);
-    }
-
-    #[test]
-    fn color_changes_composed_frame() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("color.tga");
-        let mut tga = vec![0; 18];
-        tga[2] = 2;
-        tga[12..14].copy_from_slice(&2u16.to_le_bytes());
-        tga[14..16].copy_from_slice(&2u16.to_le_bytes());
-        tga[16] = 32;
-        tga[17] = 40;
-        tga.extend([200, 150, 100, 255].repeat(4));
-        std::fs::write(&path, tga).unwrap();
-        let plan = |color| VisualPlan {
-            resolution: (2, 2),
-            tracks: vec![vec![VisualClip::Media(FrameSource {
-                color,
-                clip_id: 1,
-                path: path.clone(),
-                kind: crate::media::MediaKind::Image,
-                start: 0,
-                source_start: 0,
-                duration: 30,
-            })]],
-        };
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let raw = Compositor::new(plan(Default::default()), 2, 2, (30, 1))
-            .frame(0, &cancelled)
-            .unwrap()
-            .unwrap();
-        let grey = Compositor::new(
-            plan(ColorAdjust {
-                saturation: 0.0,
-                ..Default::default()
-            }),
-            2,
-            2,
-            (30, 1),
-        )
-        .frame(0, &cancelled)
-        .unwrap()
-        .unwrap();
-        assert_ne!(raw.pixels, grey.pixels);
-        assert_eq!(grey.pixels, [143, 143, 143, 255].repeat(4));
-    }
 }
 
 #[derive(Clone)]
@@ -499,6 +411,87 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    #[test]
+    fn color_adjust_maps_pixels() {
+        let image = Arc::new(FrameImage {
+            width: 1,
+            height: 1,
+            pixels: vec![100, 150, 200, 73],
+        });
+        assert!(Arc::ptr_eq(
+            &image,
+            &adjust_color(image.clone(), ColorAdjust::default())
+        ));
+        let grey = adjust_color(
+            image.clone(),
+            ColorAdjust {
+                saturation: 0.0,
+                ..Default::default()
+            },
+        );
+        assert_eq!(grey.pixels, vec![143, 143, 143, 73]);
+        let bright = adjust_color(
+            image.clone(),
+            ColorAdjust {
+                brightness: 0.2,
+                ..Default::default()
+            },
+        );
+        assert_eq!(bright.pixels, vec![151, 201, 251, 73]);
+        let flat = adjust_color(
+            image,
+            ColorAdjust {
+                contrast: 0.0,
+                ..Default::default()
+            },
+        );
+        assert_eq!(flat.pixels, vec![128, 128, 128, 73]);
+    }
+
+    #[test]
+    fn adjusted_clip_changes_composed_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("color.tga");
+        let mut tga = vec![0; 18];
+        tga[2] = 2;
+        tga[12..14].copy_from_slice(&2u16.to_le_bytes());
+        tga[14..16].copy_from_slice(&2u16.to_le_bytes());
+        tga[16] = 32;
+        tga[17] = 40;
+        tga.extend([200, 150, 100, 255].repeat(4));
+        std::fs::write(&path, tga).unwrap();
+        let plan = |color| VisualPlan {
+            resolution: (2, 2),
+            tracks: vec![vec![VisualClip::Media(FrameSource {
+                color,
+                clip_id: 1,
+                path: path.clone(),
+                kind: crate::media::MediaKind::Image,
+                start: 0,
+                source_start: 0,
+                duration: 30,
+            })]],
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let raw = Compositor::new(plan(Default::default()), 2, 2, (30, 1))
+            .frame(0, &cancelled)
+            .unwrap()
+            .unwrap();
+        let grey = Compositor::new(
+            plan(ColorAdjust {
+                saturation: 0.0,
+                ..Default::default()
+            }),
+            2,
+            2,
+            (30, 1),
+        )
+        .frame(0, &cancelled)
+        .unwrap()
+        .unwrap();
+        assert_ne!(raw.pixels, grey.pixels);
+        assert_eq!(grey.pixels, [143, 143, 143, 255].repeat(4));
+    }
     static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
 
     #[test]

@@ -22,7 +22,7 @@ use crate::media::{Media, MediaKind};
 use crate::project::export_settings::{AudioCodec, Container, EncodingSpeed, VideoCodec};
 use crate::project::{Command, Project};
 use crate::settings::ThemeMode;
-use crate::timeline::{Clip, ClipContent, Title, Track, TrackKind};
+use crate::timeline::{Clip, ClipContent, ColorAdjust, Title, Track, TrackKind};
 use creamui::core::layout::{Dimension, Style};
 use creamui::core::{Painter, Point, Rect, TextAlign, Widget};
 use creamui::fonts::{FontWeight, HorizontalAlign, LayoutSettings, cached_layout, resolve};
@@ -327,7 +327,7 @@ fn set_clip_audio(state: &UiState, change: impl FnOnce(&Clip) -> (f32, bool)) {
     }
 }
 
-fn set_clip_color(state: &UiState, change: impl FnOnce(&mut crate::timeline::ColorAdjust)) {
+fn set_clip_color(state: &UiState, change: impl FnOnce(&mut ColorAdjust)) {
     if let Some((track_id, clip)) = selected_clip(state) {
         let mut color = clip.color;
         change(&mut color);
@@ -339,16 +339,91 @@ fn set_clip_color(state: &UiState, change: impl FnOnce(&mut crate::timeline::Col
     }
 }
 
-fn color_control(state: &UiState, inner: f32, index: usize, value: f32) -> BoxedWidget {
-    let label = ["Brightness", "Contrast", "Saturation"][index];
-    let min = if index == 0 { -1.0 } else { 0.0 };
-    let max = if index == 0 { 1.0 } else { 2.0 };
-    let step = if index == 0 { 0.05 } else { 0.1 };
+#[derive(Clone, Copy)]
+enum ColorProperty {
+    Brightness,
+    Contrast,
+    Saturation,
+}
+
+impl ColorProperty {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Brightness => "Brightness",
+            Self::Contrast => "Contrast",
+            Self::Saturation => "Saturation",
+        }
+    }
+
+    fn range(self) -> (f32, f32) {
+        match self {
+            Self::Brightness => (-1.0, 1.0),
+            Self::Contrast | Self::Saturation => (0.0, 2.0),
+        }
+    }
+
+    fn steps_per_unit(self) -> f32 {
+        match self {
+            Self::Brightness => 20.0,
+            Self::Contrast | Self::Saturation => 10.0,
+        }
+    }
+
+    fn get(self, color: ColorAdjust) -> f32 {
+        match self {
+            Self::Brightness => color.brightness,
+            Self::Contrast => color.contrast,
+            Self::Saturation => color.saturation,
+        }
+    }
+
+    fn set(self, color: &mut ColorAdjust, value: f32) {
+        match self {
+            Self::Brightness => color.brightness = value,
+            Self::Contrast => color.contrast = value,
+            Self::Saturation => color.saturation = value,
+        }
+    }
+
+    fn format(self, value: f32) -> String {
+        match self {
+            Self::Brightness => format!("{:+.0}", value * 100.0),
+            Self::Contrast | Self::Saturation => format!("{:.0}%", value * 100.0),
+        }
+    }
+
+    fn help(self, increase: bool) -> &'static str {
+        match (self, increase) {
+            (Self::Brightness, false) => "Decrease brightness",
+            (Self::Brightness, true) => "Increase brightness",
+            (Self::Contrast, false) => "Decrease contrast",
+            (Self::Contrast, true) => "Increase contrast",
+            (Self::Saturation, false) => "Decrease saturation",
+            (Self::Saturation, true) => "Increase saturation",
+        }
+    }
+
+    fn step(self, color: &mut ColorAdjust, increase: bool) {
+        let scale = self.steps_per_unit();
+        let (min, max) = self.range();
+        let ticks = (self.get(*color) * scale).round() + if increase { 1.0 } else { -1.0 };
+        self.set(color, (ticks / scale).clamp(min, max));
+    }
+}
+
+fn color_control(
+    state: &UiState,
+    inner: f32,
+    property: ColorProperty,
+    color: ColorAdjust,
+) -> BoxedWidget {
+    let value = property.get(color);
+    let (min, max) = property.range();
     let mut row = Flex::row()
         .gap(6.0)
         .align(Align::Center)
         .child(Box::new(Flex::row().width(68.0).child(text(
-            label,
+            property.label(),
             muted(),
             11.0,
         ))))
@@ -367,11 +442,7 @@ fn color_control(state: &UiState, inner: f32, index: usize, value: f32) -> Boxed
                 )),
         ))
         .child(Box::new(Flex::row().width(38.0).child(text(
-            if index == 0 {
-                format!("{:+.0}", value * 100.0)
-            } else {
-                format!("{:.0}%", value * 100.0)
-            },
+            property.format(value),
             text_color(),
             11.0,
         ))))
@@ -379,29 +450,12 @@ fn color_control(state: &UiState, inner: f32, index: usize, value: f32) -> Boxed
     for increase in [false, true] {
         row = row.child(sized_icon_button(
             if increase { Glyph::Plus } else { Glyph::Minus },
-            Help::new(match (index, increase) {
-                (0, false) => "Decrease brightness",
-                (0, true) => "Increase brightness",
-                (1, false) => "Decrease contrast",
-                (1, true) => "Increase contrast",
-                (_, false) => "Decrease saturation",
-                (_, true) => "Increase saturation",
-            }),
+            Help::new(property.help(increase)),
             24.0,
             if increase { value < max } else { value > min },
             false,
             state,
-            move |s| {
-                set_clip_color(s, |color| {
-                    let field = match index {
-                        0 => &mut color.brightness,
-                        1 => &mut color.contrast,
-                        _ => &mut color.saturation,
-                    };
-                    *field = (((*field / step).round() + if increase { 1.0 } else { -1.0 }) * step)
-                        .clamp(min, max);
-                })
-            },
+            move |s| set_clip_color(s, |color| property.step(color, increase)),
         ));
     }
     Box::new(row)
@@ -1897,9 +1951,9 @@ fn inspector(state: &UiState, project: &Project, width: f32, busy: bool) -> Boxe
             rows.push(section(
                 "Color",
                 vec![
-                    color_control(state, inner, 0, clip.color.brightness),
-                    color_control(state, inner, 1, clip.color.contrast),
-                    color_control(state, inner, 2, clip.color.saturation),
+                    color_control(state, inner, ColorProperty::Brightness, clip.color),
+                    color_control(state, inner, ColorProperty::Contrast, clip.color),
+                    color_control(state, inner, ColorProperty::Saturation, clip.color),
                     inline(secondary_button(
                         None,
                         "Reset color",
@@ -4371,6 +4425,52 @@ mod tests {
                 .iter()
                 .any(|text| text == "Reset color")
         );
+    }
+
+    #[test]
+    fn color_property_steps_snap_to_grid_and_reach_limits() {
+        for property in [
+            ColorProperty::Brightness,
+            ColorProperty::Contrast,
+            ColorProperty::Saturation,
+        ] {
+            let mut color = ColorAdjust::default();
+            let (min, max) = property.range();
+            let scale = property.steps_per_unit();
+            property.set(&mut color, min);
+            for tick in 1..=((max - min) * scale) as u32 {
+                property.step(&mut color, true);
+                assert_eq!(property.get(color), (min * scale + tick as f32) / scale);
+            }
+            property.step(&mut color, true);
+            assert_eq!(property.get(color), max);
+            for tick in 1..=((max - min) * scale) as u32 {
+                property.step(&mut color, false);
+                assert_eq!(property.get(color), (max * scale - tick as f32) / scale);
+            }
+            property.step(&mut color, false);
+            assert_eq!(property.get(color), min);
+            property.set(&mut color, 0.123);
+            property.step(&mut color, true);
+            assert_eq!(
+                property.get(color),
+                if matches!(property, ColorProperty::Brightness) {
+                    0.15
+                } else {
+                    0.2
+                }
+            );
+            property.set(&mut color, 0.123);
+            property.step(&mut color, false);
+            assert_eq!(
+                property.get(color),
+                if matches!(property, ColorProperty::Brightness) {
+                    0.05
+                } else {
+                    0.0
+                }
+            );
+        }
     }
 
     #[test]

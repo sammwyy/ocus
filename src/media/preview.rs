@@ -1,6 +1,7 @@
 use super::MediaKind;
 use super::audio::Clock;
 use super::composite::{Compositor, VisualPlan};
+use crate::timeline::ColorAdjust;
 use ffmpeg_next as ffmpeg;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -10,7 +11,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct FrameSource {
-    pub color: crate::timeline::ColorAdjust,
+    pub color: ColorAdjust,
     pub clip_id: u64,
     pub path: PathBuf,
     pub kind: MediaKind,

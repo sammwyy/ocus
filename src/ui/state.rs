@@ -373,6 +373,8 @@ pub(crate) struct UiState {
     pub media_filter: Signal<MediaFilter>,
     pub media_view: Signal<MediaView>,
     pub status: Signal<String>,
+    pub update_check_running: Signal<bool>,
+    pub update_check_result: Signal<String>,
     pub autosave_error: Signal<Option<String>>,
     pub dirty: Signal<bool>,
     pub busy: Signal<bool>,
@@ -552,6 +554,8 @@ impl UiState {
             media_filter: Signal::new(MediaFilter::All),
             media_view: Signal::new(MediaView::Grid),
             status: Signal::new("Ready · Project not saved".into()),
+            update_check_running: Signal::new(false),
+            update_check_result: Signal::new(String::new()),
             autosave_error: Signal::new(None),
             dirty: Signal::new(false),
             busy: Signal::new(false),
@@ -1228,6 +1232,24 @@ impl UiState {
             }
             Err(error) => self.status.set(format!("Cannot remove silences: {error}")),
         }
+    }
+
+    pub(super) fn check_for_updates(&self) {
+        if self.update_check_running.peek() {
+            return;
+        }
+        let Some(app) = self.app.borrow().clone() else {
+            return;
+        };
+        self.update_check_running.set(true);
+        self.update_check_result.set("Checking for updates…".into());
+        let state = self.clone();
+        app.spawn_background(crate::updates::check, move |result| {
+            state
+                .update_check_result
+                .set(result.unwrap_or_else(|error| error));
+            state.update_check_running.set(false);
+        });
     }
 
     pub(super) fn normalize_loudness(&self) {

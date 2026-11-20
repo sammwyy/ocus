@@ -11,13 +11,14 @@ fn version_exits_without_a_display() {
             .expect("run Ocus headlessly");
         assert!(output.status.success(), "{output:?}");
         assert!(output.stderr.is_empty(), "{output:?}");
-        let commit = env!("OCUS_COMMIT");
         assert_eq!(
             String::from_utf8(output.stdout).unwrap().trim(),
             format!(
-                "ocus {} ({})",
+                "ocus {} ({}; {}; {})",
                 env!("CARGO_PKG_VERSION"),
-                &commit[..commit.len().min(7)]
+                env!("OCUS_COMMIT_SHORT"),
+                env!("OCUS_BRANCH"),
+                env!("OCUS_CHANNEL")
             )
         );
     }

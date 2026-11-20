@@ -2,8 +2,9 @@ name: Performance benchmarks
 
 on:
   pull_request:
+    branches: [main, nightly]
   push:
-    branches: [main]
+    branches: [main, nightly]
   workflow_dispatch:
 
 permissions:

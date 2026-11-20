@@ -5,11 +5,12 @@ fn main() {
         .nth(1)
         .is_some_and(|arg| arg == "--version" || arg == "-V")
     {
-        let commit = env!("OCUS_COMMIT");
         println!(
-            "ocus {} ({})",
+            "ocus {} ({}; {}; {})",
             env!("CARGO_PKG_VERSION"),
-            &commit[..commit.len().min(7)]
+            env!("OCUS_COMMIT_SHORT"),
+            env!("OCUS_BRANCH"),
+            env!("OCUS_CHANNEL")
         );
         return;
     }

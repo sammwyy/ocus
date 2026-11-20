@@ -58,6 +58,15 @@ pub(crate) fn split_tracks(
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
+    RemoveAllEffects {
+        track_id: u64,
+        clip_id: u64,
+    },
+    SetEffectSpeed {
+        track_id: u64,
+        clip_id: u64,
+        speed: f64,
+    },
     ApplyEffect {
         track_id: u64,
         clip_id: u64,
@@ -1122,6 +1131,8 @@ impl Editor {
         };
         let allowed = match &command {
             Command::ApplyEffect { track_id, .. }
+            | Command::RemoveAllEffects { track_id, .. }
+            | Command::SetEffectSpeed { track_id, .. }
             | Command::RemoveEffect { track_id, .. }
             | Command::InsertClip { track_id, .. }
             | Command::RemoveClip { track_id, .. }
@@ -1164,6 +1175,52 @@ impl Editor {
             return None;
         }
         match command {
+            Command::RemoveAllEffects { track_id, clip_id } => {
+                let effects = self
+                    .project
+                    .effect_target(track_id, clip_id)
+                    .ok()?
+                    .clip
+                    .effect_stack
+                    .clone();
+                if effects.is_empty() {
+                    return None;
+                }
+                let mut candidate = Self::new(self.project.clone());
+                for kind in effects.into_iter().rev() {
+                    candidate.configure_effect(track_id, clip_id, kind, false, None)?;
+                }
+                self.execute(Command::ReplaceTracks(candidate.project.tracks))
+            }
+            Command::SetEffectSpeed {
+                track_id,
+                clip_id,
+                speed,
+            } => {
+                use crate::timeline::effects::{EffectKind, compatible};
+                let target = self.project.effect_target(track_id, clip_id).ok()?;
+                compatible(EffectKind::Speed, target).ok()?;
+                let mut candidate = Self::new(self.project.clone());
+                if target.clip.speed != speed {
+                    candidate.execute(Command::SetClipSpeed {
+                        track_id,
+                        clip_id,
+                        speed,
+                    })?;
+                }
+                let clip = candidate
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|t| t.id == track_id)?
+                    .clips
+                    .iter_mut()
+                    .find(|c| c.id == clip_id)?;
+                if !clip.effect_stack.contains(&EffectKind::Speed) {
+                    clip.effect_stack.push(EffectKind::Speed);
+                }
+                self.execute(Command::ReplaceTracks(candidate.project.tracks))
+            }
             Command::ApplyEffect {
                 track_id,
                 clip_id,
@@ -2517,6 +2574,104 @@ mod tests {
             "linked_audio": true
         }]);
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn remove_all_effects_is_one_history_entry_and_rejects_empty_or_locked_targets() {
+        use crate::timeline::effects::EffectKind;
+        let mut editor = Editor::new(speed_project());
+        let remove = Command::RemoveAllEffects {
+            track_id: 0,
+            clip_id: 1,
+        };
+        assert!(!editor.apply(remove.clone()));
+        assert!(editor.undo.is_empty());
+        for kind in [
+            EffectKind::Sepia,
+            EffectKind::ColorCorrection,
+            EffectKind::Speed,
+            EffectKind::Fades,
+            EffectKind::Reverse,
+        ] {
+            assert!(editor.apply(Command::ApplyEffect {
+                track_id: 0,
+                clip_id: 1,
+                kind,
+                path: None
+            }));
+        }
+        let before = editor.project().clone();
+        let mut editor = Editor::new(before.clone());
+        assert!(editor.apply(remove.clone()));
+        assert_eq!((editor.undo.len(), editor.redo.len()), (1, 0));
+        let after = editor.project().clone();
+        let clip = &after.tracks()[0].clips[0];
+        assert!(clip.effect_stack.is_empty());
+        assert!(clip.effect.is_none());
+        assert_eq!(clip.speed, 1.0);
+        assert_eq!(clip.playback, Playback::Forward);
+        assert_eq!((clip.fade_in_frames, clip.fade_out_frames), (0, 0));
+        assert!(editor.undo());
+        assert_eq!(editor.project(), &before);
+        assert_eq!((editor.undo.len(), editor.redo.len()), (0, 1));
+        assert!(editor.redo());
+        assert_eq!(editor.project(), &after);
+        assert!(!editor.apply(remove.clone()));
+        let mut locked = before;
+        locked.tracks[0].locked = true;
+        let mut editor = Editor::new(locked.clone());
+        assert!(!editor.apply(remove));
+        assert!(!editor.apply(Command::RemoveAllEffects {
+            track_id: 42,
+            clip_id: 1
+        }));
+        assert_eq!(editor.project(), &locked);
+        assert!(editor.undo.is_empty());
+    }
+
+    #[test]
+    fn effect_speed_adds_or_updates_membership_in_one_history_entry() {
+        use crate::timeline::effects::EffectKind;
+        for speed in [1.0, 2.0] {
+            let before = speed_project();
+            let mut editor = Editor::new(before.clone());
+            assert!(editor.apply(Command::SetEffectSpeed {
+                track_id: 0,
+                clip_id: 1,
+                speed
+            }));
+            assert_eq!(editor.undo.len(), 1);
+            let after = editor.project().clone();
+            assert_eq!(after.tracks()[0].clips[0].effect_stack, [EffectKind::Speed]);
+            assert!(!editor.apply(Command::SetEffectSpeed {
+                track_id: 0,
+                clip_id: 1,
+                speed
+            }));
+            assert_eq!(editor.undo.len(), 1);
+            assert!(editor.undo());
+            assert_eq!(editor.project(), &before);
+            assert!(editor.redo());
+            assert_eq!(editor.project(), &after);
+        }
+        let mut editor = Editor::new(speed_project());
+        for speed in [0.0, 5.0, f64::NAN] {
+            assert!(!editor.apply(Command::SetEffectSpeed {
+                track_id: 0,
+                clip_id: 1,
+                speed
+            }));
+        }
+        assert!(editor.undo.is_empty());
+        assert!(editor.apply(Command::SetTrackLocked {
+            track_id: 0,
+            locked: true
+        }));
+        assert!(!editor.apply(Command::SetEffectSpeed {
+            track_id: 0,
+            clip_id: 1,
+            speed: 2.0
+        }));
     }
 
     fn assert_legacy_effect_round_trip(project: &Project) {

@@ -4,8 +4,11 @@ use crate::media::MediaKind;
 use creamui::core::layout::{Dimension, LengthPercentageAuto, Position, Style};
 use creamui::core::{CursorIcon, Painter, Point, Rect, RgbaImage, TextAlign, Widget};
 use creamui::widgets::layout::{Align, Justify, StyleExt};
-use creamui::widgets::{Icon, RawButton, RawText, Symbol, Tooltip};
+use creamui::widgets::{
+    Icon, NumberInput, RawButton, RawText, Slider, Symbol, TextController, Tooltip,
+};
 use creamui::{BoxedWidget, Color, StateStyle, Styled};
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -13,6 +16,486 @@ fn colors() -> creamui::ColorScheme {
     creamui::reactive::try_use_context::<creamui::ThemeProvider>()
         .map_or_else(creamui::Theme::dark, |provider| provider.get())
         .colors
+}
+
+pub(super) struct NumericState {
+    pub controller: TextController,
+    draft: creamui::Signal<Option<f64>>,
+    value: Cell<f64>,
+    focus_epoch: creamui::Signal<u64>,
+    cancelled: Cell<bool>,
+    preview: RefCell<Option<NumericPreview>>,
+    spec: Cell<NumericSpec>,
+}
+
+type NumericPreview = Rc<dyn Fn(&mut crate::timeline::Clip, f64)>;
+
+pub(super) fn preview_project(
+    state: &UiState,
+    project: &crate::project::Project,
+) -> Option<crate::project::Project> {
+    let inputs = state.numeric_inputs.borrow();
+    if !inputs
+        .values()
+        .any(|data| data.draft.peek().is_some() && data.preview.borrow().is_some())
+    {
+        return None;
+    }
+    let mut tracks = project.tracks().to_vec();
+    for (((track_id, clip_id), _), data) in inputs.iter() {
+        if let Some(value) = data.draft.peek()
+            && let Some(preview) = data.preview.borrow().as_ref()
+            && let Some(clip) = tracks
+                .iter_mut()
+                .filter(|track| track.id == *track_id && !track.locked)
+                .flat_map(|track| &mut track.clips)
+                .find(|clip| clip.id == *clip_id)
+        {
+            preview(clip, value);
+        }
+    }
+    let mut editor = crate::project::Editor::new(project.clone());
+    editor
+        .apply(crate::project::Command::ReplaceTracks(tracks))
+        .then(|| editor.project().clone())
+}
+
+impl UiState {
+    pub(super) fn cancel_numeric_drag(&self) -> bool {
+        let mut cancelled = false;
+        let inputs: Vec<_> = self.numeric_inputs.borrow().values().cloned().collect();
+        for data in inputs {
+            if data.draft.peek().is_some() {
+                data.cancelled.set(true);
+                data.draft.set(None);
+                data.controller
+                    .set_value(data.spec.get().format(data.value.get()));
+                cancelled = true;
+            }
+        }
+        if cancelled {
+            self.request_preview();
+        }
+        cancelled
+    }
+}
+
+pub(super) type NumericInputs =
+    std::collections::HashMap<(super::edits::ClipRef, &'static str), Rc<NumericState>>;
+
+#[derive(Clone, Copy)]
+pub(super) struct NumericSpec {
+    pub label: &'static str,
+    pub min: f64,
+    pub max: f64,
+    pub slider_max: Option<f64>,
+    pub step: f64,
+    pub precision: usize,
+    pub unit: &'static str,
+    pub default: f64,
+}
+
+impl NumericSpec {
+    fn format(self, value: f64) -> String {
+        let value = format!("{:.*}", self.precision, value);
+        if self.step.fract() == 0.0 && value.contains('.') {
+            value.trim_end_matches('0').trim_end_matches('.').to_owned()
+        } else {
+            value
+        }
+    }
+
+    fn normalize(self, value: f64) -> f64 {
+        let value = if value.is_finite() {
+            value
+        } else {
+            self.default
+        };
+        let scale = 10_f64.powi(self.precision as i32);
+        ((value.clamp(self.min, self.max) * scale).round() / scale).clamp(self.min, self.max)
+    }
+}
+
+struct NumericSlider {
+    state: UiState,
+    inner: Slider,
+    data: Rc<NumericState>,
+    commit: Rc<dyn Fn(f64)>,
+    spec: NumericSpec,
+    enabled: bool,
+}
+
+impl Widget for NumericSlider {
+    fn style(&self) -> creamui::Style {
+        self.inner.style()
+    }
+    fn paint(&self, painter: &mut dyn Painter, rect: Rect) {
+        self.inner.paint(painter, rect);
+    }
+    fn focusable(&self) -> bool {
+        self.enabled
+    }
+    fn on_key(&self) -> Option<Rc<dyn Fn(creamui::core::KeyInput)>> {
+        let key = self.inner.on_key()?;
+        let state = self.state.clone();
+        let data = self.data.clone();
+        self.enabled.then(|| {
+            Rc::new(move |input: creamui::core::KeyInput| {
+                if input.key == creamui::core::Key::Escape {
+                    state.cancel_numeric_drag();
+                } else {
+                    data.cancelled.set(false);
+                    key(input);
+                }
+            }) as Rc<dyn Fn(creamui::core::KeyInput)>
+        })
+    }
+    fn on_drag_start(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
+        let data = self.data.clone();
+        self.enabled.then(|| {
+            Rc::new(move |_, _| {
+                data.cancelled.set(false);
+                data.draft.set(Some(data.value.get()));
+            }) as Rc<dyn Fn(Point, Rect)>
+        })
+    }
+    fn on_drag(&self) -> Option<Rc<dyn Fn(Point, Rect)>> {
+        self.enabled.then(|| self.inner.on_drag()).flatten()
+    }
+    fn on_drag_end(&self) -> Option<Rc<dyn Fn()>> {
+        let data = self.data.clone();
+        let commit = self.commit.clone();
+        let state = self.state.clone();
+        self.enabled.then(|| {
+            Rc::new(move || {
+                let draft = data.draft.peek();
+                data.draft.set(None);
+                if let Some(value) = draft {
+                    commit(value);
+                    state.request_preview();
+                }
+            }) as Rc<dyn Fn()>
+        })
+    }
+    fn on_double_click_at(&self) -> Option<Rc<dyn Fn(Point)>> {
+        let commit = self.commit.clone();
+        let data = self.data.clone();
+        let default = self.spec.default;
+        self.enabled.then(|| {
+            Rc::new(move |_| {
+                data.draft.set(None);
+                commit(default);
+            }) as Rc<dyn Fn(Point)>
+        })
+    }
+}
+
+struct NumericLabel {
+    label: &'static str,
+    reset: Rc<dyn Fn()>,
+}
+
+impl Widget for NumericLabel {
+    fn style(&self) -> creamui::Style {
+        Style::default()
+            .size(72.0, 24.0)
+            .align(Align::Center)
+            .into()
+    }
+    fn paint(&self, _: &mut dyn Painter, _: Rect) {}
+    fn children(&mut self) -> Vec<BoxedWidget> {
+        vec![text(self.label, muted(), 11.0)]
+    }
+    fn on_double_click_at(&self) -> Option<Rc<dyn Fn(Point)>> {
+        let reset = self.reset.clone();
+        Some(Rc::new(move |_| reset()))
+    }
+}
+
+struct NumericField {
+    inner: NumberInput,
+    data: Rc<NumericState>,
+    enabled: bool,
+    spec: NumericSpec,
+}
+
+struct CompactNumericInput {
+    inner: BoxedWidget,
+    data: Rc<NumericState>,
+    spec: NumericSpec,
+    submitted: Rc<Cell<bool>>,
+}
+
+impl Widget for CompactNumericInput {
+    fn key(&self) -> Option<creamui::core::WidgetKey> {
+        Some(self.data.focus_epoch.get().into())
+    }
+    fn style(&self) -> creamui::Style {
+        let mut style = self.inner.style();
+        style.layout.size.height = Dimension::Length(22.0);
+        style
+    }
+    fn paint(&self, painter: &mut dyn Painter, rect: Rect) {
+        self.inner.paint(painter, rect);
+    }
+    fn paint_content(&self, painter: &mut dyn Painter, rect: Rect, content: Rect) {
+        self.inner.paint_content(painter, rect, content);
+    }
+    fn focusable(&self) -> bool {
+        self.inner.focusable()
+    }
+    fn accepts_text_input(&self) -> bool {
+        self.inner.accepts_text_input()
+    }
+    fn cursor_icon(&self) -> Option<CursorIcon> {
+        self.inner.cursor_icon()
+    }
+    fn on_key(&self) -> Option<Rc<dyn Fn(creamui::core::KeyInput)>> {
+        let key = self.inner.on_key()?;
+        let data = self.data.clone();
+        let spec = self.spec;
+        let submitted = self.submitted.clone();
+        Some(Rc::new(move |input| {
+            let submit = input.key == creamui::core::Key::Enter;
+            if submit && submitted.replace(true) {
+                return;
+            }
+            key(input);
+            if submit && let Ok(value) = data.controller.peek().parse::<f64>() {
+                data.controller.set_value(spec.format(value));
+            }
+            if submit {
+                data.focus_epoch
+                    .set(data.focus_epoch.peek().wrapping_add(1));
+            }
+        }))
+    }
+    fn on_focus_change(&self) -> Option<Rc<dyn Fn(bool)>> {
+        let focus = self.inner.on_focus_change()?;
+        let data = self.data.clone();
+        let spec = self.spec;
+        let submitted = self.submitted.clone();
+        Some(Rc::new(move |focused| {
+            if !focused && submitted.get() {
+                return;
+            }
+            if focused {
+                submitted.set(false);
+            }
+            focus(focused);
+            if !focused && let Ok(value) = data.controller.peek().parse::<f64>() {
+                data.controller.set_value(spec.format(value));
+            }
+        }))
+    }
+    fn on_drag_start_with_content(&self, content: Rect) -> Option<Rc<dyn Fn(Point, Rect)>> {
+        self.inner.on_drag_start_with_content(content)
+    }
+    fn on_drag_with_content(&self, content: Rect) -> Option<Rc<dyn Fn(Point, Rect)>> {
+        self.inner.on_drag_with_content(content)
+    }
+    fn paint_focused_overlay_with_content(
+        &self,
+        painter: &mut dyn Painter,
+        rect: Rect,
+        content: Rect,
+        caret_visible: bool,
+    ) {
+        self.inner
+            .paint_focused_overlay_with_content(painter, rect, content, caret_visible);
+    }
+}
+
+impl Widget for NumericField {
+    fn style(&self) -> creamui::Style {
+        let mut style = self.inner.style();
+        style.layout.flex_shrink = 0.0;
+        style
+    }
+    fn paint(&self, p: &mut dyn Painter, r: Rect) {
+        self.inner.paint(p, r);
+    }
+    fn children(&mut self) -> Vec<BoxedWidget> {
+        if !self.enabled {
+            return vec![
+                text(self.data.controller.value(), faint(), 11.0),
+                text(self.spec.unit, faint(), 11.0),
+            ];
+        }
+        let input = self.inner.children().remove(0);
+        vec![
+            Box::new(CompactNumericInput {
+                inner: input,
+                data: self.data.clone(),
+                spec: self.spec,
+                submitted: Rc::new(Cell::new(false)),
+            }),
+            text(self.spec.unit, muted(), 11.0),
+        ]
+    }
+}
+
+pub(super) fn numeric_row(
+    state: &UiState,
+    spec: NumericSpec,
+    value: f64,
+    enabled: bool,
+    change: impl Fn(&UiState, f64) + 'static,
+) -> BoxedWidget {
+    numeric_row_impl(state, spec, value, enabled, None, change)
+}
+
+pub(super) fn numeric_row_preview(
+    state: &UiState,
+    spec: NumericSpec,
+    value: f64,
+    enabled: bool,
+    preview: impl Fn(&mut crate::timeline::Clip, f64) + 'static,
+    change: impl Fn(&UiState, f64) + 'static,
+) -> BoxedWidget {
+    numeric_row_impl(state, spec, value, enabled, Some(Rc::new(preview)), change)
+}
+
+fn numeric_row_impl(
+    state: &UiState,
+    spec: NumericSpec,
+    value: f64,
+    enabled: bool,
+    preview: Option<NumericPreview>,
+    change: impl Fn(&UiState, f64) + 'static,
+) -> BoxedWidget {
+    let Some(target) = state.primary_clip() else {
+        return text(spec.label, muted(), 11.0);
+    };
+    let enabled = enabled
+        && !state.busy.get()
+        && state
+            .editor
+            .borrow()
+            .project()
+            .tracks()
+            .iter()
+            .any(|t| t.id == target.0 && !t.locked);
+    let data = {
+        let mut inputs = state.numeric_inputs.borrow_mut();
+        inputs.retain(|(clip, _), _| *clip == target);
+        inputs
+            .entry((target, spec.label))
+            .or_insert_with(|| {
+                Rc::new(NumericState {
+                    controller: TextController::new(spec.format(value)),
+                    draft: creamui::Signal::new(None),
+                    value: Cell::new(value),
+                    focus_epoch: creamui::Signal::new(0),
+                    cancelled: Cell::new(false),
+                    preview: RefCell::new(None),
+                    spec: Cell::new(spec),
+                })
+            })
+            .clone()
+    };
+    *data.preview.borrow_mut() = preview;
+    data.spec.set(spec);
+    if data.value.replace(value) != value && data.draft.peek().is_none() {
+        data.controller.set_value(spec.format(value));
+    }
+    let draft = data.draft.get().unwrap_or(value);
+    let commit: Rc<dyn Fn(f64)> = {
+        let state = state.clone();
+        let data = data.clone();
+        Rc::new(move |value| {
+            if !enabled
+                || state.primary_clip() != Some(target)
+                || state.busy.peek()
+                || !state
+                    .numeric_inputs
+                    .borrow()
+                    .get(&(target, spec.label))
+                    .is_some_and(|current| Rc::ptr_eq(current, &data))
+            {
+                data.controller.set_value(spec.format(data.value.get()));
+                return;
+            }
+            let value = spec.normalize(value);
+            data.controller.set_value(spec.format(value));
+            if value == spec.normalize(data.value.get()) {
+                return;
+            }
+            let revision = state.revision.peek();
+            change(&state, value);
+            if state.revision.peek() == revision {
+                data.controller.set_value(spec.format(data.value.get()));
+            } else {
+                data.value.set(value);
+            }
+        })
+    };
+    let update = commit.clone();
+    let drag = data.clone();
+    let preview_state = state.clone();
+    let slider_max = spec
+        .slider_max
+        .unwrap_or(spec.max)
+        .min(spec.max)
+        .max(spec.min);
+    let slider = Slider::new(
+        ((draft - spec.min) / (slider_max - spec.min).max(f64::EPSILON)) as f32,
+        move |value| {
+            if drag.cancelled.get() {
+                return;
+            }
+            let value = spec.normalize(spec.min + f64::from(value) * (slider_max - spec.min));
+            if drag.draft.peek().is_some() {
+                drag.draft.set(Some(value));
+                drag.controller.set_value(spec.format(value));
+                if drag.preview.borrow().is_some() {
+                    preview_state.request_preview();
+                }
+            } else {
+                update(value);
+            }
+        },
+    )
+    .customize(|slider| slider.disabled = !enabled)
+    .layout(Style::default().grow(1.0).height(24.0));
+    let reset = commit.clone();
+    let field_commit = commit.clone();
+    Box::new(
+        creamui::widgets::layout::Flex::row()
+            .full_width()
+            .gap(4.0)
+            .align(Align::Center)
+            .child(Box::new(NumericLabel {
+                label: spec.label,
+                reset: Rc::new(move || reset(spec.default)),
+            }))
+            .child(Box::new(NumericSlider {
+                state: state.clone(),
+                inner: slider,
+                data: data.clone(),
+                commit,
+                spec,
+                enabled,
+            }))
+            .child(Box::new(NumericField {
+                inner: creamui::reactive::with_context_scope(|| {
+                    let mut theme = creamui::reactive::try_use_context::<creamui::ThemeProvider>()
+                        .map_or_else(creamui::Theme::dark, |provider| provider.get());
+                    theme.typography.body = 11.0;
+                    creamui::reactive::provide_context(creamui::ThemeProvider::new(theme));
+                    NumberInput::new(&data.controller, draft, move |value| field_commit(value))
+                        .bounds(Some(spec.min), Some(spec.max))
+                        .step(spec.step)
+                        .precision(spec.precision)
+                        .width(56.0)
+                        .height(24.0)
+                        .corner_radius(3.0)
+                }),
+                data,
+                enabled,
+                spec,
+            })),
+    )
 }
 
 pub(super) fn background() -> Color {

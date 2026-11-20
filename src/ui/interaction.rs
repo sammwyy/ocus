@@ -573,6 +573,9 @@ impl UiState {
             Action::RippleDelete if !busy => self.delete_selection(true),
             Action::SelectAll => self.select_all(),
             Action::Escape => {
+                if self.cancel_numeric_drag() {
+                    return;
+                }
                 if self.mask_drag.peek().is_some() {
                     self.cancel_mask_drag();
                 } else if self.menu.peek().is_some() {

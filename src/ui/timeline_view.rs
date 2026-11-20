@@ -163,6 +163,53 @@ pub(super) struct Lane {
     pub removable: bool,
 }
 
+struct EffectChip {
+    style: creamui::Style,
+    state: UiState,
+    target: ClipRef,
+    kind: crate::timeline::effects::EffectKind,
+}
+
+impl Widget for EffectChip {
+    fn style(&self) -> creamui::Style {
+        self.style.clone()
+    }
+
+    fn paint(&self, _: &mut dyn Painter, _: Rect) {}
+
+    fn blocks_pointer(&self) -> bool {
+        true
+    }
+
+    fn on_click(&self) -> Option<Rc<dyn Fn()>> {
+        let Self {
+            state,
+            target,
+            kind,
+            ..
+        } = self;
+        let state = state.clone();
+        let (target, kind) = (*target, *kind);
+        Some(Rc::new(move || {
+            state.select_detail(target, ClipDetail::Effect(kind))
+        }))
+    }
+
+    fn on_context_menu(&self) -> Option<Rc<dyn Fn(Point)>> {
+        let Self {
+            state,
+            target,
+            kind,
+            ..
+        } = self;
+        let state = state.clone();
+        let (target, kind) = (*target, *kind);
+        Some(Rc::new(move |point| {
+            state.open_effect_menu(target, kind, point)
+        }))
+    }
+}
+
 impl LaneClip {
     fn effect_rect(&self, lane: Rect, geometry: &Geometry) -> Option<Rect> {
         let (left, right) = geometry.clipped_span(
@@ -1524,19 +1571,16 @@ impl Widget for TimelineView {
                         if chip.y < RULER_HEIGHT || chip.y + chip.height > rect.height {
                             continue;
                         }
-                        let state = self.state.clone();
-                        let target = (lane.track_id, clip.clip_id);
-                        children.push(Box::new(super::controls::Layer {
+                        children.push(Box::new(EffectChip {
                             style: super::controls::Layer::at(
                                 chip.x,
                                 chip.y,
                                 chip.width,
                                 chip.height,
                             ),
-                            on_click: Some(Rc::new(move || {
-                                state.select_detail(target, ClipDetail::Effect(kind))
-                            })),
-                            children: Vec::new(),
+                            state: self.state.clone(),
+                            target: (lane.track_id, clip.clip_id),
+                            kind,
                         }));
                     }
                 }

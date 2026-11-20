@@ -10,7 +10,7 @@ use super::timeline_view::{Geometry, Ghost, lane_weight};
 use crate::media::MediaKind;
 use crate::project::Command;
 use crate::project::interchange::Format;
-use crate::timeline::effects::EffectKind;
+use crate::timeline::effects::{EffectCategory, EffectKind, compatible};
 use crate::timeline::{
     ClipContent, Playback, SlideDirection, TrackKind, Transition, TransitionKind,
 };
@@ -145,6 +145,9 @@ pub(crate) enum Action {
     SaveAs,
     Import,
     Export,
+    MenuUp,
+    MenuDown,
+    MenuActivate,
 }
 
 fn with(key: Key, ctrl: bool, shift: bool, alt: bool) -> Shortcut {
@@ -159,6 +162,9 @@ fn with(key: Key, ctrl: bool, shift: bool, alt: bool) -> Shortcut {
 }
 
 const KEY_BINDINGS: &[(Key, bool, bool, Action)] = &[
+    (Key::Up, false, false, Action::MenuUp),
+    (Key::Down, false, false, Action::MenuDown),
+    (Key::Enter, false, false, Action::MenuActivate),
     (Key::Char('z'), true, false, Action::Undo),
     (Key::Char('z'), true, true, Action::Redo),
     (Key::Char('y'), true, false, Action::Redo),
@@ -241,6 +247,7 @@ impl Action {
             | Self::FreezeFrame
             | Self::AddTitle
             | Self::ToggleMarker => "Editing",
+            Self::MenuUp | Self::MenuDown | Self::MenuActivate => "Editing",
             Self::NudgeLeft | Self::NudgeRight | Self::ZoomIn | Self::ZoomOut => "Timeline",
             Self::New | Self::Open | Self::Save | Self::SaveAs | Self::Import | Self::Export => {
                 "File"
@@ -251,6 +258,9 @@ impl Action {
     fn description(self) -> &'static str {
         match self {
             Self::Undo => "Undo",
+            Self::MenuUp => "Previous menu item",
+            Self::MenuDown => "Next menu item",
+            Self::MenuActivate => "Activate menu item",
             Self::Redo => "Redo",
             Self::Delete => "Remove selection",
             Self::RippleDelete => "Ripple delete",
@@ -502,6 +512,9 @@ impl UiState {
     }
 
     pub fn run(&self, action: Action) {
+        if self.navigate_menu(action) {
+            return;
+        }
         if action == Action::Escape {
             let controllers: Vec<_> = self
                 .tooltips
@@ -553,6 +566,7 @@ impl UiState {
         let frame = self.program.position.peek();
         let last = self.sequence_end().saturating_sub(1);
         match action {
+            Action::MenuUp | Action::MenuDown | Action::MenuActivate => {}
             Action::Undo if !busy => self.undo(),
             Action::Redo if !busy => self.redo(),
             Action::Delete if !busy => self.delete_selection(false),
@@ -1304,45 +1318,7 @@ impl UiState {
         };
         match plan.action {
             DropAction::Transition { target, kind, out } => {
-                let duration = self
-                    .editor
-                    .borrow()
-                    .project()
-                    .tracks()
-                    .iter()
-                    .find(|track| track.id == target.0)
-                    .and_then(|track| track.clips.iter().find(|clip| clip.id == target.1))
-                    .map(|clip| clip.duration_frames);
-                let Some(duration) = duration else {
-                    return;
-                };
-                let fps = self.frame_rate();
-                let transition = Some(Transition {
-                    kind,
-                    direction: SlideDirection::Right,
-                    duration_frames: (f64::from(fps.0) / f64::from(fps.1) * 0.5).round().max(1.0)
-                        as u64,
-                });
-                let transition = transition.map(|mut t| {
-                    t.duration_frames = t.duration_frames.min(duration);
-                    t
-                });
-                let command = if out {
-                    Command::SetTransitionOut {
-                        track_id: target.0,
-                        clip_id: target.1,
-                        transition,
-                    }
-                } else {
-                    Command::SetTransition {
-                        track_id: target.0,
-                        clip_id: target.1,
-                        transition,
-                    }
-                };
-                if self.edit(command) {
-                    self.select_detail(target, super::state::ClipDetail::Transition(out));
-                }
+                self.apply_transition(target, kind, out)
             }
             DropAction::ApplyEffect { target, kind } => {
                 self.select_clip(Some(target));
@@ -1379,6 +1355,14 @@ impl UiState {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum MenuCommand {
+    ApplyEffect(ClipRef, EffectKind),
+    EditEffect(ClipRef, EffectKind),
+    RemoveEffect(ClipRef, EffectKind),
+    RemoveAllEffects(ClipRef),
+    Transition(ClipRef, TransitionKind, bool),
+    Transform(ClipRef, crate::timeline::Transform),
+    Speed(ClipRef, f64),
+    RevealMedia(u64),
     ImportSubtitles,
     ExportOptions,
     QuickExport,
@@ -1414,9 +1398,11 @@ pub(crate) enum MenuCommand {
     LocateMediaFolder,
 }
 
-/// One row of a context menu; `command: None` draws a separator.
+/// A context-menu item, submenu, group heading or separator.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct MenuEntry {
+    pub children: Vec<MenuEntry>,
+    pub checked: bool,
     pub label: String,
     pub icon: Option<Glyph>,
     pub shortcut: &'static str,
@@ -1433,6 +1419,8 @@ impl MenuEntry {
         command: MenuCommand,
     ) -> Self {
         Self {
+            children: Vec::new(),
+            checked: false,
             label: label.into(),
             icon: Some(icon),
             shortcut,
@@ -1444,6 +1432,8 @@ impl MenuEntry {
 
     fn separator() -> Self {
         Self {
+            children: Vec::new(),
+            checked: false,
             label: String::new(),
             icon: None,
             shortcut: "",
@@ -1462,11 +1452,29 @@ impl MenuEntry {
         self.danger = true;
         self
     }
+
+    fn submenu(label: impl Into<String>, icon: Glyph, children: Vec<Self>) -> Self {
+        Self {
+            label: label.into(),
+            icon: Some(icon),
+            enabled: true,
+            children,
+            ..Self::separator()
+        }
+    }
+
+    fn checked(mut self, checked: bool) -> Self {
+        self.checked = checked;
+        self
+    }
 }
 
 /// An open context menu; `anchor` is in window coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct MenuState {
+    pub path: Vec<usize>,
+    pub scroll_offsets: Vec<f32>,
+    pub focused: Option<usize>,
     pub bar: Option<BarMenu>,
     pub anchor: Point,
     pub title: String,
@@ -1493,6 +1501,128 @@ impl BarMenu {
 }
 
 impl UiState {
+    pub(super) fn apply_transition(&self, target: ClipRef, kind: TransitionKind, out: bool) {
+        let duration = self
+            .editor
+            .borrow()
+            .project()
+            .tracks()
+            .iter()
+            .find(|track| track.id == target.0)
+            .and_then(|track| track.clips.iter().find(|clip| clip.id == target.1))
+            .map(|clip| clip.duration_frames);
+        let Some(duration) = duration else {
+            return;
+        };
+        let fps = self.frame_rate();
+        let transition = Some(Transition {
+            kind,
+            direction: SlideDirection::Right,
+            duration_frames: (f64::from(fps.0) / f64::from(fps.1) * 0.5).round().max(1.0) as u64,
+        });
+        let transition = transition.map(|mut t| {
+            t.duration_frames = t.duration_frames.min(duration);
+            t
+        });
+        let command = if out {
+            Command::SetTransitionOut {
+                track_id: target.0,
+                clip_id: target.1,
+                transition,
+            }
+        } else {
+            Command::SetTransition {
+                track_id: target.0,
+                clip_id: target.1,
+                transition,
+            }
+        };
+        if self.edit(command) {
+            self.select_detail(target, super::state::ClipDetail::Transition(out));
+        }
+    }
+
+    pub fn open_submenu(&self, path: Vec<usize>) {
+        let Some(mut menu) = self.menu.peek() else {
+            return;
+        };
+        let mut entries = &menu.entries;
+        for &index in &path {
+            let Some(entry) = entries
+                .get(index)
+                .filter(|entry| entry.enabled && !entry.children.is_empty())
+            else {
+                return;
+            };
+            entries = &entry.children;
+        }
+        menu.focused = entries.iter().position(|entry| entry.enabled);
+        menu.scroll_offsets.resize(path.len(), 0.0);
+        if let Some(offset) = menu.scroll_offsets.last_mut() {
+            *offset = 0.0;
+        }
+        menu.path = path;
+        self.menu.set(Some(menu));
+    }
+
+    fn navigate_menu(&self, action: Action) -> bool {
+        let Some(mut menu) = self.menu.peek() else {
+            return false;
+        };
+        let mut entries = &menu.entries;
+        for &index in &menu.path {
+            entries = &entries[index].children;
+        }
+        match action {
+            Action::MenuUp | Action::MenuDown => {
+                let enabled: Vec<_> = entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, e)| e.enabled.then_some(i))
+                    .collect();
+                if enabled.is_empty() {
+                    return true;
+                }
+                let current = enabled.iter().position(|i| Some(*i) == menu.focused);
+                let next = match (action, current) {
+                    (Action::MenuUp, Some(i)) => (i + enabled.len() - 1) % enabled.len(),
+                    (Action::MenuUp, None) => enabled.len() - 1,
+                    (_, Some(i)) => (i + 1) % enabled.len(),
+                    _ => 0,
+                };
+                menu.focused = Some(enabled[next]);
+            }
+            Action::StepForward | Action::MenuActivate => {
+                if let Some(index) = menu.focused
+                    && let Some(entry) = entries.get(index).filter(|e| e.enabled)
+                {
+                    if !entry.children.is_empty() {
+                        let mut path = menu.path.clone();
+                        path.push(index);
+                        self.open_submenu(path);
+                        return true;
+                    } else if action == Action::MenuActivate
+                        && let Some(command) = entry.command
+                    {
+                        self.run_menu(command);
+                        return true;
+                    }
+                }
+            }
+            Action::StepBack | Action::Escape => {
+                if let Some(index) = menu.path.pop() {
+                    menu.focused = Some(index);
+                } else if action == Action::Escape {
+                    self.close_menu();
+                    return true;
+                }
+            }
+            _ => return false,
+        }
+        self.menu.set(Some(menu));
+        true
+    }
+
     pub(super) fn apply_effect(&self, target: ClipRef, kind: EffectKind) {
         if self.busy.peek() {
             return;
@@ -1525,6 +1655,9 @@ impl UiState {
         self.cancel_drag();
         self.menu_scroll.set(0.0);
         self.menu.set(Some(MenuState {
+            path: Vec::new(),
+            scroll_offsets: Vec::new(),
+            focused: entries.iter().position(|e| e.enabled),
             bar: None,
             anchor,
             title: title.into(),
@@ -1535,6 +1668,63 @@ impl UiState {
     pub fn run_menu(&self, command: MenuCommand) {
         self.close_menu();
         match command {
+            MenuCommand::ApplyEffect(target, kind) => self.apply_effect(target, kind),
+            MenuCommand::EditEffect(target, kind) => {
+                self.select_detail(target, super::state::ClipDetail::Effect(kind))
+            }
+            MenuCommand::RemoveEffect((track_id, clip_id), kind) => {
+                self.edit(Command::RemoveEffect {
+                    track_id,
+                    clip_id,
+                    kind,
+                });
+            }
+            MenuCommand::RemoveAllEffects((track_id, clip_id)) => {
+                self.edit(Command::RemoveAllEffects { track_id, clip_id });
+            }
+            MenuCommand::Transition(target, kind, out) => self.apply_transition(target, kind, out),
+            MenuCommand::Speed((track_id, clip_id), speed) => {
+                self.edit(Command::SetEffectSpeed {
+                    track_id,
+                    clip_id,
+                    speed,
+                });
+            }
+            MenuCommand::Transform((track_id, clip_id), transform) => {
+                let mut tracks = self.editor.borrow().project().tracks().to_vec();
+                if let Some(clip) = tracks
+                    .iter_mut()
+                    .find(|t| t.id == track_id)
+                    .and_then(|t| t.clips.iter_mut().find(|c| c.id == clip_id))
+                {
+                    clip.transform = transform;
+                    clip.keyframes.clear();
+                    self.edit(Command::ReplaceTracks(tracks));
+                }
+            }
+            MenuCommand::RevealMedia(id) => {
+                self.library_tab.set(super::state::LibraryTab::Media);
+                self.sidebar.set(super::state::Sidebar::Media);
+                self.media_filter.set(super::state::MediaFilter::All);
+                let name = self
+                    .editor
+                    .borrow()
+                    .project()
+                    .media()
+                    .iter()
+                    .find(|m| m.id == id)
+                    .map(|m| {
+                        m.path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .unwrap_or_default();
+                self.media_query.set_value(name);
+                self.media_scroll.set(0.0);
+                self.select_media(id);
+            }
             MenuCommand::ImportSubtitles => self.subtitle_dialog(),
             MenuCommand::ExportOptions => self.export_dialog(),
             MenuCommand::QuickExport => self.quick_export(),
@@ -1652,6 +1842,9 @@ impl UiState {
         self.cancel_drag();
         self.menu_scroll.set(0.0);
         self.menu.set(Some(MenuState {
+            path: Vec::new(),
+            scroll_offsets: Vec::new(),
+            focused: entries.iter().position(|e| e.enabled),
             bar: Some(bar),
             anchor,
             title: bar.label().into(),
@@ -2203,7 +2396,7 @@ impl UiState {
                 .flatten();
             (track.id, track.kind, label, track.locked, hit)
         };
-        if point.x < geometry.left() || locked {
+        if point.x < geometry.left() || locked && hit.is_none() {
             let entries = self.track_entries(Some((track_id, label.clone())));
             self.open_menu(point, format!("Track {label}"), entries);
             return;
@@ -2240,19 +2433,81 @@ impl UiState {
             self.open_menu(point, format!("Track {label}"), entries);
             return;
         };
-        if !self.selected.peek().contains(&clip) {
-            self.select_clip(Some(clip));
-        }
+        self.select_menu_clip(clip);
         let count = self.selected.peek().len();
-        let (detachable, linkable) = self.audio_link_state();
-        let (audible, all_muted) = self.audible_selection();
+        let entries = self.clip_menu_entries(clip, can_paste);
+        let title = if count == 1 {
+            label_of_clip(self, clip)
+        } else {
+            format!("{count} clips")
+        };
+        self.open_menu(point, title, entries);
+    }
+
+    fn select_menu_clip(&self, target: ClipRef) {
+        if !self.selected.peek().contains(&target) {
+            self.select_clip(Some(target));
+            if !self.selected.peek().contains(&target) {
+                self.selected_detail.set(None);
+                self.selected.set(vec![target]);
+            }
+        }
+    }
+
+    pub fn open_effect_menu(&self, target: ClipRef, kind: EffectKind, point: Point) {
+        let blocked = {
+            let editor = self.editor.borrow();
+            let Ok(target) = editor.project().effect_target(target.0, target.1) else {
+                return;
+            };
+            if !target.clip.effect_stack.contains(&kind) {
+                return;
+            }
+            target.track.locked || self.busy.peek()
+        };
+        self.select_menu_clip(target);
+        self.open_menu(
+            point,
+            kind.label(),
+            vec![
+                MenuEntry::new(
+                    "Edit",
+                    Glyph::Settings,
+                    "",
+                    MenuCommand::EditEffect(target, kind),
+                )
+                .enabled(!blocked),
+                MenuEntry::new(
+                    "Remove",
+                    Glyph::Trash,
+                    "",
+                    MenuCommand::RemoveEffect(target, kind),
+                )
+                .enabled(!blocked)
+                .danger(),
+            ],
+        );
+    }
+
+    fn clip_menu_entries(&self, target: ClipRef, can_paste: bool) -> Vec<MenuEntry> {
+        let editor = self.editor.borrow();
+        let project = editor.project();
+        let Some(track) = project.tracks().iter().find(|t| t.id == target.0) else {
+            return Vec::new();
+        };
+        let Some(clip) = track.clips.iter().find(|c| c.id == target.1) else {
+            return Vec::new();
+        };
+        let blocked = track.locked || self.busy.peek();
+        let resolved = project.effect_target(target.0, target.1).ok();
         let mut entries = vec![
             MenuEntry::new(
                 "Cut",
                 Glyph::Split,
                 "Ctrl X",
                 MenuCommand::Action(Action::Cut),
-            ),
+            )
+            .enabled(!blocked),
             MenuEntry::new(
                 "Copy",
                 Glyph::Copy,
@@ -2265,66 +2520,276 @@ impl UiState {
                 "Ctrl V",
                 MenuCommand::Action(Action::Paste),
             )
-            .enabled(can_paste),
+            .enabled(!blocked && can_paste),
             MenuEntry::new(
                 "Duplicate",
                 Glyph::Copy,
                 "Ctrl D",
                 MenuCommand::Action(Action::Duplicate),
-            ),
-            MenuEntry::separator(),
+            )
+            .enabled(!blocked),
             MenuEntry::new(
                 "Split at playhead",
                 Glyph::Split,
                 "S",
                 MenuCommand::Action(Action::Split),
             )
-            .enabled(!self.split_targets().is_empty()),
-            MenuEntry::new(
-                "Reverse clip",
-                Glyph::Reverse,
-                "Shift R",
-                MenuCommand::ReverseClip(clip),
-            )
-            .enabled(self.playback_reason(clip, Playback::Reverse).is_none()),
-            MenuEntry::new(
-                "Add freeze frame",
-                Glyph::Freeze,
-                "Shift F",
-                MenuCommand::FreezeFrame(clip),
-            )
-            .enabled(self.can_freeze_frame(clip)),
+            .enabled(!blocked && !self.split_targets().is_empty()),
+            MenuEntry::separator(),
         ];
+        if let Some(resolved) = resolved {
+            let mut effects = Vec::new();
+            for (category, label) in [
+                (EffectCategory::Video, "Video"),
+                (EffectCategory::Audio, "Audio"),
+            ] {
+                let group: Vec<_> = EffectKind::ALL
+                    .into_iter()
+                    .filter(|kind| {
+                        kind.categories().contains(&category) && compatible(*kind, resolved).is_ok()
+                    })
+                    .map(|kind| {
+                        let applied = clip.effect_stack.contains(&kind);
+                        MenuEntry::new(
+                            kind.label(),
+                            Glyph::Plus,
+                            "",
+                            MenuCommand::ApplyEffect(target, kind),
+                        )
+                        .checked(applied)
+                        .enabled(!blocked && !applied)
+                    })
+                    .collect();
+                if !group.is_empty() {
+                    effects.push(MenuEntry {
+                        label: label.into(),
+                        ..MenuEntry::separator()
+                    });
+                    effects.extend(group);
+                }
+            }
+            if !effects.is_empty() {
+                entries
+                    .push(MenuEntry::submenu("Add effect", Glyph::Plus, effects).enabled(!blocked));
+            }
+        }
+        if track.kind == TrackKind::Video {
+            let transitions = [("In", false), ("Out", true)]
+                .into_iter()
+                .flat_map(|(side, out)| {
+                    [
+                        ("Fade", TransitionKind::Fade),
+                        ("Dissolve", TransitionKind::Dissolve),
+                        ("Slide", TransitionKind::Slide),
+                    ]
+                    .map(|(label, kind)| {
+                        MenuEntry::new(
+                            format!("{side}: {label}"),
+                            Glyph::ChevronRight,
+                            "",
+                            MenuCommand::Transition(target, kind, out),
+                        )
+                        .enabled(!blocked)
+                    })
+                })
+                .collect();
+            entries.push(
+                MenuEntry::submenu("Add transition", Glyph::ChevronRight, transitions)
+                    .enabled(!blocked),
+            );
+        }
+        if !clip.effect_stack.is_empty() {
+            let mut effects: Vec<_> = clip
+                .effect_stack
+                .iter()
+                .map(|&kind| {
+                    MenuEntry::submenu(
+                        kind.label(),
+                        Glyph::Settings,
+                        vec![
+                            MenuEntry::new(
+                                "Edit",
+                                Glyph::Settings,
+                                "",
+                                MenuCommand::EditEffect(target, kind),
+                            )
+                            .enabled(!blocked),
+                            MenuEntry::new(
+                                "Remove",
+                                Glyph::Trash,
+                                "",
+                                MenuCommand::RemoveEffect(target, kind),
+                            )
+                            .enabled(!blocked)
+                            .danger(),
+                        ],
+                    )
+                    .enabled(!blocked)
+                })
+                .collect();
+            effects.push(MenuEntry::separator());
+            effects.push(
+                MenuEntry::new(
+                    "Remove all effects",
+                    Glyph::Trash,
+                    "",
+                    MenuCommand::RemoveAllEffects(target),
+                )
+                .enabled(!blocked)
+                .danger(),
+            );
+            entries.push(MenuEntry::submenu("Effects", Glyph::Settings, effects).enabled(!blocked));
+        }
+        if track.kind == TrackKind::Video
+            && resolved.is_some_and(|r| r.media.kind != MediaKind::Audio)
+        {
+            let offset = (1.0 - 0.30) / 2.0 - 0.04;
+            let corners = [
+                ("Top left", -offset, -offset),
+                ("Top right", offset, -offset),
+                ("Bottom left", -offset, offset),
+                ("Bottom right", offset, offset),
+            ];
+            entries.push(
+                MenuEntry::submenu(
+                    "Picture in picture",
+                    Glyph::Picture,
+                    corners
+                        .into_iter()
+                        .map(|(label, x, y)| {
+                            MenuEntry::new(
+                                label,
+                                Glyph::Picture,
+                                "",
+                                MenuCommand::Transform(
+                                    target,
+                                    crate::timeline::Transform {
+                                        scale: 0.30,
+                                        x,
+                                        y,
+                                        ..Default::default()
+                                    },
+                                ),
+                            )
+                            .enabled(!blocked)
+                        })
+                        .collect(),
+                )
+                .enabled(!blocked),
+            );
+            entries.push(
+                MenuEntry::new(
+                    "Reset transform",
+                    Glyph::Undo,
+                    "",
+                    MenuCommand::Transform(target, Default::default()),
+                )
+                .enabled(!blocked && (!clip.transform.is_identity() || !clip.keyframes.is_empty())),
+            );
+        }
+        if resolved.is_some_and(|r| compatible(EffectKind::Reverse, r).is_ok()) {
+            entries.push(
+                MenuEntry::new(
+                    "Reverse",
+                    Glyph::Reverse,
+                    "Shift R",
+                    MenuCommand::ReverseClip(target),
+                )
+                .checked(clip.playback == Playback::Reverse)
+                .enabled(!blocked),
+            );
+        }
+        if resolved
+            .is_some_and(|r| track.kind == TrackKind::Video && r.media.kind == MediaKind::Video)
+        {
+            entries.push(
+                MenuEntry::new(
+                    "Add freeze frame",
+                    Glyph::Freeze,
+                    "Shift F",
+                    MenuCommand::FreezeFrame(target),
+                )
+                .enabled(!blocked && self.can_freeze_frame(target)),
+            );
+        }
+        if resolved.is_some_and(|r| compatible(EffectKind::Speed, r).is_ok()) {
+            entries.push(
+                MenuEntry::submenu(
+                    "Speed",
+                    Glyph::ChevronRight,
+                    [0.25, 0.5, 1.0, 1.5, 2.0, 4.0]
+                        .into_iter()
+                        .map(|speed| {
+                            MenuEntry::new(
+                                format!("{speed}×"),
+                                Glyph::ChevronRight,
+                                "",
+                                MenuCommand::Speed(target, speed),
+                            )
+                            .checked(clip.speed == speed)
+                            .enabled(
+                                !blocked
+                                    && (editor.can_set_clip_speed(target.0, target.1, speed)
+                                        || speed == clip.speed
+                                            && !clip.effect_stack.contains(&EffectKind::Speed)),
+                            )
+                        })
+                        .collect(),
+                )
+                .enabled(!blocked),
+            );
+        }
+        drop(editor);
+        let (detachable, linkable) = self.audio_link_state();
+        let (audible, all_muted) = self.audible_selection();
         if detachable {
-            entries.push(MenuEntry::new(
-                "Detach audio",
-                Glyph::Unlink,
-                "",
-                MenuCommand::DetachAudio,
-            ));
+            entries.push(
+                MenuEntry::new("Detach audio", Glyph::Unlink, "", MenuCommand::DetachAudio)
+                    .enabled(!blocked),
+            );
         }
         if linkable {
-            entries.push(MenuEntry::new(
-                "Link audio",
-                Glyph::Link,
-                "",
-                MenuCommand::LinkAudio,
-            ));
+            entries.push(
+                MenuEntry::new("Link audio", Glyph::Link, "", MenuCommand::LinkAudio)
+                    .enabled(!blocked),
+            );
         }
         if !audible.is_empty() {
+            entries.push(
+                MenuEntry::new(
+                    if all_muted {
+                        "Unmute audio"
+                    } else {
+                        "Mute audio"
+                    },
+                    Glyph::Mute,
+                    "",
+                    MenuCommand::ToggleMute,
+                )
+                .enabled(!blocked),
+            );
+        }
+        let editor = self.editor.borrow();
+        if let Some(media) = editor
+            .project()
+            .tracks()
+            .iter()
+            .find(|t| t.id == target.0)
+            .and_then(|t| t.clips.iter().find(|c| c.id == target.1))
+            .and_then(|c| {
+                if let ClipContent::Media { media_id } = c.content {
+                    Some(media_id)
+                } else {
+                    None
+                }
+            })
+        {
+            entries.push(MenuEntry::separator());
             entries.push(MenuEntry::new(
-                if all_muted {
-                    "Unmute audio"
-                } else {
-                    "Mute audio"
-                },
-                if all_muted {
-                    Glyph::Volume
-                } else {
-                    Glyph::Mute
-                },
+                "Reveal in media bin",
+                Glyph::Locate,
                 "",
-                MenuCommand::ToggleMute,
+                MenuCommand::RevealMedia(media),
             ));
         }
         entries.push(MenuEntry::separator());
@@ -2335,6 +2800,7 @@ impl UiState {
                 "Del",
                 MenuCommand::Action(Action::Delete),
             )
+            .enabled(!blocked)
             .danger(),
         );
         entries.push(
@@ -2344,14 +2810,10 @@ impl UiState {
                 "Shift Del",
                 MenuCommand::Action(Action::RippleDelete),
             )
+            .enabled(!blocked)
             .danger(),
         );
-        let title = if count == 1 {
-            label_of_clip(self, clip)
-        } else {
-            format!("{count} clips")
-        };
-        self.open_menu(point, title, entries);
+        entries
     }
 
     pub fn open_media_menu(&self, media_id: u64, point: Point) {
@@ -2466,6 +2928,352 @@ mod tests {
             .find(|(shortcut, _)| shortcut.key == Key::Char(' '))
             .unwrap();
         state.run(action);
+    }
+
+    fn clip_menu_state(kind: MediaKind) -> UiState {
+        let state = UiState::new();
+        state.timeline_rect.set(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1128.0,
+            height: 400.0,
+        });
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "scene.mp4".into(),
+            kind,
+            duration_us: (kind != MediaKind::Image).then_some(6_000_000),
+            has_audio: kind != MediaKind::Image,
+        })));
+        state.insert_media(1);
+        state
+    }
+
+    fn menu_entry<'a>(entries: &'a [MenuEntry], label: &str) -> &'a MenuEntry {
+        entries
+            .iter()
+            .find(|entry| entry.label == label)
+            .unwrap_or_else(|| panic!("Missing {label}"))
+    }
+
+    #[test]
+    fn clip_menu_contents_follow_media_compatibility_and_lock_state() {
+        for kind in [MediaKind::Video, MediaKind::Image, MediaKind::Audio] {
+            let state = clip_menu_state(kind);
+            let target = state.primary_clip().unwrap();
+            let entries = state.clip_menu_entries(target, false);
+            let bottom = &entries[entries.len() - 4..];
+            assert_eq!(bottom[0].label, "Reveal in media bin");
+            assert_eq!(bottom[1], MenuEntry::separator());
+            assert_eq!(bottom[2].label, "Delete");
+            assert_eq!(bottom[3].label, "Ripple delete");
+            assert!(bottom[2].danger && bottom[3].danger);
+            for label in [
+                "Cut",
+                "Copy",
+                "Duplicate",
+                "Split at playhead",
+                "Delete",
+                "Ripple delete",
+                "Reveal in media bin",
+            ] {
+                menu_entry(&entries, label);
+            }
+            assert!(!menu_entry(&entries, "Paste at playhead").enabled);
+            let effects = &menu_entry(&entries, "Add effect").children;
+            assert_eq!(
+                effects.iter().any(|e| e.label == "Sepia"),
+                kind != MediaKind::Audio
+            );
+            assert_eq!(
+                effects.iter().any(|e| e.label == "Fades"),
+                kind != MediaKind::Image
+            );
+            assert_eq!(
+                entries.iter().any(|e| e.label == "Reverse"),
+                kind != MediaKind::Image
+            );
+            assert_eq!(
+                entries.iter().any(|e| e.label == "Speed"),
+                kind != MediaKind::Image
+            );
+            assert_eq!(
+                entries.iter().any(|e| e.label == "Picture in picture"),
+                kind != MediaKind::Audio
+            );
+            assert_eq!(
+                entries.iter().any(|e| e.label == "Add transition"),
+                kind != MediaKind::Audio
+            );
+            assert!(!entries.iter().any(|e| e.label == "Effects"));
+            assert!(state.edit(Command::SetTrackLocked {
+                track_id: target.0,
+                locked: true
+            }));
+            let locked = state.clip_menu_entries(target, true);
+            for label in ["Cut", "Duplicate", "Delete", "Add effect"] {
+                assert!(!menu_entry(&locked, label).enabled, "{kind:?}: {label}");
+            }
+            assert!(menu_entry(&locked, "Copy").enabled);
+        }
+        let state = UiState::new();
+        assert!(state.add_title());
+        let entries = state.clip_menu_entries(state.primary_clip().unwrap(), false);
+        assert!(!entries.iter().any(|e| matches!(
+            e.label.as_str(),
+            "Add effect" | "Reverse" | "Speed" | "Picture in picture" | "Reset transform"
+        )));
+        assert_eq!(menu_entry(&entries, "Add transition").children.len(), 6);
+    }
+
+    #[test]
+    fn submenu_keyboard_navigation_keeps_parent_and_skips_disabled_rows() {
+        let state = clip_menu_state(MediaKind::Video);
+        let target = state.primary_clip().unwrap();
+        let entries = state.clip_menu_entries(target, false);
+        let add = entries
+            .iter()
+            .position(|e| e.label == "Add effect")
+            .unwrap();
+        state.open_menu(Point::default(), "Clip", entries.clone());
+        state.open_submenu(vec![usize::MAX]);
+        assert!(state.menu.peek().unwrap().path.is_empty());
+        for _ in 0..entries[..add].iter().filter(|e| e.enabled).count() {
+            state.run(Action::MenuDown);
+        }
+        assert_eq!(state.menu.peek().unwrap().focused, Some(add));
+        let frame = state.program.position.peek();
+        state.run(Action::StepForward);
+        let menu = state.menu.peek().unwrap();
+        assert_eq!(menu.entries, entries);
+        assert_eq!(menu.path, [add]);
+        assert!(menu.entries[add].children[menu.focused.unwrap()].enabled);
+        state.run(Action::MenuUp);
+        let menu = state.menu.peek().unwrap();
+        assert!(menu.entries[add].children[menu.focused.unwrap()].enabled);
+        state.run(Action::StepBack);
+        assert_eq!(state.menu.peek().unwrap().focused, Some(add));
+        assert!(state.menu.peek().unwrap().path.is_empty());
+        state.run(Action::MenuActivate);
+        state.run(Action::Escape);
+        assert!(state.menu.peek().unwrap().path.is_empty());
+        state.run(Action::Escape);
+        assert!(state.menu.peek().is_none());
+        assert_eq!(state.program.position.peek(), frame);
+    }
+
+    #[test]
+    fn submenu_effect_application_and_remove_all_each_undo_once() {
+        let state = clip_menu_state(MediaKind::Video);
+        let target = state.primary_clip().unwrap();
+        let before = state.editor.borrow().project().clone();
+        let entries = state.clip_menu_entries(target, false);
+        let add = entries
+            .iter()
+            .position(|e| e.label == "Add effect")
+            .unwrap();
+        state.open_menu(Point::default(), "Clip", entries);
+        state.open_submenu(vec![add]);
+        let sepia = state.menu.peek().unwrap().entries[add]
+            .children
+            .iter()
+            .position(|e| e.label == "Sepia")
+            .unwrap();
+        for _ in 0..sepia - 1 {
+            state.run(Action::MenuDown);
+        }
+        state.run(Action::MenuActivate);
+        assert!(state.menu.peek().is_none());
+        let after = state.editor.borrow().project().clone();
+        assert_eq!(
+            after
+                .effect_target(target.0, target.1)
+                .unwrap()
+                .clip
+                .effect_stack,
+            [EffectKind::Sepia]
+        );
+        state.undo();
+        assert_eq!(state.editor.borrow().project(), &before);
+        state.redo();
+        assert_eq!(state.editor.borrow().project(), &after);
+        let entries = state.clip_menu_entries(target, false);
+        let sepia = menu_entry(&menu_entry(&entries, "Add effect").children, "Sepia");
+        assert!(sepia.checked && !sepia.enabled);
+        state.run_menu(MenuCommand::ApplyEffect(
+            target,
+            EffectKind::ColorCorrection,
+        ));
+        state.run_menu(MenuCommand::Speed(target, 2.0));
+        let before = state.editor.borrow().project().clone();
+        let entries = state.clip_menu_entries(target, false);
+        let command = menu_entry(
+            &menu_entry(&entries, "Effects").children,
+            "Remove all effects",
+        )
+        .command
+        .unwrap();
+        state.run_menu(command);
+        assert!(
+            state
+                .editor
+                .borrow()
+                .project()
+                .effect_target(target.0, target.1)
+                .unwrap()
+                .clip
+                .effect_stack
+                .is_empty()
+        );
+        state.undo();
+        assert_eq!(state.editor.borrow().project(), &before);
+        state.redo();
+        assert!(
+            state
+                .editor
+                .borrow()
+                .project()
+                .effect_target(target.0, target.1)
+                .unwrap()
+                .clip
+                .effect_stack
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn clip_menu_pip_reset_speed_reverse_and_transition_use_shared_commands() {
+        let state = clip_menu_state(MediaKind::Video);
+        let target = state.primary_clip().unwrap();
+        let original = state.editor.borrow().project().clone();
+        let entries = state.clip_menu_entries(target, false);
+        state.run_menu(
+            menu_entry(
+                &menu_entry(&entries, "Picture in picture").children,
+                "Bottom right",
+            )
+            .command
+            .unwrap(),
+        );
+        let clip = state
+            .editor
+            .borrow()
+            .project()
+            .effect_target(target.0, target.1)
+            .unwrap()
+            .clip
+            .clone();
+        assert_eq!(clip.transform.scale, 0.30);
+        assert!((clip.transform.x - 0.31).abs() < 0.0001);
+        assert_eq!(clip.transform.x, clip.transform.y);
+        state.undo();
+        assert_eq!(state.editor.borrow().project(), &original);
+        state.redo();
+        let entries = state.clip_menu_entries(target, false);
+        state.run_menu(menu_entry(&entries, "Reset transform").command.unwrap());
+        assert!(
+            state
+                .editor
+                .borrow()
+                .project()
+                .effect_target(target.0, target.1)
+                .unwrap()
+                .clip
+                .transform
+                .is_identity()
+        );
+        state.run_menu(MenuCommand::Speed(target, 1.0));
+        state.run_menu(MenuCommand::Speed(target, 2.0));
+        assert_eq!(
+            state
+                .editor
+                .borrow()
+                .project()
+                .effect_target(target.0, target.1)
+                .unwrap()
+                .clip
+                .effect_stack,
+            [EffectKind::Speed]
+        );
+        state.run_menu(MenuCommand::ReverseClip(target));
+        assert!(menu_entry(&state.clip_menu_entries(target, false), "Reverse").checked);
+        let entries = state.clip_menu_entries(target, false);
+        state.run_menu(
+            menu_entry(
+                &menu_entry(&entries, "Add transition").children,
+                "Out: Slide",
+            )
+            .command
+            .unwrap(),
+        );
+        let clip = state
+            .editor
+            .borrow()
+            .project()
+            .effect_target(target.0, target.1)
+            .unwrap()
+            .clip
+            .clone();
+        assert_eq!(
+            clip.transition_out.unwrap(),
+            Transition {
+                kind: TransitionKind::Slide,
+                direction: SlideDirection::Right,
+                duration_frames: 15
+            }
+        );
+        assert!(
+            state.selected_detail.peek()
+                == Some((target, super::super::state::ClipDetail::Transition(true)))
+        );
+    }
+
+    #[test]
+    fn right_click_preserves_multi_selection_and_chip_menu_focuses_or_removes() {
+        let state = clip_menu_state(MediaKind::Video);
+        let first = state.primary_clip().unwrap();
+        state.run(Action::Duplicate);
+        let second = state.primary_clip().unwrap();
+        state.select_clips(vec![first, second]);
+        let point = Point {
+            x: state.timeline_geometry().left() + 10.0,
+            y: 50.0,
+        };
+        state.open_timeline_menu(point);
+        assert_eq!(state.selected.peek(), [first, second]);
+        state.select_clip(Some(second));
+        state.open_timeline_menu(point);
+        assert_eq!(state.selected.peek(), [first]);
+        state.apply_effect(first, EffectKind::Sepia);
+        state.open_effect_menu(first, EffectKind::Sepia, point);
+        let menu = state.menu.peek().unwrap();
+        assert_eq!(
+            menu.entries
+                .iter()
+                .map(|e| e.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Edit", "Remove"]
+        );
+        state.run_menu(menu.entries[0].command.unwrap());
+        assert!(
+            state.selected_detail.peek()
+                == Some((
+                    first,
+                    super::super::state::ClipDetail::Effect(EffectKind::Sepia)
+                ))
+        );
+        state.open_effect_menu(first, EffectKind::Sepia, point);
+        state.run_menu(state.menu.peek().unwrap().entries[1].command.unwrap());
+        assert!(state.selected_detail.peek().is_none());
+        state.open_effect_menu(first, EffectKind::Sepia, point);
+        assert!(state.menu.peek().is_none());
+        assert!(state.edit(Command::SetTrackLocked {
+            track_id: first.0,
+            locked: true
+        }));
+        state.open_timeline_menu(point);
+        assert_eq!(state.selected.peek(), [first]);
+        assert!(!menu_entry(&state.menu.peek().unwrap().entries, "Delete").enabled);
     }
 
     fn playback_state() -> (UiState, tempfile::NamedTempFile) {

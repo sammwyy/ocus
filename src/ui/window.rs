@@ -6979,8 +6979,39 @@ fn edl_rate_modal(state: &UiState, viewport: Size, drop: bool) -> BoxedWidget {
     })
 }
 
-/// The open context menu over a full-window layer that closes it when
-/// clicked outside.
+fn menu_height(entries: &[super::interaction::MenuEntry], header: bool, viewport: Size) -> f32 {
+    let height = 12.0
+        + if header { 26.0 } else { 0.0 }
+        + entries
+            .iter()
+            .map(|e| {
+                if e.command.is_none() && e.children.is_empty() && e.label.is_empty() {
+                    9.0
+                } else {
+                    28.0
+                }
+            })
+            .sum::<f32>();
+    height.min((viewport.height - 16.0).max(1.0))
+}
+
+fn submenu_rect(parent: Rect, row_y: f32, height: f32, viewport: Size) -> Rect {
+    let width = 244.0;
+    let right = parent.x + parent.width - 2.0;
+    Rect {
+        x: if right + width <= viewport.width - 8.0 {
+            right
+        } else {
+            parent.x - width + 2.0
+        }
+        .clamp(8.0, (viewport.width - width - 8.0).max(8.0)),
+        y: row_y.clamp(8.0, (viewport.height - height - 8.0).max(8.0)),
+        width,
+        height,
+    }
+}
+
+/// The open context menu over a full-window layer that closes it when clicked outside.
 fn context_menu(state: &UiState, menu: MenuState, viewport: Size) -> BoxedWidget {
     let width = match menu.bar {
         Some(BarMenu::File) => 308.0,
@@ -6989,80 +7020,143 @@ fn context_menu(state: &UiState, menu: MenuState, viewport: Size) -> BoxedWidget
         None => 244.0,
     };
     let top = if menu.bar.is_some() { 46.0 } else { 0.0 };
-    let separators = menu
-        .entries
-        .iter()
-        .filter(|e| e.command.is_none() && e.label.is_empty())
-        .count() as f32;
-    let rows = menu.entries.len() as f32 - separators;
-    let header = if menu.bar.is_some() { 0.0 } else { 26.0 };
-    let natural_height = 12.0 + header + rows * 28.0 + separators * 9.0;
-    let height = natural_height.min((viewport.height - top - 8.0).max(1.0));
-    let x = menu.anchor.x.min(viewport.width - width - 8.0).max(8.0);
-    let y = if menu.bar.is_some() {
-        top
-    } else if menu.anchor.y + height > viewport.height - 8.0 {
-        (menu.anchor.y - height).max(8.0)
-    } else {
-        menu.anchor.y
+    let height =
+        menu_height(&menu.entries, menu.bar.is_none(), viewport).min(viewport.height - top - 8.0);
+    let mut bounds = Rect {
+        x: menu.anchor.x.min(viewport.width - width - 8.0).max(8.0),
+        y: if menu.bar.is_some() {
+            top
+        } else if menu.anchor.y + height > viewport.height - 8.0 {
+            (menu.anchor.y - height).max(8.0)
+        } else {
+            menu.anchor.y
+        },
+        width,
+        height,
     };
-    let entries = menu
-        .entries
-        .iter()
-        .map(|entry| match entry.command {
-            Some(command) => menu_row(
-                entry.icon,
-                &entry.label,
-                entry.shortcut,
-                entry.enabled,
-                entry.danger,
-                state,
-                move |s| s.run_menu(command),
-            ),
-            None if !entry.label.is_empty() => Box::new(
+    let mut entries = &menu.entries;
+    let mut panels: Vec<BoxedWidget> = Vec::new();
+    for depth in 0..=menu.path.len() {
+        let header = depth == 0 && menu.bar.is_none();
+        let mut content = Flex::column();
+        if header {
+            content = content.child(Box::new(
                 Flex::row()
-                    .height(28.0)
-                    .padding_xy(10.0, 6.0)
-                    .child(heading(entry.label.to_uppercase(), faint(), 10.0)),
-            ) as BoxedWidget,
-            None => Box::new(
-                Flex::row()
-                    .height(9.0)
+                    .height(26.0)
                     .align(Align::Center)
-                    .padding_xy(8.0, 0.0)
-                    .child(Box::new(
-                        Flex::row().height(1.0).grow(1.0).background(border()),
+                    .padding_xy(10.0, 0.0)
+                    .child(heading(
+                        fit(&menu.title, bounds.width - 32.0, 11.0),
+                        muted(),
+                        11.0,
                     )),
-            ) as BoxedWidget,
-        })
-        .collect();
-    let mut content = Flex::column();
-    if menu.bar.is_none() {
-        content = content.child(Box::new(
-            Flex::row()
-                .height(26.0)
-                .align(Align::Center)
-                .padding_xy(10.0, 0.0)
-                .child(heading(fit(&menu.title, width - 32.0, 11.0), muted(), 11.0)),
-        ));
-    }
-    let content = Box::new(append(content, entries));
-    let content = if natural_height > height {
-        Box::new(RawScrollView::controlled(fill_style(), state.menu_scroll.clone()).child(content))
-            as BoxedWidget
-    } else {
-        content as BoxedWidget
-    };
-    let close = state.clone();
-    Box::new(Layer {
-        style: Layer::at(0.0, top, viewport.width, viewport.height - top),
-        on_click: Some(Rc::new(move || close.close_menu())),
-        children: vec![Box::new(Layer {
-            style: Layer::at(x, y - top, width, height),
+            ));
+        }
+        let active = menu.path.get(depth).copied().or(menu.focused);
+        let scroll_offset = if depth == 0 {
+            state.menu_scroll.offset()
+        } else {
+            menu.scroll_offsets[depth - 1]
+        };
+        let mut row_y = bounds.y + 6.0 + if header { 26.0 } else { 0.0 } - scroll_offset;
+        let mut next_y = row_y;
+        let mut natural_height = 12.0 + if header { 26.0 } else { 0.0 };
+        for (index, entry) in entries.iter().enumerate() {
+            if menu.path.get(depth) == Some(&index) {
+                next_y = row_y;
+            }
+            let row: BoxedWidget = if entry.command.is_some() || !entry.children.is_empty() {
+                let mut path = menu.path[..depth].to_vec();
+                path.push(index);
+                let command = entry.command;
+                let submenu = !entry.children.is_empty();
+                Box::new(
+                    Flex::column()
+                        .background(if active == Some(index) {
+                            surface()
+                        } else {
+                            Color::rgba(0, 0, 0, 0)
+                        })
+                        .corner_radius(6.0)
+                        .child(menu_row(
+                            entry.icon,
+                            &entry.label,
+                            if submenu {
+                                "›"
+                            } else if entry.checked {
+                                "✓"
+                            } else {
+                                entry.shortcut
+                            },
+                            entry.enabled,
+                            entry.danger,
+                            state,
+                            move |s| {
+                                if submenu {
+                                    s.open_submenu(path.clone());
+                                } else if let Some(command) = command {
+                                    s.run_menu(command);
+                                }
+                            },
+                        )),
+                )
+            } else if !entry.label.is_empty() {
+                Box::new(
+                    Flex::row()
+                        .height(28.0)
+                        .padding_xy(10.0, 6.0)
+                        .child(heading(entry.label.to_uppercase(), faint(), 10.0)),
+                )
+            } else {
+                Box::new(
+                    Flex::row()
+                        .height(9.0)
+                        .align(Align::Center)
+                        .padding_xy(8.0, 0.0)
+                        .child(Box::new(
+                            Flex::row().height(1.0).grow(1.0).background(border()),
+                        )),
+                )
+            };
+            let height =
+                if entry.command.is_none() && entry.children.is_empty() && entry.label.is_empty() {
+                    9.0
+                } else {
+                    28.0
+                };
+            natural_height += height;
+            row_y += height;
+            content = content.child(row);
+        }
+        let content: BoxedWidget = if natural_height > bounds.height {
+            if depth == 0 {
+                Box::new(
+                    RawScrollView::controlled(fill_style(), state.menu_scroll.clone())
+                        .child(Box::new(content)),
+                )
+            } else {
+                let state = state.clone();
+                Box::new(
+                    RawScrollView::new(fill_style(), scroll_offset, move |offset| {
+                        if let Some(mut menu) = state.menu.peek()
+                            && let Some(current) = menu.scroll_offsets.get_mut(depth - 1)
+                        {
+                            *current = offset;
+                            state.menu.set(Some(menu));
+                        }
+                    })
+                    .child(Box::new(content)),
+                )
+            }
+        } else {
+            Box::new(content)
+        };
+        panels.push(Box::new(Layer {
+            style: Layer::at(bounds.x, bounds.y - top, bounds.width, bounds.height),
             on_click: Some(Rc::new(|| {})),
             children: vec![Box::new(
                 Flex::column()
-                    .size(width, height)
+                    .size(bounds.width, bounds.height)
                     .padding(6.0)
                     .background(panel_raised())
                     .border(surface(), 1.0)
@@ -7076,12 +7170,168 @@ fn context_menu(state: &UiState, menu: MenuState, viewport: Size) -> BoxedWidget
                     ))
                     .child(content),
             )],
-        })],
+        }));
+        let Some(index) = menu.path.get(depth) else {
+            break;
+        };
+        let Some(entry) = entries.get(*index) else {
+            break;
+        };
+        entries = &entry.children;
+        bounds = submenu_rect(
+            bounds,
+            next_y,
+            menu_height(entries, false, viewport),
+            viewport,
+        );
+    }
+    let close = state.clone();
+    Box::new(Layer {
+        style: Layer::at(0.0, top, viewport.width, viewport.height - top),
+        on_click: Some(Rc::new(move || close.close_menu())),
+        children: panels,
     })
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cascading_menu_clicks_keep_parent_visible_and_apply_child_action() {
+        let state = UiState::new();
+        state.timeline_rect.set(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1128.0,
+            height: 400.0,
+        });
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "scene.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(6_000_000),
+            has_audio: true,
+        })));
+        state.insert_media(1);
+        state.open_timeline_menu(Point {
+            x: super::super::timeline_view::HEADER_WIDTH + 10.0,
+            y: 50.0,
+        });
+        let before = state.editor.borrow().project().clone();
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let render_menu = || {
+                let viewport = Size {
+                    width: 1280.0,
+                    height: 896.0,
+                };
+                let mut painter = TestPainter::default();
+                let scene = Renderer::new().render(
+                    context_menu(&state, state.menu.peek().unwrap(), viewport),
+                    viewport,
+                    &mut painter,
+                );
+                (scene, painter)
+            };
+            let point = |painter: &TestPainter, name: &str| {
+                let rect = painter
+                    .bounds
+                    .iter()
+                    .find(|(label, _)| label == name)
+                    .unwrap_or_else(|| panic!("Missing {name}: {:?}", painter.labels))
+                    .1;
+                Point {
+                    x: rect.x + rect.width / 2.0,
+                    y: rect.y + rect.height / 2.0,
+                }
+            };
+            let (scene, painter) = render_menu();
+            scene.hit_test(point(&painter, "Add effect")).unwrap()();
+            let (scene, painter) = render_menu();
+            assert!(painter.labels.iter().any(|label| label == "Cut"));
+            assert!(painter.labels.iter().any(|label| label == "VIDEO"));
+            assert!(painter.labels.iter().any(|label| label == "AUDIO"));
+            scene.hit_test(point(&painter, "Sepia")).unwrap()();
+        });
+        assert!(state.menu.peek().is_none());
+        assert_eq!(
+            selected_clip(&state).unwrap().1.effect_stack,
+            [EffectKind::Sepia]
+        );
+        state.undo();
+        assert_eq!(state.editor.borrow().project(), &before);
+    }
+
+    #[test]
+    fn cascading_menu_flips_left_and_stays_inside_viewport() {
+        let viewport = Size {
+            width: 1280.0,
+            height: 896.0,
+        };
+        let parent = Rect {
+            x: 100.0,
+            y: 40.0,
+            width: 244.0,
+            height: 500.0,
+        };
+        let right = submenu_rect(parent, 300.0, 600.0, viewport);
+        assert!(right.x > parent.x);
+        assert!(right.y + right.height <= viewport.height - 8.0);
+        let parent = Rect {
+            x: 1028.0,
+            ..parent
+        };
+        let left = submenu_rect(parent, 300.0, 600.0, viewport);
+        assert!(left.x + left.width <= parent.x + 2.0);
+        assert!(left.x >= 8.0);
+    }
+
+    #[test]
+    fn right_clicking_painted_effect_chip_uses_short_menu() {
+        let state = UiState::new();
+        state.timeline_rect.set(TIMELINE);
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "scene.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(6_000_000),
+            has_audio: true,
+        })));
+        state.insert_media(1);
+        apply_selected_effect(&state, EffectKind::Sepia);
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            let mut painter = TestPainter::default();
+            let scene = Renderer::new().render(
+                Box::new(view(&state)),
+                Size {
+                    width: TIMELINE.width,
+                    height: TIMELINE.height,
+                },
+                &mut painter,
+            );
+            let rect = painter
+                .bounds
+                .iter()
+                .find(|(label, _)| label == "Sepia")
+                .unwrap()
+                .1;
+            let point = Point {
+                x: rect.x + rect.width / 2.0,
+                y: rect.y + rect.height / 2.0,
+            };
+            scene.context_menu_at(point).unwrap()(point);
+        });
+        let menu = state.menu.peek().unwrap();
+        assert_eq!(menu.title, "Sepia");
+        assert_eq!(
+            menu.entries
+                .iter()
+                .map(|e| e.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Edit", "Remove"]
+        );
+    }
+
     #[test]
     fn titlebar_menus_open_switch_dismiss_and_show_about() {
         let state = UiState::new();

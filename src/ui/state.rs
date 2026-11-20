@@ -365,6 +365,7 @@ pub(crate) struct UiState {
     pub chroma_gesture: Rc<RefCell<Option<ChromaGesture>>>,
     pub title_gesture: Rc<RefCell<Option<TitleGesture>>>,
     pub effect_drag: Signal<Option<(ClipRef, f32)>>,
+    pub(super) numeric_inputs: Rc<RefCell<super::controls::NumericInputs>>,
     pub media_query: TextController,
     pub library_tab: Signal<LibraryTab>,
     pub effect_query: TextController,
@@ -543,6 +544,7 @@ impl UiState {
             chroma_gesture: Rc::new(RefCell::new(None)),
             title_gesture: Rc::new(RefCell::new(None)),
             effect_drag: Signal::new(None),
+            numeric_inputs: Rc::new(RefCell::new(HashMap::new())),
             media_query: TextController::default(),
             library_tab: Signal::new(LibraryTab::Media),
             effect_query: TextController::default(),
@@ -892,6 +894,7 @@ impl UiState {
     }
 
     fn refresh_after_edit(&self, status: &str) {
+        self.cancel_numeric_drag();
         self.effect_drag.set(None);
         if let Some((target, detail)) = self.selected_detail.peek() {
             let editor = self.editor.borrow();
@@ -1838,6 +1841,7 @@ impl UiState {
     /// Replaces the clip selection; the last entry becomes the primary clip.
     pub fn select_clips(&self, mut selection: Vec<ClipRef>) {
         self.effect_drag.set(None);
+        self.numeric_inputs.borrow_mut().clear();
         selection.retain(|(track_id, clip_id)| {
             self.editor.borrow().project().tracks().iter().any(|track| {
                 track.id == *track_id
@@ -1992,11 +1996,12 @@ impl UiState {
 
     /// The Program monitor's video and audio plans, leaving out missing media
     /// so the rest of the sequence still previews.
-    fn program_plan(&self) -> (PreviewPlan, AudioPlan) {
+    pub(super) fn program_plan(&self) -> (PreviewPlan, AudioPlan) {
         let missing = self.missing_media.peek();
         let mask_drag = self.mask_drag.peek();
         let editor = self.editor.borrow();
-        let project = editor.project();
+        let preview = super::controls::preview_project(self, editor.project());
+        let project = preview.as_ref().unwrap_or_else(|| editor.project());
         let mut sources = Vec::new();
         let audio = AudioPlan::without_media(project, &missing);
         for track in project.tracks() {

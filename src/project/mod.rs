@@ -27,6 +27,51 @@ pub struct Project {
 }
 
 impl Project {
+    pub fn effect_target(
+        &self,
+        track_id: u64,
+        clip_id: u64,
+    ) -> Result<crate::timeline::effects::EffectTarget<'_>, String> {
+        let track = self
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .ok_or("Effect target track not found")?;
+        let clip = track
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .ok_or("Effect target clip not found")?;
+        let ClipContent::Media { media_id } = clip.content else {
+            return Err("Effects need a media clip".into());
+        };
+        let media = self
+            .media
+            .iter()
+            .find(|media| media.id == media_id)
+            .ok_or("Effect source media not found")?;
+        Ok(crate::timeline::effects::EffectTarget { clip, track, media })
+    }
+
+    pub fn can_apply_effect(
+        &self,
+        kind: crate::timeline::effects::EffectKind,
+        track_id: u64,
+        clip_id: u64,
+    ) -> Result<(), String> {
+        crate::timeline::effects::can_apply(kind, self.effect_target(track_id, clip_id)?)
+    }
+
+    pub fn applicable_effects(
+        &self,
+        track_id: u64,
+        clip_id: u64,
+    ) -> Result<Vec<crate::timeline::effects::EffectKind>, String> {
+        Ok(crate::timeline::effects::applicable_effects(
+            self.effect_target(track_id, clip_id)?,
+        ))
+    }
+
     pub fn new(name: impl Into<String>) -> Self {
         let tracks = [
             TrackKind::Video,
@@ -147,6 +192,11 @@ impl Project {
             }
             let mut end = 0;
             for clip in &track.clips {
+                if !clip.effect_stack.is_empty() {
+                    crate::timeline::effects::validate_stack(
+                        self.effect_target(track.id, clip.id)?,
+                    )?;
+                }
                 if clip.effect.as_ref().is_some_and(|effect| {
                     !effect.valid()
                         || track.kind != TrackKind::Video

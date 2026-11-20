@@ -10,7 +10,10 @@ use super::timeline_view::{Geometry, Ghost, lane_weight};
 use crate::media::MediaKind;
 use crate::project::Command;
 use crate::project::interchange::Format;
-use crate::timeline::{ClipContent, Playback, TrackKind};
+use crate::timeline::effects::EffectKind;
+use crate::timeline::{
+    ClipContent, Playback, SlideDirection, TrackKind, Transition, TransitionKind,
+};
 use creamui::core::{Key, Modifiers, Point};
 use creamui::platform::Key as PlatformKey;
 use creamui::{Shortcut, ShortcutScope, WindowHandle};
@@ -45,11 +48,21 @@ pub(crate) enum Gesture {
         id: u64,
         origin: Point,
     },
+    Effect {
+        kind: EffectKind,
+        origin: Point,
+    },
+    Transition {
+        kind: TransitionKind,
+        origin: Point,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum DragPayload {
     Media(u64),
+    Effect(EffectKind),
+    Transition(TransitionKind),
     /// The selection, grabbed at `grab` frames on the anchor clip's track.
     Clips {
         anchor: ClipRef,
@@ -65,6 +78,15 @@ pub(crate) struct DragState {
 }
 
 enum DropAction {
+    Transition {
+        target: ClipRef,
+        kind: TransitionKind,
+        out: bool,
+    },
+    ApplyEffect {
+        target: ClipRef,
+        kind: EffectKind,
+    },
     Insert {
         media_id: u64,
         placement: (u64, u64),
@@ -886,10 +908,64 @@ impl UiState {
         *self.gesture.borrow_mut() = Gesture::Media { id, origin: point };
     }
 
+    pub fn begin_effect_drag(&self, kind: EffectKind, point: Point) {
+        for instance in [0, 1] {
+            let tooltip = self
+                .tooltips
+                .borrow()
+                .get(&(kind.description(), instance))
+                .map(|tooltip| tooltip.controller.clone());
+            if let Some(tooltip) = tooltip {
+                tooltip.hover(false);
+                tooltip.focus(false);
+            }
+        }
+        *self.gesture.borrow_mut() = Gesture::Effect {
+            kind,
+            origin: point,
+        };
+    }
+
+    pub fn click_gallery_effect(&self, kind: EffectKind) {
+        let target = self.selected.peek().last().copied();
+        if let Some(target) = target.filter(|target| {
+            !self.busy.peek()
+                && self
+                    .editor
+                    .borrow()
+                    .project()
+                    .can_apply_effect(kind, target.0, target.1)
+                    .is_ok()
+        }) {
+            self.apply_effect(target, kind);
+        } else {
+            self.status.set("Select a clip or drag onto one".into());
+        }
+    }
+
+    pub fn begin_transition_drag(&self, kind: TransitionKind, origin: Point) {
+        *self.gesture.borrow_mut() = Gesture::Transition { kind, origin };
+    }
+
+    pub fn end_effect_drag(&self) {
+        let gesture = std::mem::take(&mut *self.gesture.borrow_mut());
+        if matches!(gesture, Gesture::Effect { .. } | Gesture::Transition { .. })
+            && self.drag.peek().is_some()
+        {
+            self.finish_drag();
+        }
+    }
+
     /// Follows the pointer (window coordinates) during a media or clip press,
     /// starting a drag once it has travelled far enough.
     pub fn drag_pointer(&self, point: Point) {
         let payload = match &*self.gesture.borrow() {
+            Gesture::Transition { kind, origin } => (self.drag.peek().is_some()
+                || distance(*origin, point) >= DRAG_THRESHOLD)
+                .then_some(DragPayload::Transition(*kind)),
+            Gesture::Effect { kind, origin } => (self.drag.peek().is_some()
+                || distance(*origin, point) >= DRAG_THRESHOLD)
+                .then_some(DragPayload::Effect(*kind)),
             Gesture::Media { id, origin } => (self.drag.peek().is_some()
                 || distance(*origin, point) >= DRAG_THRESHOLD)
                 .then_some(DragPayload::Media(*id)),
@@ -961,6 +1037,93 @@ impl UiState {
             action: DropAction::Nothing,
         };
         match drag.payload {
+            DragPayload::Transition(kind) => {
+                let Some(lane) = geometry.clip_lane_at(drag.pointer) else {
+                    return Some(refuse("Drop on a video clip"));
+                };
+                let track = &project.tracks()[lane];
+                let Some(clip) = track.clips.iter().find(|clip| {
+                    pointer_frame >= clip.start_frame as f64
+                        && pointer_frame
+                            < clip.start_frame.saturating_add(clip.duration_frames) as f64
+                }) else {
+                    return Some(refuse("Drop on a video clip"));
+                };
+                let reason = if self.busy.peek() {
+                    Some("Wait for the current task to finish")
+                } else if track.locked {
+                    Some("Track is locked")
+                } else if track.kind != TrackKind::Video {
+                    Some("Transitions require a video track")
+                } else {
+                    None
+                };
+                let out =
+                    pointer_frame - clip.start_frame as f64 >= clip.duration_frames as f64 / 2.0;
+                let name = match kind {
+                    TransitionKind::Fade => "Fade",
+                    TransitionKind::Dissolve => "Dissolve",
+                    TransitionKind::Slide => "Slide",
+                };
+                Some(DropPlan {
+                    ghosts: vec![Ghost {
+                        track_id: track.id,
+                        start: clip.start_frame,
+                        duration: clip.duration_frames,
+                        valid: reason.is_none(),
+                    }],
+                    label: reason.map(str::to_owned).unwrap_or_else(|| {
+                        format!("Add {name} {}", if out { "out" } else { "in" })
+                    }),
+                    valid: reason.is_none(),
+                    action: if reason.is_none() {
+                        DropAction::Transition {
+                            target: (track.id, clip.id),
+                            kind,
+                            out,
+                        }
+                    } else {
+                        DropAction::Nothing
+                    },
+                })
+            }
+            DragPayload::Effect(kind) => {
+                let Some(lane) = geometry.clip_lane_at(drag.pointer) else {
+                    return Some(refuse("Drop on a clip"));
+                };
+                let track = &project.tracks()[lane];
+                let Some(clip) = track.clips.iter().find(|clip| {
+                    pointer_frame >= clip.start_frame as f64
+                        && pointer_frame
+                            < clip.start_frame.saturating_add(clip.duration_frames) as f64
+                }) else {
+                    return Some(refuse("Drop on a clip"));
+                };
+                let target = (track.id, clip.id);
+                let validity = if self.busy.peek() {
+                    Err("Wait for the current task to finish".into())
+                } else {
+                    project.can_apply_effect(kind, target.0, target.1)
+                };
+                let valid = validity.is_ok();
+                Some(DropPlan {
+                    ghosts: vec![Ghost {
+                        track_id: track.id,
+                        start: clip.start_frame,
+                        duration: clip.duration_frames,
+                        valid,
+                    }],
+                    label: validity
+                        .err()
+                        .unwrap_or_else(|| format!("Apply {}", kind.label())),
+                    valid,
+                    action: if valid {
+                        DropAction::ApplyEffect { target, kind }
+                    } else {
+                        DropAction::Nothing
+                    },
+                })
+            }
             DragPayload::Media(media_id) => {
                 let Some(media) = project.media().iter().find(|media| media.id == media_id) else {
                     return Some(refuse("Source was removed"));
@@ -1140,6 +1303,51 @@ impl UiState {
             return;
         };
         match plan.action {
+            DropAction::Transition { target, kind, out } => {
+                let duration = self
+                    .editor
+                    .borrow()
+                    .project()
+                    .tracks()
+                    .iter()
+                    .find(|track| track.id == target.0)
+                    .and_then(|track| track.clips.iter().find(|clip| clip.id == target.1))
+                    .map(|clip| clip.duration_frames);
+                let Some(duration) = duration else {
+                    return;
+                };
+                let fps = self.frame_rate();
+                let transition = Some(Transition {
+                    kind,
+                    direction: SlideDirection::Right,
+                    duration_frames: (f64::from(fps.0) / f64::from(fps.1) * 0.5).round().max(1.0)
+                        as u64,
+                });
+                let transition = transition.map(|mut t| {
+                    t.duration_frames = t.duration_frames.min(duration);
+                    t
+                });
+                let command = if out {
+                    Command::SetTransitionOut {
+                        track_id: target.0,
+                        clip_id: target.1,
+                        transition,
+                    }
+                } else {
+                    Command::SetTransition {
+                        track_id: target.0,
+                        clip_id: target.1,
+                        transition,
+                    }
+                };
+                if self.edit(command) {
+                    self.select_detail(target, super::state::ClipDetail::Transition(out));
+                }
+            }
+            DropAction::ApplyEffect { target, kind } => {
+                self.select_clip(Some(target));
+                self.apply_effect(target, kind);
+            }
             DropAction::Insert {
                 media_id,
                 placement,
@@ -1285,6 +1493,28 @@ impl BarMenu {
 }
 
 impl UiState {
+    pub(super) fn apply_effect(&self, target: ClipRef, kind: EffectKind) {
+        if self.busy.peek() {
+            return;
+        }
+        match kind {
+            EffectKind::CustomShader => self.choose_effect(target.0, target.1),
+            EffectKind::ColorLut => self.choose_lut(target.0, target.1),
+            _ => {
+                if self.edit(Command::ApplyEffect {
+                    track_id: target.0,
+                    clip_id: target.1,
+                    kind,
+                    path: None,
+                }) && kind == EffectKind::Stabilization
+                {
+                    self.select_clip(Some(target));
+                    self.stabilize_clip();
+                }
+            }
+        }
+    }
+
     pub fn close_menu(&self) {
         if self.menu.peek().is_some() {
             self.menu.set(None);
@@ -2432,6 +2662,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id,
                 clip: Box::new(Clip {
+                    effect_stack: Vec::new(),
                     playback: Playback::Forward,
                     transition_out: None,
                     id: track_id + 1,
@@ -2496,6 +2727,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 0,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
                 mask: None,
@@ -2795,6 +3027,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id,
                 clip: Box::new(Clip {
+                    effect_stack: Vec::new(),
                     playback: crate::timeline::Playback::Forward,
                     effect: None,
                     mask: None,
@@ -2864,6 +3097,7 @@ mod tests {
             has_audio: true,
         })));
         let detached = Clip {
+            effect_stack: Vec::new(),
             playback: crate::timeline::Playback::Forward,
             effect: None,
             mask: None,
@@ -2913,6 +3147,285 @@ mod tests {
             "{}",
             state.status.peek()
         );
+    }
+
+    #[test]
+    fn effect_drop_targets_clips_and_restores_everything_in_one_undo() {
+        let state = UiState::new();
+        state.timeline_rect.set(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1128.0,
+            height: 400.0,
+        });
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "scene.mp4".into(),
+            kind: MediaKind::Video,
+            duration_us: Some(10_000_000),
+            has_audio: false,
+        })));
+        state.insert_media(1);
+        let target = state.primary_clip().unwrap();
+        let geometry = state.timeline_geometry();
+        let lane = (0..400)
+            .find(|y| {
+                geometry
+                    .clip_lane_at(Point {
+                        x: geometry.left() + 10.0 * geometry.pixels_per_frame(),
+                        y: *y as f32,
+                    })
+                    .is_some_and(|index| {
+                        state.editor.borrow().project().tracks()[index].id == target.0
+                    })
+            })
+            .unwrap() as f32;
+        let pointer = Point {
+            x: geometry.left() + 10.0 * geometry.pixels_per_frame(),
+            y: lane + 8.0,
+        };
+        let before = state.editor.borrow().project().clone();
+        state.select_clip(None);
+        let origin = Point { x: 10.0, y: 10.0 };
+        state.begin_effect_drag(EffectKind::Sepia, origin);
+        state.drag_pointer(Point { x: 13.9, y: 10.0 });
+        assert!(state.drag.peek().is_none());
+        state.drag_pointer(Point { x: 14.0, y: 10.0 });
+        assert!(matches!(
+            state.drag.peek().unwrap().payload,
+            DragPayload::Effect(EffectKind::Sepia)
+        ));
+        state.drag_pointer(pointer);
+        let plan = state.drop_plan().unwrap();
+        assert!(plan.valid, "{}", plan.label);
+        assert_eq!(plan.label, "Apply Sepia");
+        assert_eq!(plan.ghosts.len(), 1);
+        assert_eq!(plan.ghosts[0].track_id, target.0);
+        state.end_effect_drag();
+        assert_eq!(state.primary_clip(), Some(target));
+        assert!(state.sidebar.peek() == super::super::state::Sidebar::Inspector);
+        assert_eq!(
+            state
+                .editor
+                .borrow()
+                .project()
+                .effect_target(target.0, target.1)
+                .unwrap()
+                .clip
+                .effect_stack,
+            [EffectKind::Sepia]
+        );
+        let after = state.editor.borrow().project().clone();
+        state.undo();
+        assert_eq!(state.editor.borrow().project(), &before);
+        state.redo();
+        assert_eq!(state.editor.borrow().project(), &after);
+
+        for (kind, expected) in [
+            (EffectKind::Sepia, "already applied"),
+            (EffectKind::NoiseReduction, "incompatible"),
+        ] {
+            state.drag.set(Some(DragState {
+                payload: DragPayload::Effect(kind),
+                pointer,
+            }));
+            let plan = state.drop_plan().unwrap();
+            assert!(!plan.valid);
+            assert!(plan.label.contains(expected), "{}", plan.label);
+            assert!(!plan.ghosts[0].valid);
+            state.finish_drag();
+            assert_eq!(state.editor.borrow().project(), &after);
+        }
+        assert!(state.edit(Command::SetTrackLocked {
+            track_id: target.0,
+            locked: true
+        }));
+        state.drag.set(Some(DragState {
+            payload: DragPayload::Effect(EffectKind::Mask),
+            pointer,
+        }));
+        let plan = state.drop_plan().unwrap();
+        assert!(!plan.valid);
+        assert!(
+            plan.label.to_lowercase().contains("locked"),
+            "{}",
+            plan.label
+        );
+        let locked = state.editor.borrow().project().clone();
+        state.finish_drag();
+        assert_eq!(state.editor.borrow().project(), &locked);
+    }
+
+    #[test]
+    fn transition_drops_choose_in_out_validate_targets_and_restore_one_undo() {
+        for out in [false, true] {
+            let state = UiState::new();
+            state.timeline_rect.set(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 1128.0,
+                height: 400.0,
+            });
+            assert!(state.add_title());
+            let target = state.primary_clip().unwrap();
+            let geometry = state.timeline_geometry();
+            let clip = state.editor.borrow().project().tracks()[0].clips[0].clone();
+            let pointer = Point {
+                x: geometry.left()
+                    + (clip.duration_frames as f32 * if out { 0.75 } else { 0.25 })
+                        * geometry.pixels_per_frame(),
+                y: geometry.top() + 10.0,
+            };
+            let before = state.editor.borrow().project().clone();
+            state.begin_transition_drag(TransitionKind::Dissolve, Point { x: 0.0, y: 0.0 });
+            state.drag_pointer(pointer);
+            let plan = state.drop_plan().unwrap();
+            assert!(plan.valid, "{}", plan.label);
+            assert_eq!(
+                plan.label,
+                if out {
+                    "Add Dissolve out"
+                } else {
+                    "Add Dissolve in"
+                }
+            );
+            state.end_effect_drag();
+            let project = state.editor.borrow().project().clone();
+            let clip = &project.tracks()[0].clips[0];
+            let transition = if out {
+                clip.transition_out.as_ref()
+            } else {
+                clip.transition.as_ref()
+            }
+            .unwrap();
+            assert_eq!(transition.kind, TransitionKind::Dissolve);
+            assert_eq!(transition.duration_frames, 15);
+            assert!(
+                matches!(state.selected_detail.peek(), Some((_, super::super::state::ClipDetail::Transition(selected))) if selected == out)
+            );
+            state.undo();
+            assert_eq!(state.editor.borrow().project(), &before);
+            assert!(state.selected_detail.peek().is_none());
+            state.redo();
+            assert_eq!(state.editor.borrow().project(), &project);
+            assert!(state.edit(Command::SetTrackLocked {
+                track_id: target.0,
+                locked: true
+            }));
+            state.drag.set(Some(DragState {
+                payload: DragPayload::Transition(TransitionKind::Slide),
+                pointer,
+            }));
+            assert!(state.drop_plan().unwrap().label.contains("locked"));
+            let locked = state.editor.borrow().project().clone();
+            state.finish_drag();
+            assert_eq!(state.editor.borrow().project(), &locked);
+            state.drag.set(Some(DragState {
+                payload: DragPayload::Transition(TransitionKind::Fade),
+                pointer: Point { x: 1.0, y: 1.0 },
+            }));
+            assert!(!state.drop_plan().unwrap().valid);
+            state.finish_drag();
+            assert_eq!(state.editor.borrow().project(), &locked);
+        }
+        let state = UiState::new();
+        state.timeline_rect.set(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1128.0,
+            height: 400.0,
+        });
+        assert!(state.edit(Command::ImportMedia(Media {
+            id: 1,
+            path: "sound.wav".into(),
+            kind: MediaKind::Audio,
+            duration_us: Some(1_000_000),
+            has_audio: true
+        })));
+        state.insert_media(1);
+        let target = state.primary_clip().unwrap();
+        let geometry = state.timeline_geometry();
+        let y = (0..400)
+            .find(|y| {
+                geometry
+                    .clip_lane_at(Point {
+                        x: geometry.left() + 2.0,
+                        y: *y as f32,
+                    })
+                    .is_some_and(|i| state.editor.borrow().project().tracks()[i].id == target.0)
+            })
+            .unwrap();
+        state.drag.set(Some(DragState {
+            payload: DragPayload::Transition(TransitionKind::Fade),
+            pointer: Point {
+                x: geometry.left() + 2.0,
+                y: y as f32 + 2.0,
+            },
+        }));
+        let plan = state.drop_plan().unwrap();
+        assert!(!plan.valid);
+        assert!(plan.label.contains("video track"));
+    }
+
+    #[test]
+    fn effect_drop_on_empty_space_does_not_edit_or_select() {
+        let state = UiState::new();
+        state.timeline_rect.set(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1128.0,
+            height: 400.0,
+        });
+        assert!(state.add_title());
+        let selection = state.selected.peek();
+        let before = state.editor.borrow().project().clone();
+        let geometry = state.timeline_geometry();
+        for pointer in [
+            Point {
+                x: geometry.left() + 500.0 * geometry.pixels_per_frame(),
+                y: geometry.top() + 10.0,
+            },
+            Point {
+                x: geometry.left() - 10.0,
+                y: geometry.top() + 10.0,
+            },
+            Point {
+                x: geometry.left() + 10.0 * geometry.pixels_per_frame(),
+                y: 5.0,
+            },
+        ] {
+            state.drag.set(Some(DragState {
+                payload: DragPayload::Effect(EffectKind::Sepia),
+                pointer,
+            }));
+            assert!(!state.drop_plan().unwrap().valid);
+            state.finish_drag();
+            assert_eq!(state.editor.borrow().project(), &before);
+            assert_eq!(state.selected.peek(), selection);
+        }
+        state.undo();
+        assert!(
+            state
+                .editor
+                .borrow()
+                .project()
+                .tracks()
+                .iter()
+                .all(|track| track.clips.is_empty())
+        );
+    }
+
+    #[test]
+    fn gallery_click_requires_a_valid_selected_clip() {
+        let state = UiState::new();
+        state.click_gallery_effect(EffectKind::Sepia);
+        assert_eq!(state.status.peek(), "Select a clip or drag onto one");
+        assert!(!state.editor.borrow().can_undo());
+        assert!(state.add_title());
+        let before = state.editor.borrow().project().clone();
+        state.click_gallery_effect(EffectKind::Sepia);
+        assert_eq!(state.status.peek(), "Select a clip or drag onto one");
+        assert_eq!(state.editor.borrow().project(), &before);
     }
 
     #[test]
@@ -3144,6 +3657,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id,
                 clip: Box::new(Clip {
+                    effect_stack: Vec::new(),
                     playback: crate::timeline::Playback::Forward,
                     effect: None,
                     mask: None,

@@ -4,8 +4,8 @@ use super::controls::{
     draw_glyph, faint, fit, muted, panel, panel_raised, sized_icon_button, surface, text_color,
 };
 use super::edits::ClipRef;
-use super::interaction::Gesture;
-use super::state::Storyboard;
+use super::interaction::{DragPayload, Gesture};
+use super::state::{ClipDetail, Storyboard};
 use super::waveform::WaveformSlice;
 use crate::project::Command;
 use crate::timeline::TrackKind;
@@ -130,6 +130,7 @@ impl ClipLook {
 }
 
 pub(super) struct LaneClip {
+    pub effects: Vec<crate::timeline::effects::EffectKind>,
     pub keyframes: Vec<(u64, crate::timeline::Easing)>,
     pub playback: crate::timeline::Playback,
     pub transition_frames: u64,
@@ -160,6 +161,72 @@ pub(super) struct Lane {
     pub clips: Vec<LaneClip>,
     /// Another track of this kind exists, so this one may be deleted.
     pub removable: bool,
+}
+
+impl LaneClip {
+    fn effect_rect(&self, lane: Rect, geometry: &Geometry) -> Option<Rect> {
+        let (left, right) = geometry.clipped_span(
+            geometry.x(self.start),
+            geometry.x(self.start.saturating_add(self.duration)),
+        )?;
+        let strip = geometry
+            .lanes
+            .iter()
+            .position(|area| *area == lane)
+            .map_or(0.0, |i| geometry.strips[i]);
+        (right - left >= 14.0).then_some(Rect {
+            x: left + 2.0,
+            y: lane.y + lane.height - strip - 22.0,
+            width: right - left - 4.0,
+            height: 19.0,
+        })
+    }
+
+    fn effect_chips(&self, area: Rect) -> Vec<(crate::timeline::effects::EffectKind, Rect)> {
+        let mut x = area.x + 3.0;
+        let mut chips = Vec::new();
+        for &kind in &self.effects {
+            let width = (kind.label().chars().count() as f32 * 5.4 + 14.0)
+                .min(area.x + area.width - x - 2.0);
+            if width < 18.0 {
+                break;
+            }
+            chips.push((
+                kind,
+                Rect {
+                    x,
+                    y: area.y + 2.0,
+                    width,
+                    height: 15.0,
+                },
+            ));
+            x += width + 3.0;
+        }
+        chips
+    }
+
+    fn transition_marker(&self, lane: Rect, geometry: &Geometry, out: bool) -> Option<Rect> {
+        let frames = if out {
+            self.transition_out_frames
+        } else {
+            self.transition_frames
+        };
+        if frames == 0 {
+            return None;
+        }
+        let x = geometry.x(if out {
+            self.start.saturating_add(self.duration)
+        } else {
+            self.start
+        });
+        let left = if out { x - 17.0 } else { x + 1.0 };
+        (left >= geometry.left() && left + 16.0 <= geometry.right()).then_some(Rect {
+            x: left,
+            y: lane.y + 20.0,
+            width: 16.0,
+            height: 14.0,
+        })
+    }
 }
 
 impl Lane {
@@ -394,6 +461,19 @@ impl Geometry {
 
     pub(super) fn in_lanes(&self, point: Point) -> bool {
         point.x <= self.right() && self.lane_at(point.y).is_some()
+    }
+
+    pub(super) fn clip_lane_at(&self, point: Point) -> Option<usize> {
+        if point.x < self.left
+            || point.x >= self.right()
+            || point.y < self.top
+            || point.y >= self.bottom
+        {
+            return None;
+        }
+        self.lanes
+            .iter()
+            .position(|lane| point.y >= lane.y + 2.0 && point.y < lane.y + lane.height - 2.0)
     }
 }
 
@@ -1051,6 +1131,54 @@ impl TimelineView {
             );
         }
         painter.pop_clip();
+        let effect_drag = matches!(
+            self.state.drag.get().map(|drag| drag.payload),
+            Some(DragPayload::Effect(_))
+        );
+        if (!clip.effects.is_empty() || effect_drag && clip.look != ClipLook::Title)
+            && let Some(area) = clip.effect_rect(lane, geometry)
+        {
+            painter.fill_rect(area, panel(), 3.0);
+            if effect_drag {
+                painter.stroke_rect(area, accent(), 1.0, 3.0);
+            }
+            for (kind, chip) in clip.effect_chips(area) {
+                let active = self
+                    .state
+                    .selected_detail
+                    .get()
+                    .is_some_and(|((_, id), detail)| {
+                        id == clip.clip_id && detail == ClipDetail::Effect(kind)
+                    });
+                painter.fill_rect(chip, if active { accent() } else { surface() }, 3.0);
+                painter.fill_text(
+                    chip,
+                    &fit(kind.label(), chip.width - 8.0, 9.0),
+                    text_color(),
+                    9.0,
+                    TextAlign::Center,
+                );
+            }
+        }
+        for out in [false, true] {
+            if let Some(marker) = clip.transition_marker(lane, geometry, out) {
+                let active = self
+                    .state
+                    .selected_detail
+                    .get()
+                    .is_some_and(|((_, id), detail)| {
+                        id == clip.clip_id && detail == ClipDetail::Transition(out)
+                    });
+                painter.fill_rect(marker, if active { accent() } else { STAGE }, 3.0);
+                painter.fill_text(
+                    marker,
+                    if out { "↗" } else { "↘" },
+                    text_color(),
+                    10.0,
+                    TextAlign::Center,
+                );
+            }
+        }
         let outline = if linked {
             let sound = Rect {
                 y: body.y + body.height,
@@ -1390,6 +1518,50 @@ impl Widget for TimelineView {
         let geometry = self.geometry(local(rect));
         let mut children: Vec<creamui::core::BoxedWidget> = Vec::new();
         for (lane, area) in self.lanes.iter().zip(&geometry.lanes) {
+            for clip in &lane.clips {
+                if let Some(strip) = clip.effect_rect(*area, &geometry) {
+                    for (kind, chip) in clip.effect_chips(strip) {
+                        if chip.y < RULER_HEIGHT || chip.y + chip.height > rect.height {
+                            continue;
+                        }
+                        let state = self.state.clone();
+                        let target = (lane.track_id, clip.clip_id);
+                        children.push(Box::new(super::controls::Layer {
+                            style: super::controls::Layer::at(
+                                chip.x,
+                                chip.y,
+                                chip.width,
+                                chip.height,
+                            ),
+                            on_click: Some(Rc::new(move || {
+                                state.select_detail(target, ClipDetail::Effect(kind))
+                            })),
+                            children: Vec::new(),
+                        }));
+                    }
+                }
+                for out in [false, true] {
+                    if let Some(marker) = clip.transition_marker(*area, &geometry, out) {
+                        if marker.y < RULER_HEIGHT || marker.y + marker.height > rect.height {
+                            continue;
+                        }
+                        let state = self.state.clone();
+                        let target = (lane.track_id, clip.clip_id);
+                        children.push(Box::new(super::controls::Layer {
+                            style: super::controls::Layer::at(
+                                marker.x,
+                                marker.y,
+                                marker.width,
+                                marker.height,
+                            ),
+                            on_click: Some(Rc::new(move || {
+                                state.select_detail(target, ClipDetail::Transition(out))
+                            })),
+                            children: Vec::new(),
+                        }));
+                    }
+                }
+            }
             if area.y < RULER_HEIGHT || area.y + 27.0 > rect.height {
                 continue;
             }

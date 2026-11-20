@@ -889,46 +889,6 @@ pub(super) fn enabled_chip(
     )
 }
 
-pub(super) fn playback_choice(
-    label: &str,
-    help: Help,
-    enabled: bool,
-    active: bool,
-    state: &UiState,
-    operation: impl Fn(&UiState) + 'static,
-) -> BoxedWidget {
-    let button_state = state.clone();
-    let mut style = Style::default()
-        .height(28.0)
-        .grow(1.0)
-        .basis(0.0)
-        .flex_row()
-        .align(Align::Center)
-        .justify(Justify::Center);
-    style.min_size.width = Dimension::Length(0.0);
-    let button = Box::new(
-        RawButton::new(style, move || operation(&button_state))
-            .disabled(!enabled)
-            .with_children(vec![text(
-                label,
-                if !enabled {
-                    faint()
-                } else if active {
-                    accent()
-                } else {
-                    muted()
-                },
-                11.0,
-            )])
-            .background(if active { surface_hover() } else { CLEAR })
-            .border(if active { border() } else { CLEAR }, 1.0)
-            .corner_radius(5.0)
-            .hover_style(StateStyle::new().background(surface_hover()))
-            .focus_style(StateStyle::new().outline(accent(), 2.0)),
-    );
-    with_help(button, help, state)
-}
-
 /// A media bin item: click selects it, dragging carries it to the timeline.
 pub(super) fn media_item(
     style: Style,

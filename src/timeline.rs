@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub mod effects;
+
 #[derive(Default, Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Playback {
@@ -114,6 +116,8 @@ pub enum EffectShader {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Clip {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effect_stack: Vec<effects::EffectKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stabilization: Option<Stabilization>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

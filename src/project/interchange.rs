@@ -279,6 +279,7 @@ impl Sequence {
                 };
                 let media = &project.media[media_id];
                 let clip = Clip {
+                    effect_stack: Vec::new(),
                     id: next_clip,
                     start_frame: cut.start,
                     source_start_frame: cut.source,

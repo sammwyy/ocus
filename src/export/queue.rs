@@ -270,6 +270,7 @@ mod tests {
         assert!(editor.apply(Command::InsertClip {
             track_id: 0,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 speed: 1.0,
                 playback: crate::timeline::Playback::Forward,
                 id: 1,

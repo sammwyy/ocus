@@ -60,6 +60,20 @@ background jobs, with same-directory temporary files, sync, and rename for
 atomic writes. Imported media paths are absolute; loaded relative paths resolve
 against the project file's directory, not the working directory. The JSON
 format stays path-agnostic and clears stale linked-audio flags before validation.
+Clips optionally persist ordered `effect_stack` membership in version 1. Legacy
+clips with empty membership derive it from non-default effect parameters on load.
+Legacy derivation skips incompatible entries without clearing their parameters;
+explicitly persisted incompatible membership is rejected.
+`timeline::effects` owns the catalog and compatibility queries over resolved
+clip/track/media targets; `Project` resolves IDs for callers. Membership order is
+display/application order only: preview and export retain their fixed processing
+order and read the existing clip fields. Shared Reverse and Speed kinds appear in
+both catalog categories. A pending Stabilization entry has no analysis yet.
+`ApplyEffect` and `RemoveEffect` are undoable editor commands; custom shader and
+LUT application require a caller-selected path. UI workers remain responsible for
+starting stabilization analysis and storing its result with `SetClipStabilization`.
+Shader kinds replace the single shader slot, Reverse/Freeze replace each other,
+and Freeze removes Speed membership while keeping audio effects dormant.
 On the existing open/recovery worker, the store probes present sources and
 adopts matching-kind metadata only if the repaired project still validates.
 Failed probes and incompatible metadata retain the stored values. Repairs are

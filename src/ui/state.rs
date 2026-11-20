@@ -36,7 +36,22 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Sidebar {
     Media,
+    Effects,
+    Transitions,
     Inspector,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LibraryTab {
+    Media,
+    Effects,
+    Transitions,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClipDetail {
+    Effect(crate::timeline::effects::EffectKind),
+    Transition(bool),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -326,6 +341,7 @@ pub(crate) struct UiState {
     pub tooltip_viewport: Rc<Cell<creamui::Size>>,
     tooltip_keys: Rc<RefCell<HashSet<(&'static str, u64)>>>,
     pub selected: Signal<Vec<ClipRef>>,
+    pub selected_detail: Signal<Option<(ClipRef, ClipDetail)>>,
     pub selected_media: Signal<Option<u64>>,
     pub missing_media: Signal<HashSet<u64>>,
     pub program: Monitor,
@@ -349,8 +365,10 @@ pub(crate) struct UiState {
     pub chroma_gesture: Rc<RefCell<Option<ChromaGesture>>>,
     pub title_gesture: Rc<RefCell<Option<TitleGesture>>>,
     pub effect_drag: Signal<Option<(ClipRef, f32)>>,
-    pub effect_select: creamui::widgets::SelectController,
     pub media_query: TextController,
+    pub library_tab: Signal<LibraryTab>,
+    pub effect_query: TextController,
+    pub effect_scroll: ScrollController,
     pub media_filter: Signal<MediaFilter>,
     pub media_view: Signal<MediaView>,
     pub status: Signal<String>,
@@ -501,6 +519,7 @@ impl UiState {
             tooltip_viewport: Rc::new(Cell::new(creamui::Size::default())),
             tooltip_keys: Rc::new(RefCell::new(HashSet::new())),
             selected: Signal::new(Vec::new()),
+            selected_detail: Signal::new(None),
             selected_media: Signal::new(None),
             missing_media: Signal::new(HashSet::new()),
             program: Monitor::new(),
@@ -524,8 +543,10 @@ impl UiState {
             chroma_gesture: Rc::new(RefCell::new(None)),
             title_gesture: Rc::new(RefCell::new(None)),
             effect_drag: Signal::new(None),
-            effect_select: creamui::widgets::SelectController::new(0),
             media_query: TextController::default(),
+            library_tab: Signal::new(LibraryTab::Media),
+            effect_query: TextController::default(),
+            effect_scroll: ScrollController::default(),
             media_filter: Signal::new(MediaFilter::All),
             media_view: Signal::new(MediaView::Grid),
             status: Signal::new("Ready · Project not saved".into()),
@@ -872,6 +893,28 @@ impl UiState {
 
     fn refresh_after_edit(&self, status: &str) {
         self.effect_drag.set(None);
+        if let Some((target, detail)) = self.selected_detail.peek() {
+            let editor = self.editor.borrow();
+            let present = editor
+                .project()
+                .tracks()
+                .iter()
+                .find(|track| track.id == target.0)
+                .and_then(|track| track.clips.iter().find(|clip| clip.id == target.1))
+                .is_some_and(|clip| match detail {
+                    ClipDetail::Effect(kind) => clip.effect_stack.contains(&kind),
+                    ClipDetail::Transition(out) => {
+                        if out {
+                            clip.transition_out.is_some()
+                        } else {
+                            clip.transition.is_some()
+                        }
+                    }
+                });
+            if !present {
+                self.selected_detail.set(None);
+            }
+        }
         {
             let editor = self.editor.borrow();
             self.clipboard
@@ -1673,7 +1716,15 @@ impl UiState {
     }
 
     pub fn select_clip(&self, selection: Option<ClipRef>) {
+        self.selected_detail.set(None);
         self.select_clips(selection.into_iter().collect());
+    }
+
+    pub fn select_detail(&self, target: ClipRef, detail: ClipDetail) {
+        self.select_clip(Some(target));
+        self.selected_detail.set(Some((target, detail)));
+        self.inspector_scroll.set(0.0);
+        self.sidebar.set(Sidebar::Inspector);
     }
 
     fn sync_title_controllers(&self) {
@@ -1800,11 +1851,13 @@ impl UiState {
         selection.reverse();
         let previous = self.primary_clip();
         if self.selected.peek() == selection {
+            self.selected_detail.set(None);
             return;
         }
         self.clear_title_gesture();
         self.cancel_mask_drag();
         self.title_picker.set_open(false);
+        self.selected_detail.set(None);
         self.selected.set(selection);
         let primary = self.primary_clip();
         if primary.is_some() {
@@ -1880,6 +1933,7 @@ impl UiState {
         }
         self.clear_title_gesture();
         self.title_picker.set_open(false);
+        self.selected_detail.set(None);
         self.selected.set(Vec::new());
         self.selected_media.set(Some(media_id));
         self.reset_source();
@@ -2324,6 +2378,7 @@ impl UiState {
             self.program.slot.clear(window);
             self.source.slot.clear(window);
         }
+        self.selected_detail.set(None);
         self.selected.set(Vec::new());
         self.selected_media.set(None);
         self.program.position.set(0);
@@ -2687,93 +2742,108 @@ impl UiState {
     }
 
     pub fn choose_effect(&self, track_id: u64, clip_id: u64) {
-        if self.busy.peek() {
-            return;
-        }
-        let Some(app) = self.app.borrow().clone() else {
-            return;
-        };
-        let Some(path) = FileDialog::new()
-            .set_title("Choose a WGSL effect")
-            .add_filter("WGSL shader", &["wgsl"])
-            .pick_file()
-        else {
-            return;
-        };
-        self.busy.set(true);
-        self.status.set("Checking effect shader…".into());
-        let revision = self.revision.peek();
-        let state = self.clone();
-        app.spawn_background(
-            move || {
-                let shader = crate::timeline::EffectShader::File(path);
-                crate::media::effects::validate(&shader).map(|_| shader)
-            },
-            move |result| {
-                state.busy.set(false);
-                match result {
-                    Ok(shader) if state.revision.peek() == revision => {
-                        state.edit(Command::SetClipEffect {
-                            track_id,
-                            clip_id,
-                            effect: Some(crate::timeline::Effect {
-                                shader,
-                                amount: 1.0,
-                            }),
-                        });
-                    }
-                    Ok(_) => state
-                        .status
-                        .set("Effect selection cancelled: project changed".into()),
-                    Err(error) => {
-                        state.show_file_error("Could not load effect shader", error.clone());
-                        state.status.set(error);
-                    }
-                }
-            },
+        self.choose_effect_file(
+            track_id,
+            clip_id,
+            crate::timeline::effects::EffectKind::CustomShader,
         );
     }
 
     pub fn choose_lut(&self, track_id: u64, clip_id: u64) {
+        self.choose_effect_file(
+            track_id,
+            clip_id,
+            crate::timeline::effects::EffectKind::ColorLut,
+        );
+    }
+
+    fn choose_effect_file(
+        &self,
+        track_id: u64,
+        clip_id: u64,
+        kind: crate::timeline::effects::EffectKind,
+    ) {
         if self.busy.peek() {
             return;
         }
         let Some(app) = self.app.borrow().clone() else {
             return;
         };
-        let Some(path) = FileDialog::new()
-            .set_title("Choose a color LUT")
-            .add_filter("Cube color LUT", &["cube"])
-            .pick_file()
-        else {
-            return;
-        };
         self.busy.set(true);
-        self.status.set("Checking color LUT…".into());
+        self.status.set(format!("Choose {}…", kind.label()));
         let revision = self.revision.peek();
         let state = self.clone();
         app.spawn_background(
-            move || crate::media::lut::Lut::load(&path).map(|_| path),
-            move |result| {
-                state.busy.set(false);
-                match result {
-                    Ok(path) if state.revision.peek() == revision => {
-                        state.edit(Command::SetClipLut {
-                            track_id,
-                            clip_id,
-                            path: Some(path),
-                        });
-                    }
-                    Ok(_) => state
-                        .status
-                        .set("LUT selection cancelled: project changed".into()),
-                    Err(error) => {
-                        state.show_file_error("Could not load color LUT", error.clone());
-                        state.status.set(error);
-                    }
-                }
+            move || {
+                load_effect_file(kind, || {
+                    let (title, filter, extension) =
+                        if kind == crate::timeline::effects::EffectKind::CustomShader {
+                            ("Choose a WGSL effect", "WGSL shader", "wgsl")
+                        } else {
+                            ("Choose a color LUT", "Cube color LUT", "cube")
+                        };
+                    FileDialog::new()
+                        .set_title(title)
+                        .add_filter(filter, &[extension])
+                        .pick_file()
+                })
             },
+            move |result| state.finish_effect_file(revision, track_id, clip_id, kind, result),
         );
+    }
+
+    pub(super) fn finish_effect_file(
+        &self,
+        revision: u64,
+        track_id: u64,
+        clip_id: u64,
+        kind: crate::timeline::effects::EffectKind,
+        result: Result<Option<PathBuf>, String>,
+    ) {
+        use crate::timeline::effects::EffectKind;
+        self.busy.set(false);
+        match result {
+            Ok(Some(path)) if self.revision.peek() == revision => {
+                let applied = self
+                    .editor
+                    .borrow()
+                    .project()
+                    .effect_target(track_id, clip_id)
+                    .is_ok_and(|target| target.clip.effect_stack.contains(&kind));
+                let command = if applied && kind == EffectKind::ColorLut {
+                    Command::SetClipLut {
+                        track_id,
+                        clip_id,
+                        path: Some(path),
+                    }
+                } else if applied && kind == EffectKind::CustomShader {
+                    Command::SetClipEffect {
+                        track_id,
+                        clip_id,
+                        effect: Some(crate::timeline::Effect {
+                            shader: crate::timeline::EffectShader::File(path),
+                            amount: 1.0,
+                        }),
+                    }
+                } else {
+                    Command::ApplyEffect {
+                        track_id,
+                        clip_id,
+                        kind,
+                        path: Some(path),
+                    }
+                };
+                self.edit(command);
+            }
+            Ok(Some(_)) => self
+                .status
+                .set("Effect selection cancelled: project changed".into()),
+            Ok(None) => self.status.set("Effect selection cancelled".into()),
+            Err(error) => {
+                self.show_file_error("Could not load effect", error.clone());
+                self.status.set(error);
+            }
+        }
     }
 
     pub fn open_dialog(&self) {
@@ -4450,6 +4520,25 @@ fn import_summary(imported: usize, total: usize, errors: &[(PathBuf, String)]) -
     }
 }
 
+pub(super) fn load_effect_file(
+    kind: crate::timeline::effects::EffectKind,
+    pick: impl FnOnce() -> Option<PathBuf>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(path) = pick() else {
+        return Ok(None);
+    };
+    match kind {
+        crate::timeline::effects::EffectKind::CustomShader => {
+            crate::media::effects::validate(&crate::timeline::EffectShader::File(path.clone()))?;
+        }
+        crate::timeline::effects::EffectKind::ColorLut => {
+            crate::media::lut::Lut::load(&path)?;
+        }
+        _ => return Err("This effect does not use a file".into()),
+    }
+    Ok(Some(path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5407,6 +5496,7 @@ mod tests {
             assert!(state.edit(Command::InsertClip {
                 track_id: 0,
                 clip: Box::new(Clip {
+                    effect_stack: Vec::new(),
                     playback: crate::timeline::Playback::Forward,
                     effect: None,
                     mask: None,
@@ -6366,6 +6456,7 @@ mod tests {
         assert!(state.edit(Command::InsertClip {
             track_id: 2,
             clip: Box::new(Clip {
+                effect_stack: Vec::new(),
                 playback: crate::timeline::Playback::Forward,
                 effect: None,
                 mask: None,

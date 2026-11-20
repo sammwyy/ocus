@@ -6508,7 +6508,9 @@ fn about_settings(state: &UiState, width: f32) -> BoxedWidget {
                 Box::new(
                     Flex::column()
                         .child(about_row("Version", env!("CARGO_PKG_VERSION"), width))
-                        .child(about_row("Commit", env!("OCUS_COMMIT"), width))
+                        .child(about_row("Commit", env!("OCUS_COMMIT_SHORT"), width))
+                        .child(about_row("Branch", env!("OCUS_BRANCH"), width))
+                        .child(about_row("Channel", env!("OCUS_CHANNEL"), width))
                         .child(about_row("Author", env!("CARGO_PKG_AUTHORS"), width)),
                 ),
                 width,
@@ -6518,6 +6520,15 @@ fn about_settings(state: &UiState, width: f32) -> BoxedWidget {
                 Box::new(append(Flex::column().gap(2.0), links)),
                 width,
             ))
+            .child(Box::new(
+                RawButton::new(Style::default().padding_xy(8.0, 8.0), {
+                    let state = state.clone();
+                    move || state.check_for_updates()
+                })
+                .disabled(state.update_check_running.get())
+                .with_children(vec![text("Check for updates", accent(), 12.0)]),
+            ))
+            .child(text(state.update_check_result.get(), muted(), 11.0))
             .child(
                 if state.status.get().starts_with("Could not open browser:") {
                     text(state.status.get(), muted(), 11.0)
@@ -10620,6 +10631,48 @@ mod tests {
     }
 
     #[test]
+    fn about_update_check_shows_progress_and_result() {
+        let state = UiState::new();
+        let viewport = Size {
+            width: 750.0,
+            height: 700.0,
+        };
+        creamui::reactive::with_context_scope(|| {
+            creamui::reactive::provide_context(creamui::ThemeProvider::new(creamui::Theme::dark()));
+            for (running, result) in [
+                (false, ""),
+                (true, "Checking for updates…"),
+                (false, "Up to date: nightly aaaaaaa."),
+                (false, "GitHub rate limit reached, try again later."),
+            ] {
+                state.update_check_running.set(running);
+                state.update_check_result.set(result.into());
+                let mut painter = TestPainter::default();
+                let scene =
+                    Renderer::new().render(about_settings(&state, 500.0), viewport, &mut painter);
+                let rect = painter
+                    .bounds
+                    .iter()
+                    .find(|(label, _)| label == "Check for updates")
+                    .unwrap()
+                    .1;
+                assert_eq!(
+                    scene
+                        .hit_test(Point {
+                            x: rect.x + rect.width / 2.0,
+                            y: rect.y + rect.height / 2.0
+                        })
+                        .is_some(),
+                    !running
+                );
+                if !result.is_empty() {
+                    assert!(painter.labels.iter().any(|label| label == result));
+                }
+            }
+        });
+    }
+
+    #[test]
     fn settings_about_shows_build_metadata_and_clickable_project_links() {
         let state = UiState::new();
         state.open_settings();
@@ -10652,7 +10705,10 @@ mod tests {
             "Version",
             env!("CARGO_PKG_VERSION"),
             "Commit",
-            env!("OCUS_COMMIT"),
+            env!("OCUS_COMMIT_SHORT"),
+            "Branch",
+            "Channel",
+            env!("OCUS_CHANNEL"),
             "Author",
             env!("CARGO_PKG_AUTHORS"),
             "Source code",

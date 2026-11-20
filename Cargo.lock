@@ -2237,6 +2237,7 @@ dependencies = [
  "nnnoiseless",
  "rfd",
  "rodio",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

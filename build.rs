@@ -25,6 +25,16 @@ fn git_output(args: &[&str]) -> Option<String> {
 }
 
 fn embed_commit() {
+    for variable in [
+        "OCUS_CHANNEL",
+        "GITHUB_REF_NAME",
+        "GITHUB_REF_TYPE",
+        "GITHUB_BASE_REF",
+        "CI",
+        "PROFILE",
+    ] {
+        println!("cargo:rerun-if-env-changed={variable}");
+    }
     if let Some(head) = git_output(&["rev-parse", "--git-path", "HEAD"]) {
         println!("cargo:rerun-if-changed={head}");
     }
@@ -37,6 +47,37 @@ fn embed_commit() {
         .filter(|hash| hash.len() == 40 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
         .unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=OCUS_COMMIT={commit}");
+    println!(
+        "cargo:rustc-env=OCUS_COMMIT_SHORT={}",
+        &commit[..commit.len().min(7)]
+    );
+    let branch = env::var("GITHUB_BASE_REF")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| env::var("GITHUB_REF_NAME").ok())
+        .or_else(|| git_output(&["symbolic-ref", "--short", "-q", "HEAD"]))
+        .unwrap_or_else(|| "unknown".into());
+    let channel = env::var("OCUS_CHANNEL")
+        .ok()
+        .filter(|s| matches!(s.as_str(), "stable" | "nightly" | "indev"))
+        .unwrap_or_else(|| {
+            if env::var("CI").as_deref() != Ok("true")
+                || env::var("PROFILE").as_deref() != Ok("release")
+            {
+                return "indev".into();
+            }
+            if env::var("GITHUB_REF_TYPE").as_deref() == Ok("tag") && branch.starts_with('v') {
+                return "stable".into();
+            }
+            match branch.as_str() {
+                "main" | "stable" => "stable",
+                "dev" | "development" | "nightly" => "nightly",
+                _ => "indev",
+            }
+            .into()
+        });
+    println!("cargo:rustc-env=OCUS_BRANCH={branch}");
+    println!("cargo:rustc-env=OCUS_CHANNEL={channel}");
 }
 
 fn ffmpeg_bin_dir() -> Option<PathBuf> {

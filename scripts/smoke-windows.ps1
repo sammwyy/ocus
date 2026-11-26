@@ -1,4 +1,4 @@
-param([string]$Packages = 'target/release', [string]$Version = '0.1.0')
+param([string]$Packages = 'target/release', [string]$Version = '0.1.1')
 $ErrorActionPreference = 'Stop'
 $install = Join-Path $env:LOCALAPPDATA 'Ocus-installer-smoke'
 if (Test-Path $install) { throw "Refusing to replace $install" }
@@ -13,7 +13,7 @@ try {
     $process = Start-Process "$install/ocus.exe" -ArgumentList '--version' -RedirectStandardOutput $stdout -Wait -PassThru
     $output = (Get-Content $stdout -Raw).Trim()
     Write-Output $output
-    if ($process.ExitCode -ne 0 -or $output -notmatch "^ocus $([regex]::Escape($Version)) \([0-9a-f]{7}\)$") { throw 'Installed version smoke failed' }
+    if ($process.ExitCode -ne 0 -or $output -notmatch "^ocus $([regex]::Escape($Version)) \([0-9a-f]{7}; [^;]+; (stable|nightly|indev)\)$") { throw 'Installed version smoke failed' }
     if (!(Test-Path $shortcut)) { throw 'Start Menu shortcut missing' }
     if (!(Get-ChildItem $install -Filter '*.dll')) { throw 'FFmpeg runtime DLLs missing' }
 } finally {

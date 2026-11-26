@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 packages=$(cd "${1:-target/release}" && pwd)
-expected=${2:-0.1.0}
+expected=${2:-0.1.1}
 work=$(mktemp -d)
 app=/Applications/Ocus.app
 test ! -e "$app" || { echo 'Refusing to replace an existing Ocus installation' >&2; exit 1; }
@@ -20,7 +20,7 @@ hdiutil detach "$work/mount"
 mounted=false
 output=$("$app/Contents/MacOS/ocus" --version)
 printf '%s\n' "$output"
-printf '%s\n' "$output" | grep -E "^ocus $expected \([0-9a-f]{7}\)$"
+printf '%s\n' "$output" | grep -E "^ocus $expected \([0-9a-f]{7}; [^;]+; (stable|nightly|indev)\)$"
 test -f "$app/Contents/Info.plist"
 test -n "$(find "$app/Contents/Resources" -name '*.icns' -print -quit)"
 rm -rf "$app"

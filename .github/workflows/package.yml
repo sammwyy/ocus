@@ -2,26 +2,35 @@ name: Package installers
 
 on:
   push:
-    branches: [main]
+    branches: [main, nightly]
     tags: ['v*']
   pull_request:
+    branches: [main, nightly]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  setup:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.value }}
+    steps:
+      - id: matrix
+        env:
+          FULL: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref_name == 'main' || github.base_ref == 'main' }}
+        run: |
+          if [ "$FULL" = true ]; then
+            echo 'value={"include":[{"os":"ubuntu-22.04","formats":"deb,appimage"},{"os":"macos-15","formats":"app,dmg"},{"os":"windows-2022","formats":"nsis"}]}' >> "$GITHUB_OUTPUT"
+          else
+            echo 'value={"include":[{"os":"ubuntu-22.04","formats":"deb,appimage"}]}' >> "$GITHUB_OUTPUT"
+          fi
   package:
+    needs: setup
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-22.04
-            formats: deb,appimage
-          - os: macos-15
-            formats: app,dmg
-          - os: windows-2022
-            formats: nsis
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -72,3 +81,26 @@ jobs:
             target/release/*.AppImage
             target/release/*.dmg
             target/release/*setup.exe
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ocus-*
+          merge-multiple: true
+          path: release
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        working-directory: release
+        run: |
+          sha256sum ./* > SHA256SUMS.txt
+          args=()
+          if [[ "$TAG" == *-* ]]; then args+=(--prerelease); fi
+          gh release create "$TAG" --verify-tag --generate-notes "${args[@]}" ./*

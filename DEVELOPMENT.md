@@ -15,6 +15,15 @@ worker stream API. Do not replace it with a sibling checkout.
 
 ## Common prerequisites
 
+Build metadata includes the version, commit, branch and update channel. Local
+builds (including `cargo run`) use `indev`. CI release-profile builds map
+`main`/`stable` and `v*` tags to `stable`, and `dev`/`development`/`nightly` to
+`nightly`; unknown branches remain `indev`. PR builds use the target branch.
+`OCUS_CHANNEL=stable|nightly|indev` explicitly overrides this rule.
+Stable checks compare the latest GitHub release version; nightly checks compare
+the nightly branch commit. Development checks show the remote nightly head for
+information only. Checks are manual and require a connection to GitHub.
+
 - Install a Rust toolchain with [rustup](https://rustup.rs/). Rust **1.85 or
   newer** is required for edition 2024; the project is tested here with stable
   Rust 1.97.1. Install the `rustfmt` and `clippy` components.

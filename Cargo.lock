@@ -2228,7 +2228,7 @@ dependencies = [
 
 [[package]]
 name = "ocus"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "creamui",
  "directories",
@@ -2237,6 +2237,7 @@ dependencies = [
  "nnnoiseless",
  "rfd",
  "rodio",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

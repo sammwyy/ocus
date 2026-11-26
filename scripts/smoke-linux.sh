@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 packages=$(realpath "${1:-target/release}")
-expected=${2:-0.1.0}
+expected=${2:-0.1.1}
 work=$(mktemp -d)
 installed=false
 cleanup() {
@@ -12,7 +12,7 @@ trap cleanup EXIT HUP INT TERM
 check_version() {
     output=$(env -u DISPLAY -u WAYLAND_DISPLAY "$1" --version)
     printf '%s\n' "$output"
-    printf '%s\n' "$output" | grep -E "^ocus $expected \([0-9a-f]{7}\)$"
+    printf '%s\n' "$output" | grep -E "^ocus $expected \([0-9a-f]{7}; [^;]+; (stable|nightly|indev)\)$"
 }
 if dpkg-query -W -f='${Status}' ocus 2>/dev/null | grep -q 'ok installed'; then
     echo 'Refusing to replace an existing Ocus installation' >&2
